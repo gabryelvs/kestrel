@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main, "stage-*"]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -18,8 +18,8 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy -p kestrel-core -p kestrel-probe -- -D warnings
-      - run: cargo test -p kestrel-core -p kestrel-probe
+      - run: cargo clippy -p kestrel-core -p kestrel-probe --locked -- -D warnings
+      - run: cargo test -p kestrel-core -p kestrel-probe --locked
 
   ui:
     name: UI tests
@@ -52,10 +52,10 @@ jobs:
           node-version: lts/*
           cache: npm
           cache-dependency-path: app/package-lock.json
-      - run: cargo clippy -p kestrel-probe -- -D warnings
-      - run: cargo test -p kestrel-core -p kestrel-probe
+      - run: cargo clippy -p kestrel-probe --locked -- -D warnings
+      - run: cargo test -p kestrel-core -p kestrel-probe --locked
       - name: Probe this runner (smoke test)
-        run: cargo run -q -p kestrel-probe --bin kestrel-probe -- --pretty > probe-report.json
+        run: cargo run --locked -q -p kestrel-probe --bin kestrel-probe -- --pretty | Tee-Object -FilePath probe-report.json
       - run: npm ci
         working-directory: app
       - run: npx tauri build
@@ -65,6 +65,11 @@ jobs:
         run: |
           $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("target/release/Kestrel.exe"))
           if (-not $text.Contains('level="requireAdministrator"')) { throw "Kestrel.exe is missing the requireAdministrator manifest" }
+      - name: Check the installer was built
+        shell: pwsh
+        run: |
+          $installer = "target/release/bundle/nsis/Kestrel_0.1.0_x64-setup.exe"
+          if (-not (Test-Path $installer)) { throw "$installer was not built" }
       - uses: actions/upload-artifact@v7
         with:
           name: kestrel-windows
