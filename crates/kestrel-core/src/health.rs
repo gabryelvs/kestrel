@@ -401,7 +401,15 @@ fn on_battery(s: &SystemSnapshot) -> Finding {
 
 const HIGH_PERFORMANCE: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
 const ULTIMATE_PERFORMANCE: &str = "e9a42b02-d5df-448d-aa00-03f14749eb61";
+const BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
+const POWER_SAVER: &str = "a1841308-3541-4fab-bc81-f71556f20b4a";
 
+/// Lower-case words in a plan's name that say it is a fast one: the built-in names, and Kestrel's own plan.
+const PERFORMANCE_NAMES: [&str; 3] = ["high performance", "ultimate performance", "kestrel"];
+
+/// Only the built-in Balanced and Power saver plans are problems. `powercfg -duplicatescheme` (the usual way to get
+/// Ultimate Performance on Home and Pro) gives the copy a new GUID, and OEM, AMD and Bitsum plans have their own, so
+/// a plan Kestrel doesn't know is reported but not counted. Names follow the user's language; GUIDs never change.
 fn power_plan(s: &SystemSnapshot) -> Finding {
     let c = Check {
         id: "power-plan",
@@ -412,13 +420,22 @@ fn power_plan(s: &SystemSnapshot) -> Finding {
         return c.unknown("Couldn't read your power plan", "");
     };
     let guid = plan.guid.to_ascii_lowercase();
-    if guid == HIGH_PERFORMANCE || guid == ULTIMATE_PERFORMANCE || plan.name.contains("Kestrel") {
+    let name = plan.name.to_ascii_lowercase();
+    if guid == HIGH_PERFORMANCE
+        || guid == ULTIMATE_PERFORMANCE
+        || PERFORMANCE_NAMES.iter().any(|word| name.contains(word))
+    {
         c.pass(format!("Power plan: {}", plan.name), "")
-    } else {
+    } else if guid == BALANCED || guid == POWER_SAVER {
         c.problem(
             format!("Power plan is {}", plan.name),
-            "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 3; until then you can pick High performance in Control Panel → Power Options.",
+            "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 3. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead.",
             Fix::LaterStage { stage: 3 },
+        )
+    } else {
+        c.info(
+            format!("Custom power plan: {}", plan.name),
+            "Kestrel can't tell how this plan is tuned, so it isn't counted as a problem. If it favours battery life over speed, High performance is the safer choice for VALORANT.",
         )
     }
 }
@@ -1083,6 +1100,89 @@ mod tests {
         assert_eq!(
             get(&run_health_check(&s, today()), "valorant-gpu").status,
             Status::Pass
+        );
+    }
+
+    fn power_plan_finding(guid: &str, name: &str) -> Finding {
+        let mut s = owner_pc_fixture();
+        s.windows.power_plan = Some(PowerPlan {
+            guid: guid.into(),
+            name: name.into(),
+        });
+        get(&run_health_check(&s, today()), "power-plan").clone()
+    }
+
+    #[test]
+    fn a_duplicated_ultimate_performance_plan_passes() {
+        // `powercfg -duplicatescheme` gives the copy a new GUID and keeps the name.
+        let plan = power_plan_finding(
+            "5b1d3a84-6b3c-4a52-9a77-3f1c2d8e9b10",
+            "Ultimate Performance",
+        );
+        assert_eq!(plan.status, Status::Pass);
+        assert_eq!(plan.title, "Power plan: Ultimate Performance");
+    }
+
+    #[test]
+    fn performance_plans_pass_by_guid_or_by_name() {
+        let random = "5b1d3a84-6b3c-4a52-9a77-3f1c2d8e9b10";
+        for (guid, name) in [
+            // Windows names its plans in the user's language, but their GUIDs never change.
+            ("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "Alto desempenho"),
+            ("E9A42B02-D5DF-448D-AA00-03F14749EB61", "Desempenho máximo"),
+            (random, "HIGH PERFORMANCE"),
+            (random, "My high performance plan"),
+            (random, "ultimate performance (copy)"),
+            (random, "Kestrel"),
+            (random, "KESTREL Competitive"),
+        ] {
+            assert_eq!(
+                power_plan_finding(guid, name).status,
+                Status::Pass,
+                "{guid} {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_power_plan_is_info_not_a_problem() {
+        let plan = power_plan_finding("0f2b1f6e-3c0d-4e5a-8d6b-9a1e7c4b2d33", "ASUS Silent");
+        assert_eq!(plan.status, Status::Info);
+        assert_eq!(plan.title, "Custom power plan: ASUS Silent");
+        assert_eq!(plan.fix, Fix::Nothing);
+    }
+
+    #[test]
+    fn only_the_built_in_balanced_and_power_saver_plans_are_problems() {
+        for (guid, name) in [
+            ("381b4222-f694-41f0-9685-ff5bb260df2e", "Balanced"),
+            ("A1841308-3541-4FAB-BC81-F71556F20B4A", "Power saver"),
+        ] {
+            let plan = power_plan_finding(guid, name);
+            assert_eq!(
+                (plan.status, plan.severity),
+                (Status::Problem, Severity::Medium),
+                "{name}"
+            );
+            assert_eq!(plan.title, format!("Power plan is {name}"));
+            assert_eq!(plan.fix, Fix::LaterStage { stage: 3 });
+            // Laptops with Modern Standby only offer Balanced, so the detail names the Power mode setting too.
+            assert!(
+                plan.detail
+                    .contains("Settings → System → Power → Power mode → Best performance"),
+                "{}",
+                plan.detail
+            );
+        }
+    }
+
+    #[test]
+    fn no_readable_power_plan_is_unknown() {
+        let mut s = owner_pc_fixture();
+        s.windows.power_plan = None;
+        assert_eq!(
+            get(&run_health_check(&s, today()), "power-plan").status,
+            Status::Unknown
         );
     }
 
