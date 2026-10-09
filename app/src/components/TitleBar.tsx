@@ -12,7 +12,7 @@ async function windowAction(action: 'minimize' | 'toggleMaximize' | 'close') {
   await getCurrentWindow()[action]();
 }
 
-export function TitleBar({ tab, onTab, admin }: { tab: Tab; onTab: (tab: Tab) => void; admin: boolean }) {
+export function TitleBar({ tab, onTab, admin }: { tab: Tab; onTab: (tab: Tab) => void; admin: boolean | null }) {
   return (
     <header className="titlebar" data-tauri-drag-region="deep">
       <div className="brand">
@@ -27,8 +27,12 @@ export function TitleBar({ tab, onTab, admin }: { tab: Tab; onTab: (tab: Tab) =>
         ))}
       </nav>
       <span className="admin num">
-        {admin ? <IconShieldCheck size={14} color="var(--accent)" aria-hidden /> : <IconShieldOff size={14} aria-hidden />}
-        {admin ? strings.titleBar.admin : strings.titleBar.notAdmin}
+        {admin !== null && (
+          <>
+            {admin ? <IconShieldCheck size={14} color="var(--accent)" aria-hidden /> : <IconShieldOff size={14} aria-hidden />}
+            {admin ? strings.titleBar.admin : strings.titleBar.notAdmin}
+          </>
+        )}
       </span>
       <div className="window-buttons">
         <button aria-label={strings.titleBar.minimize} onClick={() => void windowAction('minimize')}>

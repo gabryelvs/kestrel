@@ -1,0 +1,19 @@
+.page { max-width: 880px; margin: 0 auto; display: grid; gap: 10px; }
+.page-head { display: grid; gap: 4px; padding: 6px 2px 4px; }
+.page-head h1 { font-size: 24px; font-weight: 600; }
+.notice { background: var(--panel-2); color: var(--warn); padding: 8px 12px; font-size: 12px; }
+.group h2 { margin-bottom: 2px; }
+.check { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.group h2 + .check { border-top: 0; }
+.check-title { font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.check-action { align-self: start; text-align: right; max-width: 220px; }
+.status-icon { padding-top: 2px; }
+.steps { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
+.guide { display: grid; gap: 8px; }
+.guide h2 { font-size: 16px; font-weight: 600; }
+.guide-focus { box-shadow: inset 3px 0 0 var(--accent); }
+.caution { font-size: 12.5px; color: var(--warn); }
+.first-run { flex: 1; display: grid; place-items: center; }
+.first-run .panel { width: min(560px, 92%); padding: 28px 32px; display: grid; gap: 12px; }
+.first-run h1 { font-size: 26px; font-weight: 600; }
+.scan-step { font-family: var(--font-num); color: var(--accent); }
