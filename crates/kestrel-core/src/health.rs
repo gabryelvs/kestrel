@@ -208,10 +208,11 @@ fn display_refresh(s: &SystemSnapshot) -> Finding {
         category: Category::Display,
         severity: Severity::High,
     };
+    // Win32 reports 0 or 1 Hz for "hardware default", which is not a real rate.
     let real: Vec<&DisplayInfo> = s
         .displays
         .iter()
-        .filter(|d| !d.is_virtual && d.max_hz > 0)
+        .filter(|d| !d.is_virtual && d.max_hz > 0 && d.current_hz > 1)
         .collect();
     if real.is_empty() {
         return c.unknown(
@@ -319,7 +320,7 @@ fn valorant_gpu(s: &SystemSnapshot) -> Finding {
             "Windows didn't report a real graphics card.",
         );
     };
-    if s.machine.form_factor != FormFactor::Laptop && !main.is_integrated {
+    if s.machine.form_factor == FormFactor::Desktop && !main.is_integrated {
         let primary = s.displays.iter().find(|d| d.is_primary && !d.is_virtual);
         let on_integrated = primary.is_some_and(|d| {
             s.gpus
@@ -334,6 +335,13 @@ fn valorant_gpu(s: &SystemSnapshot) -> Finding {
             );
         }
         return c.pass(format!("VALORANT runs on your {}", main.name), "");
+    }
+    // Without a form factor, a hybrid PC could be a laptop, so the GPU choice stays unknown.
+    if s.machine.form_factor == FormFactor::Unknown && gpu::is_hybrid(&s.gpus) {
+        return c.unknown(
+            "Couldn't tell which graphics chip VALORANT uses",
+            "Windows didn't say whether this PC is a laptop or a desktop.",
+        );
     }
     if !gpu::is_hybrid(&s.gpus) {
         return c.pass(format!("VALORANT runs on your {}", main.name), "");
@@ -648,5 +656,90 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json, r#"{"kind":"bios-guide","topic":"xmp"}"#);
+    }
+
+    #[test]
+    fn unreadable_refresh_rate_is_unknown_not_a_problem() {
+        for current in [0, 1] {
+            let mut s = owner_pc_fixture();
+            s.displays = vec![display(
+                "\\\\.\\DISPLAY1",
+                current,
+                144,
+                true,
+                false,
+                "NVIDIA GeForce RTX 3060 Ti",
+            )];
+            let refresh = get(&run_health_check(&s, today()), "display-refresh").clone();
+            assert_eq!(refresh.status, Status::Unknown, "current_hz {current}");
+        }
+    }
+
+    #[test]
+    fn virtual_display_does_not_count_for_refresh() {
+        let mut s = owner_pc_fixture();
+        s.displays = vec![
+            display(
+                "\\\\.\\DISPLAY1",
+                360,
+                360,
+                true,
+                false,
+                "NVIDIA GeForce RTX 3060 Ti",
+            ),
+            display(
+                "\\\\.\\DISPLAY3",
+                30,
+                240,
+                false,
+                true,
+                "Parsec Virtual Display Adapter",
+            ),
+        ];
+        assert_eq!(
+            get(&run_health_check(&s, today()), "display-refresh").status,
+            Status::Pass
+        );
+    }
+
+    #[test]
+    fn unknown_form_factor_on_a_hybrid_pc_is_unknown_not_a_problem() {
+        let mut s = owner_pc_fixture();
+        s.machine.form_factor = FormFactor::Unknown;
+        s.gpus = vec![
+            gpu(
+                "Intel(R) UHD Graphics 750",
+                GpuVendor::Intel,
+                true,
+                Some("2026-09-01"),
+            ),
+            gpu(
+                "NVIDIA GeForce RTX 3060 Ti",
+                GpuVendor::Nvidia,
+                false,
+                Some("2026-09-15"),
+            ),
+        ];
+        s.displays = vec![display(
+            "\\\\.\\DISPLAY1",
+            60,
+            60,
+            true,
+            false,
+            "Intel(R) UHD Graphics 750",
+        )];
+        let v = get(&run_health_check(&s, today()), "valorant-gpu").clone();
+        assert_eq!(v.status, Status::Unknown);
+        assert_eq!(v.title, "Couldn't tell which graphics chip VALORANT uses");
+    }
+
+    #[test]
+    fn unknown_form_factor_without_hybrid_graphics_passes() {
+        let mut s = owner_pc_fixture();
+        s.machine.form_factor = FormFactor::Unknown;
+        assert_eq!(
+            get(&run_health_check(&s, today()), "valorant-gpu").status,
+            Status::Pass
+        );
     }
 }
