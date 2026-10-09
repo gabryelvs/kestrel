@@ -17,6 +17,8 @@ h1, h2, h3, p { margin: 0; }
 
 .panel { background: var(--panel); padding: 14px 16px; clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut)); }
 .cut-s { clip-path: polygon(var(--cut-s) 0, 100% 0, 100% calc(100% - var(--cut-s)), calc(100% - var(--cut-s)) 100%, 0 100%, 0 var(--cut-s)); }
+.cut-s:focus-visible { outline-offset: -2px; }
+.tab-active:focus-visible, .btn-primary:focus-visible { outline-color: var(--accent-ink); }
 
 .btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; font-size: 13px; font-weight: 500; }
 .btn-primary { background: var(--accent); color: var(--accent-ink); }
@@ -34,7 +36,7 @@ h1, h2, h3, p { margin: 0; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: 0.08em; }
 .tabs { display: flex; gap: 2px; margin-left: 8px; }
 .tab { padding: 5px 10px; font-size: 12.5px; letter-spacing: 0.04em; color: var(--muted); }
-.tab:hover { color: var(--text); }
+.tab:not(.tab-active):hover { color: var(--text); }
 .tab-active { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .admin { margin-left: auto; display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
 .window-buttons { display: flex; align-self: stretch; }

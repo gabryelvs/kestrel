@@ -36,6 +36,7 @@ export function cpuLabel(s: SystemSnapshot): string {
   const name = s.cpu.name
     .replace(/\((R|TM)\)/gi, '')
     .replace(/@.*$/, '')
+    .replace(/\s+CPU\b/i, '')
     .replace(/^\d+(st|nd|rd|th) Gen\s+/i, '')
     .replace(/\s+\d+-Core Processor$/i, '')
     .replace(/\s+/g, ' ')

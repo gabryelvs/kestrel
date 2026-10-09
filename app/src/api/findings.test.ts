@@ -27,6 +27,7 @@ describe('findings helpers', () => {
 
   it('formats hardware labels', () => {
     expect(cpuLabel(report.snapshot)).toBe('Intel Core i9-11900K · 8C/16T');
+    expect(cpuLabel({ ...report.snapshot, cpu: { ...report.snapshot.cpu, name: 'Intel(R) Core(TM) i5-9400F CPU @ 2.90GHz', cores: 6, threads: 6 } })).toBe('Intel Core i5-9400F · 6C/6T');
     expect(ramLabel(report.snapshot)).toBe('32 GB DDR4 · 3600 MT/s');
     expect(displayLabel(report.snapshot)).toBe('360 Hz · 1920×1080');
   });

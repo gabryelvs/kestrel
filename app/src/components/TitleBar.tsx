@@ -14,8 +14,8 @@ async function windowAction(action: 'minimize' | 'toggleMaximize' | 'close') {
 
 export function TitleBar({ tab, onTab, admin }: { tab: Tab; onTab: (tab: Tab) => void; admin: boolean }) {
   return (
-    <header className="titlebar" data-tauri-drag-region>
-      <div className="brand" data-tauri-drag-region>
+    <header className="titlebar" data-tauri-drag-region="deep">
+      <div className="brand">
         <Logo size={16} />
         <span>{strings.app.name}</span>
       </div>
