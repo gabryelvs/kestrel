@@ -3,5 +3,7 @@
 pub mod gpu;
 pub mod health;
 pub mod ram;
+pub mod score;
 pub mod snapshot;
+pub mod valorant;
 pub use snapshot::*;

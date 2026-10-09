@@ -69,6 +69,7 @@ pub struct Finding {
 }
 
 /// A check's fixed identity; `pass`/`problem`/`unknown`/`info` fill in the result.
+#[derive(Clone, Copy)]
 struct Check {
     id: &'static str,
     category: Category,
@@ -102,6 +103,9 @@ impl Check {
     fn unknown(&self, title: impl Into<String>, detail: impl Into<String>) -> Finding {
         self.result(Status::Unknown, title, detail, Fix::Nothing)
     }
+    fn info(&self, title: impl Into<String>, detail: impl Into<String>) -> Finding {
+        self.result(Status::Info, title, detail, Fix::Nothing)
+    }
 }
 
 pub(crate) fn steps(items: &[&str]) -> Fix {
@@ -125,6 +129,25 @@ pub fn run_health_check(s: &SystemSnapshot, today: NaiveDate) -> Vec<Finding> {
         gpu_driver_age(s, today),
         valorant_gpu(s),
         on_battery(s),
+        power_plan(s),
+        game_mode(s),
+        background_recording(s),
+        pending_restart(s),
+        windows_build(s),
+        valorant_drive(s),
+        drive_space(s),
+        background_cpu(s),
+        startup_apps(s),
+        tpm(s),
+        secure_boot(s),
+        memory_integrity(s),
+        iommu(s),
+        vanguard(s),
+        on_demand(s),
+        wired(s),
+        link_speed(s),
+        adapter_power(s),
+        delivery_optimization(s),
     ]
 }
 
@@ -371,6 +394,407 @@ fn on_battery(s: &SystemSnapshot) -> Finding {
         (FormFactor::Laptop, Some(false)) => c.pass("Laptop is plugged in", ""),
         (FormFactor::Desktop, _) => c.pass("Running on mains power", ""),
         _ => c.unknown("Couldn't tell whether this PC runs on battery", ""),
+    }
+}
+
+const HIGH_PERFORMANCE: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
+const ULTIMATE_PERFORMANCE: &str = "e9a42b02-d5df-448d-aa00-03f14749eb61";
+
+fn power_plan(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "power-plan",
+        category: Category::Windows,
+        severity: Severity::Medium,
+    };
+    let Some(plan) = &s.windows.power_plan else {
+        return c.unknown("Couldn't read your power plan", "");
+    };
+    let guid = plan.guid.to_ascii_lowercase();
+    if guid == HIGH_PERFORMANCE || guid == ULTIMATE_PERFORMANCE || plan.name.contains("Kestrel") {
+        c.pass(format!("Power plan: {}", plan.name), "")
+    } else {
+        c.problem(
+            format!("Power plan is {}", plan.name),
+            "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 3; until then you can pick High performance in Control Panel → Power Options.",
+            Fix::LaterStage { stage: 3 },
+        )
+    }
+}
+
+fn game_mode(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "game-mode",
+        category: Category::Windows,
+        severity: Severity::Medium,
+    };
+    match s.windows.game_mode {
+        Some(true) => c.pass("Game Mode is on", ""),
+        Some(false) => c.problem("Game Mode is off", "Game Mode tells Windows to favour the game you're playing. Ryzen X3D chips also need it to pick the right cores.", Fix::LaterStage { stage: 3 }),
+        None => c.unknown("Couldn't read the Game Mode setting", ""),
+    }
+}
+
+fn background_recording(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "background-recording",
+        category: Category::Windows,
+        severity: Severity::Medium,
+    };
+    match s.windows.background_recording {
+        Some(true) => c.problem("Background recording is on", "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS.", Fix::LaterStage { stage: 3 }),
+        Some(false) => c.pass("Background recording is off", ""),
+        None => c.unknown("Couldn't read the background recording setting", ""),
+    }
+}
+
+fn pending_restart(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "pending-restart",
+        category: Category::Windows,
+        severity: Severity::Low,
+    };
+    match s.windows.pending_restart {
+        Some(true) => c.problem("Windows is waiting to restart", "Updates stay half-installed until you restart, and can keep working in the background while you play.", steps(&["Save your work and restart the PC."])),
+        Some(false) => c.pass("No restart pending", ""),
+        None => c.unknown("Couldn't tell whether a restart is pending", ""),
+    }
+}
+
+fn windows_build(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "windows-build",
+        category: Category::Windows,
+        severity: Severity::Medium,
+    };
+    let build = s.os.build;
+    let update = || {
+        steps(&[
+            "Open Settings → Windows Update.",
+            "Install the latest version Windows offers.",
+        ])
+    };
+    match build {
+        0 => c.unknown("Couldn't read your Windows version", ""),
+        b if b >= 26100 => c.pass(format!("Windows 11 {}", s.os.display_version.clone().unwrap_or_default()).trim_end().to_string(), format!("Build {b}.")),
+        b if b >= 22000 => c.problem(format!("Windows 11 is out of date (build {b})"), "Riot can require Windows 11 24H2 (build 26100) or newer for some accounts.", update()),
+        b if b >= 19045 => Check { severity: Severity::Low, ..c }.problem(
+            "You're on Windows 10",
+            "VALORANT still runs on Windows 10, but Riot can require Windows 11 for some accounts, and Windows 10's extended security updates for home PCs are reported to end on 13 October 2026. Kestrel runs here but isn't tested on Windows 10.",
+            Fix::Link { label: "About upgrading to Windows 11".into(), url: "https://www.microsoft.com/windows/get-windows-11".into() },
+        ),
+        b if b >= 19041 => c.problem(format!("Windows 10 needs updating (build {b})"), "Riot can require Windows 10 22H2 (build 19045) or newer for some accounts.", update()),
+        b => Check { severity: Severity::High, ..c }.problem(format!("Windows is too old for VALORANT (build {b})"), "VALORANT needs Windows 10 build 19041 or newer.", update()),
+    }
+}
+
+fn valorant_drive(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "valorant-drive",
+        category: Category::Storage,
+        severity: Severity::High,
+    };
+    let Some(v) = &s.storage.valorant else {
+        return c.unknown("Couldn't find VALORANT", "Kestrel looks in Riot's install records. If VALORANT isn't installed, the drive checks are skipped.");
+    };
+    match v.media {
+        DriveMedia::Hdd => c.problem(
+            format!("VALORANT is on a hard drive ({}:)", v.drive_letter),
+            "Hard drives load maps and textures slowly, which causes stutter. Moving VALORANT to an SSD fixes it.",
+            steps(&["In the Riot Client, uninstall VALORANT.", "Install it again and choose a folder on your SSD."]),
+        ),
+        DriveMedia::Nvme => c.pass(format!("VALORANT is on an NVMe SSD ({}:)", v.drive_letter), ""),
+        DriveMedia::Ssd => c.pass(format!("VALORANT is on an SSD ({}:)", v.drive_letter), ""),
+        DriveMedia::Unknown => c.unknown(format!("Couldn't tell what kind of drive {}: is", v.drive_letter), ""),
+    }
+}
+
+fn drive_space(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "drive-space",
+        category: Category::Storage,
+        severity: Severity::Low,
+    };
+    let Some(v) = &s.storage.valorant else {
+        return c.unknown("Couldn't check free space", "VALORANT wasn't found.");
+    };
+    if v.total_gb <= 0.0 {
+        return c.unknown(
+            format!("Couldn't read free space on {}:", v.drive_letter),
+            "",
+        );
+    }
+    if v.free_gb < 20.0 || v.free_gb / v.total_gb < 0.10 {
+        c.problem(
+            format!("Drive {}: is nearly full ({:.0} GB free)", v.drive_letter, v.free_gb),
+            "Windows and VALORANT need free space for updates and the shader cache. Keep at least 20 GB free.",
+            steps(&["Open Settings → System → Storage → Cleanup recommendations."]),
+        )
+    } else {
+        c.pass(
+            format!("Drive {}: has {:.0} GB free", v.drive_letter, v.free_gb),
+            "",
+        )
+    }
+}
+
+fn background_cpu(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "background-cpu",
+        category: Category::Background,
+        severity: Severity::Medium,
+    };
+    let Some(list) = &s.background.busy_processes else {
+        return c.unknown("Couldn't measure background activity", "");
+    };
+    let busy: Vec<&BusyProcess> = list.iter().filter(|p| p.cpu_percent >= 5.0).collect();
+    if busy.is_empty() {
+        return c.pass("Nothing heavy is running in the background", "");
+    }
+    let names = busy
+        .iter()
+        .map(|p| format!("{} ({:.0}%)", p.name, p.cpu_percent))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let who = if busy.len() == 1 {
+        "app is"
+    } else {
+        "apps are"
+    };
+    c.problem(
+        format!("{} {who} using CPU in the background", busy.len()),
+        format!("Busiest: {names}. Close them before you play."),
+        steps(&["Close these apps before you play, or stop them starting with Windows (Task Manager → Startup apps)."]),
+    )
+}
+
+fn startup_apps(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "startup-apps",
+        category: Category::Background,
+        severity: Severity::Low,
+    };
+    match s.windows.startup_app_count {
+        Some(n) if n > 10 => c.problem(
+            format!("{n} apps start with Windows"),
+            "Each one uses memory and CPU in the background. Kestrel's startup manager arrives in stage 4; until then, turn off what you don't need in Task Manager → Startup apps.",
+            Fix::LaterStage { stage: 4 },
+        ),
+        Some(n) => c.pass(format!("{n} apps start with Windows"), ""),
+        None => c.unknown("Couldn't count startup apps", ""),
+    }
+}
+
+/// On Windows 11 Vanguard requires TPM and Secure Boot; on Windows 10 only flagged accounts do.
+fn vanguard_requirement(s: &SystemSnapshot, id: &'static str) -> Check {
+    let severity = if s.os.build >= 22000 {
+        Severity::High
+    } else {
+        Severity::Low
+    };
+    Check {
+        id,
+        category: Category::Vanguard,
+        severity,
+    }
+}
+
+fn tpm(s: &SystemSnapshot) -> Finding {
+    let c = vanguard_requirement(s, "tpm");
+    match s.security.tpm2 {
+        Some(true) => c.pass("TPM 2.0 is on", ""),
+        Some(false) => c.problem(
+            "TPM 2.0 is off or missing",
+            "VALORANT on Windows 11 needs TPM 2.0. In the BIOS it's often called fTPM (AMD) or PTT (Intel).",
+            steps(&["Restart into the BIOS.", "Turn on fTPM (AMD) or Intel PTT (Intel), usually under Advanced or Security.", "Save and restart."]),
+        ),
+        None => c.unknown("Couldn't check TPM 2.0", "This check needs Kestrel to run as administrator."),
+    }
+}
+
+fn secure_boot(s: &SystemSnapshot) -> Finding {
+    let c = vanguard_requirement(s, "secure-boot");
+    match s.security.secure_boot {
+        Some(true) => c.pass("Secure Boot is on", ""),
+        Some(false) => c.problem(
+            "Secure Boot is off",
+            "VALORANT on Windows 11 needs Secure Boot.",
+            steps(&[
+                "Restart into the BIOS.",
+                "In the Boot section, set Secure Boot to Enabled (Windows UEFI mode).",
+                "Save and restart.",
+            ]),
+        ),
+        None => c.unknown("Couldn't check Secure Boot", ""),
+    }
+}
+
+fn memory_integrity(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "memory-integrity",
+        category: Category::Vanguard,
+        severity: Severity::Info,
+    };
+    match s.security.hvci_running {
+        Some(true) => c.info("Memory Integrity is on", "Good for security, and needed for Vanguard's On-Demand mode. It can cost a few percent of FPS; Kestrel's Extreme tier will offer to turn it off, with a warning."),
+        Some(false) => c.info("Memory Integrity is off", "VALORANT works fine like this. Riot can require it on for flagged accounts, and Vanguard's On-Demand mode needs it."),
+        None => c.unknown("Couldn't check Memory Integrity", ""),
+    }
+}
+
+fn iommu(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "iommu",
+        category: Category::Vanguard,
+        severity: Severity::Info,
+    };
+    match s.security.iommu {
+        Some(true) => c.info("IOMMU is on", "Needed for Vanguard's On-Demand mode."),
+        Some(false) => c.result(
+            Status::Info,
+            "IOMMU is off",
+            "Only needed for Vanguard's On-Demand mode, or if Riot asks for it. It's called VT-d on Intel and IOMMU or AMD-Vi on AMD.",
+            Fix::BiosGuide { topic: BiosTopic::Iommu },
+        ),
+        None => c.unknown("Couldn't check IOMMU", ""),
+    }
+}
+
+fn vanguard(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "vanguard",
+        category: Category::Vanguard,
+        severity: Severity::High,
+    };
+    match s.security.vanguard {
+        ServiceState::Running => c.pass("Vanguard is installed and running", ""),
+        ServiceState::Stopped => c.pass("Vanguard is installed", "It starts when needed."),
+        ServiceState::NotInstalled => c.problem(
+            "Vanguard isn't installed",
+            "VALORANT won't start without Riot Vanguard.",
+            steps(&[
+                "Open the Riot Client.",
+                "Launch VALORANT; the Riot Client reinstalls Vanguard and asks you to restart.",
+            ]),
+        ),
+        ServiceState::Unknown => c.unknown("Couldn't check Vanguard", ""),
+    }
+}
+
+fn on_demand(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "on-demand",
+        category: Category::Vanguard,
+        severity: Severity::Info,
+    };
+    if s.os.build == 0 {
+        return c.unknown("Couldn't check Vanguard On-Demand eligibility", "");
+    }
+    let sec = &s.security;
+    let needs = [
+        ("Windows 11 25H2", Some(s.os.build >= 26200)),
+        ("Secure Boot", sec.secure_boot),
+        ("TPM 2.0", sec.tpm2),
+        ("VBS", sec.vbs_running),
+        ("Memory Integrity", sec.hvci_running),
+        ("IOMMU", sec.iommu),
+    ];
+    let missing: Vec<&str> = needs
+        .iter()
+        .filter(|(_, v)| *v == Some(false))
+        .map(|(name, _)| *name)
+        .collect();
+    if !missing.is_empty() {
+        c.info(
+            "Not eligible for Vanguard On-Demand mode",
+            format!(
+                "Missing: {}. On-Demand is optional; VALORANT works without it.",
+                missing.join(", ")
+            ),
+        )
+    } else if needs.iter().any(|(_, v)| v.is_none()) {
+        c.unknown("Couldn't check Vanguard On-Demand eligibility", "")
+    } else {
+        c.info(
+            "This PC qualifies for Vanguard On-Demand mode",
+            "On-Demand runs Vanguard only while you play.",
+        )
+    }
+}
+
+fn connected(s: &SystemSnapshot, kind: NetKind) -> Option<&NetAdapter> {
+    s.network
+        .adapters
+        .iter()
+        .find(|a| a.connected && a.kind == kind)
+}
+
+fn wired(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "wired",
+        category: Category::Network,
+        severity: Severity::Medium,
+    };
+    if connected(s, NetKind::Ethernet).is_some() {
+        c.pass("Connected by cable", "")
+    } else if connected(s, NetKind::Wifi).is_some() {
+        c.problem(
+            "Playing over Wi-Fi",
+            "Wi-Fi adds latency spikes and packet loss. Use an Ethernet cable if you can.",
+            steps(&["Connect the PC to the router with an Ethernet cable."]),
+        )
+    } else {
+        c.unknown("Couldn't find an active network connection", "")
+    }
+}
+
+fn link_speed(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "link-speed",
+        category: Category::Network,
+        severity: Severity::Low,
+    };
+    match connected(s, NetKind::Ethernet).map(|a| a.link_mbps) {
+        Some(Some(mbps)) if mbps < 1000 => c.problem(
+            format!("Network link is only {mbps} Mbps"),
+            "Gigabit Ethernet should connect at 1000 Mbps or more. A slower link usually means a damaged cable or a bad port.",
+            steps(&["Try another Ethernet cable (Cat 5e or better) or another port on the router."]),
+        ),
+        Some(Some(mbps)) => c.pass(format!("Network link: {mbps} Mbps"), ""),
+        Some(None) => c.unknown("Couldn't read the network link speed", ""),
+        None => c.info("No cable connected, so link speed isn't checked", ""),
+    }
+}
+
+fn adapter_power(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "adapter-power",
+        category: Category::Network,
+        severity: Severity::Low,
+    };
+    let active: Vec<&NetAdapter> = s.network.adapters.iter().filter(|a| a.connected).collect();
+    if active.iter().any(|a| a.power_saving == Some(true)) {
+        c.problem("Network adapter power saving is on", "Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage 4.", Fix::LaterStage { stage: 4 })
+    } else if !active.is_empty() && active.iter().all(|a| a.power_saving == Some(false)) {
+        c.pass("Network adapter power saving is off", "")
+    } else {
+        c.unknown("Couldn't check network power saving", "")
+    }
+}
+
+fn delivery_optimization(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "delivery-optimization",
+        category: Category::Network,
+        severity: Severity::Low,
+    };
+    match s.network.delivery_optimization_internet {
+        Some(true) => c.problem(
+            "Windows Update uploads to other PCs over the internet",
+            "Your PC shares updates with strangers, which uses upload bandwidth while you play.",
+            Fix::LaterStage { stage: 4 },
+        ),
+        Some(false) => c.pass("Windows Update doesn't upload to the internet", ""),
+        None => c.unknown("Couldn't read the Windows Update sharing setting", ""),
     }
 }
 
@@ -740,6 +1164,161 @@ mod tests {
         assert_eq!(
             get(&run_health_check(&s, today()), "valorant-gpu").status,
             Status::Pass
+        );
+    }
+
+    #[test]
+    fn owner_pc_full_results() {
+        let f = run_health_check(&owner_pc_fixture(), today());
+        assert_eq!(f.len(), 27);
+        let with = |status: Status| -> Vec<&str> {
+            f.iter()
+                .filter(|x| x.status == status)
+                .map(|x| x.id.as_str())
+                .collect()
+        };
+        assert_eq!(
+            with(Status::Problem),
+            vec!["bios-age", "power-plan", "adapter-power"]
+        );
+        assert_eq!(
+            with(Status::Info),
+            vec!["memory-integrity", "iommu", "on-demand"]
+        );
+        assert!(with(Status::Unknown).is_empty());
+    }
+
+    #[test]
+    fn every_check_has_a_unique_id() {
+        let f = run_health_check(&owner_pc_fixture(), today());
+        let mut ids: Vec<&str> = f.iter().map(|x| x.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), f.len());
+    }
+
+    #[test]
+    fn windows_versions() {
+        let mut s = owner_pc_fixture();
+        s.os.build = 19045;
+        let w10 = get(&run_health_check(&s, today()), "windows-build").clone();
+        assert_eq!((w10.status, w10.severity), (Status::Problem, Severity::Low));
+        assert!(matches!(w10.fix, Fix::Link { .. }));
+        s.os.build = 22631;
+        let old11 = get(&run_health_check(&s, today()), "windows-build").clone();
+        assert_eq!(
+            (old11.status, old11.severity),
+            (Status::Problem, Severity::Medium)
+        );
+        s.os.build = 18363;
+        assert_eq!(
+            get(&run_health_check(&s, today()), "windows-build").severity,
+            Severity::High
+        );
+    }
+
+    #[test]
+    fn valorant_on_a_hard_drive_is_a_high_problem() {
+        let mut s = owner_pc_fixture();
+        s.storage.valorant.as_mut().unwrap().media = DriveMedia::Hdd;
+        let d = get(&run_health_check(&s, today()), "valorant-drive").clone();
+        assert_eq!((d.status, d.severity), (Status::Problem, Severity::High));
+    }
+
+    #[test]
+    fn valorant_missing_makes_storage_checks_unknown() {
+        let mut s = owner_pc_fixture();
+        s.storage.valorant = None;
+        let f = run_health_check(&s, today());
+        assert_eq!(get(&f, "valorant-drive").status, Status::Unknown);
+        assert_eq!(get(&f, "drive-space").status, Status::Unknown);
+    }
+
+    #[test]
+    fn nearly_full_drive() {
+        let mut s = owner_pc_fixture();
+        s.storage.valorant.as_mut().unwrap().free_gb = 12.0;
+        assert_eq!(
+            get(&run_health_check(&s, today()), "drive-space").status,
+            Status::Problem
+        );
+    }
+
+    #[test]
+    fn busy_background_apps_are_named() {
+        let mut s = owner_pc_fixture();
+        s.background.busy_processes = Some(vec![
+            BusyProcess {
+                name: "chrome.exe".into(),
+                cpu_percent: 12.0,
+            },
+            BusyProcess {
+                name: "discord.exe".into(),
+                cpu_percent: 2.0,
+            },
+        ]);
+        let b = get(&run_health_check(&s, today()), "background-cpu").clone();
+        assert_eq!(b.status, Status::Problem);
+        assert_eq!(b.title, "1 app is using CPU in the background");
+        assert!(b.detail.contains("chrome.exe (12%)") && !b.detail.contains("discord"));
+    }
+
+    #[test]
+    fn wifi_is_a_problem_and_link_speed_is_skipped() {
+        let mut s = owner_pc_fixture();
+        s.network.adapters = vec![NetAdapter {
+            name: "Wi-Fi".into(),
+            kind: NetKind::Wifi,
+            link_mbps: Some(866),
+            connected: true,
+            power_saving: Some(false),
+        }];
+        let f = run_health_check(&s, today());
+        assert_eq!(get(&f, "wired").status, Status::Problem);
+        assert_eq!(get(&f, "link-speed").status, Status::Info);
+    }
+
+    #[test]
+    fn slow_ethernet_link_is_a_problem() {
+        let mut s = owner_pc_fixture();
+        s.network.adapters[0].link_mbps = Some(100);
+        assert_eq!(
+            get(&run_health_check(&s, today()), "link-speed").status,
+            Status::Problem
+        );
+    }
+
+    #[test]
+    fn on_demand_eligible_when_everything_is_on() {
+        let mut s = owner_pc_fixture();
+        s.security.vbs_running = Some(true);
+        s.security.hvci_running = Some(true);
+        s.security.iommu = Some(true);
+        let o = get(&run_health_check(&s, today()), "on-demand").clone();
+        assert_eq!(o.status, Status::Info);
+        assert!(o.title.contains("qualifies"), "{}", o.title);
+    }
+
+    #[test]
+    fn missing_vanguard_is_a_high_problem() {
+        let mut s = owner_pc_fixture();
+        s.security.vanguard = ServiceState::NotInstalled;
+        let v = get(&run_health_check(&s, today()), "vanguard").clone();
+        assert_eq!((v.status, v.severity), (Status::Problem, Severity::High));
+    }
+
+    #[test]
+    fn tpm_off_is_high_on_windows_11_and_low_on_windows_10() {
+        let mut s = owner_pc_fixture();
+        s.security.tpm2 = Some(false);
+        assert_eq!(
+            get(&run_health_check(&s, today()), "tpm").severity,
+            Severity::High
+        );
+        s.os.build = 19045;
+        assert_eq!(
+            get(&run_health_check(&s, today()), "tpm").severity,
+            Severity::Low
         );
     }
 }
