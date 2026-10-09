@@ -68,13 +68,22 @@ pub fn drive_media(bus_type: Option<u64>, media_type: Option<u64>) -> DriveMedia
     }
 }
 
-/// Win32_ComputerSystem.PCSystemType 2 = mobile. A battery also means laptop.
+/// Win32_ComputerSystem.PCSystemType decides when it is known: 2 = mobile, while 1 (desktop) and 3-8 (workstation,
+/// servers, appliance) are never laptops, even if a battery shows up (a USB UPS looks like one). When it is 0
+/// (unspecified) or missing, a battery means laptop and no battery means desktop.
 pub fn form_factor(pc_system_type: Option<u64>, has_battery: bool) -> FormFactor {
-    if pc_system_type == Some(2) || has_battery {
-        FormFactor::Laptop
-    } else {
-        FormFactor::Desktop
+    match pc_system_type {
+        Some(2) => FormFactor::Laptop,
+        Some(1 | 3..=8) => FormFactor::Desktop,
+        _ if has_battery => FormFactor::Laptop,
+        _ => FormFactor::Desktop,
     }
+}
+
+/// Win32_Battery.BatteryStatus: 1 (discharging), 4 (low) and 5 (critical) mean the PC runs on its battery. Anything
+/// else (2 on AC, 3 fully charged, 6-9 charging, 10 undefined, 11 partially charged) means mains power.
+pub fn on_battery(battery_status: u64) -> bool {
+    matches!(battery_status, 1 | 4 | 5)
 }
 
 pub fn cpu_vendor(manufacturer: &str) -> CpuVendor {
@@ -243,14 +252,56 @@ mod tests {
         assert_eq!(drive_media(Some(11), Some(4)), DriveMedia::Ssd);
         assert_eq!(drive_media(Some(11), Some(3)), DriveMedia::Hdd);
         assert_eq!(drive_media(None, None), DriveMedia::Unknown);
-        assert_eq!(form_factor(Some(2), false), FormFactor::Laptop);
-        assert_eq!(form_factor(Some(1), true), FormFactor::Laptop);
-        assert_eq!(form_factor(Some(1), false), FormFactor::Desktop);
         assert_eq!(cpu_vendor("GenuineIntel"), CpuVendor::Intel);
         assert_eq!(cpu_vendor("AuthenticAMD"), CpuVendor::Amd);
         assert_eq!(ddr_generation(26), Some(4));
         assert_eq!(ddr_generation(34), Some(5));
         assert_eq!(ddr_generation(0), None);
+    }
+
+    #[test]
+    fn battery_status_says_whether_the_pc_runs_on_battery() {
+        // Win32_Battery.BatteryStatus: 1 discharging, 2 on AC, 3 fully charged, 4 low, 5 critical, 6 charging.
+        let cases = [
+            (1, true),
+            (2, false),
+            (3, false),
+            (4, true),
+            (5, true),
+            (6, false),
+        ];
+        for (status, discharging) in cases {
+            assert_eq!(on_battery(status), discharging, "BatteryStatus {status}");
+        }
+        // Charging (7-9), undefined (10) and partially charged (11) are all on mains power.
+        for status in 7..=11 {
+            assert!(!on_battery(status), "BatteryStatus {status}");
+        }
+    }
+
+    #[test]
+    fn the_system_type_decides_the_form_factor_when_it_is_known() {
+        // 2 is mobile. 1 (desktop) and 3-8 (workstation, servers, appliance) are not laptops, even when a battery
+        // shows up: a USB UPS looks like one.
+        for has_battery in [false, true] {
+            assert_eq!(form_factor(Some(2), has_battery), FormFactor::Laptop);
+            for system_type in [1, 3, 4, 5, 6, 7, 8] {
+                assert_eq!(
+                    form_factor(Some(system_type), has_battery),
+                    FormFactor::Desktop,
+                    "PCSystemType {system_type}, battery {has_battery}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_battery_decides_the_form_factor_only_when_the_system_type_is_unspecified() {
+        for unspecified in [Some(0), None] {
+            assert_eq!(form_factor(unspecified, true), FormFactor::Laptop);
+            // No battery: a desktop, which is what the probe has always answered here.
+            assert_eq!(form_factor(unspecified, false), FormFactor::Desktop);
+        }
     }
 
     #[test]

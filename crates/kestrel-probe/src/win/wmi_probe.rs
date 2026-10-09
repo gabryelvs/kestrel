@@ -80,18 +80,21 @@ impl Wmi {
         let row = first(
             self.rows("SELECT Manufacturer, Model, PCSystemType FROM Win32_ComputerSystem")?,
         )?;
-        let batteries = self
-            .rows("SELECT BatteryStatus FROM Win32_Battery")
-            .unwrap_or_default();
         s.machine.manufacturer = text(&row, "Manufacturer");
         s.machine.model = text(&row, "Model");
+        // The battery query can fail on its own. It is reported at the end, after everything the other query told
+        // us is kept; meanwhile the PC counts as having no battery, and on_battery stays None.
+        let batteries = self.rows("SELECT BatteryStatus FROM Win32_Battery");
+        let battery_rows = batteries.as_deref().unwrap_or_default();
         s.machine.form_factor =
-            parse::form_factor(num(&row, "PCSystemType"), !batteries.is_empty());
-        // BatteryStatus 1 = discharging (on battery); anything else = on AC power.
-        s.machine.on_battery = batteries
+            parse::form_factor(num(&row, "PCSystemType"), !battery_rows.is_empty());
+        s.machine.on_battery = battery_rows
             .first()
             .and_then(|b| num(b, "BatteryStatus"))
-            .map(|status| status == 1);
+            .map(parse::on_battery);
+        if let Err(e) = batteries {
+            return Err(format!("couldn't read the battery (Win32_Battery): {e}").into());
+        }
         Ok(())
     }
 
