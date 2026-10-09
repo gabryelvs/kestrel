@@ -527,6 +527,13 @@ fn valorant_drive(s: &SystemSnapshot) -> Finding {
     }
 }
 
+/// The free space VALORANT's drive should keep: a tenth of the drive, but never under 20 GB and never over 50 GB, so
+/// a big drive isn't flagged while it still has plenty. Having less free than this is the same as having under
+/// 20 GB, or under 50 GB and under 10% of the drive.
+fn space_to_keep_gb(total_gb: f64) -> f64 {
+    (total_gb * 0.10).clamp(20.0, 50.0)
+}
+
 fn drive_space(s: &SystemSnapshot) -> Finding {
     let c = Check {
         id: "drive-space",
@@ -542,10 +549,11 @@ fn drive_space(s: &SystemSnapshot) -> Finding {
             "",
         );
     }
-    if v.free_gb < 20.0 || v.free_gb / v.total_gb < 0.10 {
+    let keep = space_to_keep_gb(v.total_gb);
+    if v.free_gb < keep {
         c.problem(
             format!("Drive {}: is nearly full ({:.0} GB free)", v.drive_letter, v.free_gb),
-            "Windows and VALORANT need free space for updates and the shader cache. Keep at least 20 GB free.",
+            format!("Windows and VALORANT need free space for updates and the shader cache. Keep at least {keep:.0} GB free on this drive."),
             steps(&["Open Settings → System → Storage → Cleanup recommendations."]),
         )
     } else {
@@ -574,15 +582,16 @@ fn background_cpu(s: &SystemSnapshot) -> Finding {
         .map(|p| format!("{} ({:.0}%)", p.name, p.cpu_percent))
         .collect::<Vec<_>>()
         .join(", ");
-    let who = if busy.len() == 1 {
-        "app is"
-    } else {
-        "apps are"
-    };
+    let one = busy.len() == 1;
+    let who = if one { "app is" } else { "apps are" };
     c.problem(
         format!("{} {who} using CPU in the background", busy.len()),
-        format!("Busiest: {names}. Close them before you play."),
-        steps(&["Close these apps before you play, or stop them starting with Windows (Task Manager → Startup apps)."]),
+        format!("Busiest: {names}. Close {} before you play.", if one { "it" } else { "them" }),
+        steps(&[if one {
+            "Close this app before you play, or stop it starting with Windows (Task Manager → Startup apps)."
+        } else {
+            "Close these apps before you play, or stop them starting with Windows (Task Manager → Startup apps)."
+        }]),
     )
 }
 
@@ -592,13 +601,19 @@ fn startup_apps(s: &SystemSnapshot) -> Finding {
         category: Category::Background,
         severity: Severity::Low,
     };
+    let title = |n: u32| {
+        format!(
+            "{n} {} with Windows",
+            if n == 1 { "app starts" } else { "apps start" }
+        )
+    };
     match s.windows.startup_app_count {
         Some(n) if n > 10 => c.problem(
-            format!("{n} apps start with Windows"),
+            title(n),
             "Each one uses memory and CPU in the background. Kestrel's startup manager arrives in stage 4; until then, turn off what you don't need in Task Manager → Startup apps.",
             Fix::LaterStage { stage: 4 },
         ),
-        Some(n) => c.pass(format!("{n} apps start with Windows"), ""),
+        Some(n) => c.pass(title(n), ""),
         None => c.unknown("Couldn't count startup apps", ""),
     }
 }
@@ -1365,6 +1380,106 @@ mod tests {
         assert_eq!(
             get(&run_health_check(&s, today()), "drive-space").status,
             Status::Problem
+        );
+    }
+
+    fn drive_space_finding(free_gb: f64, total_gb: f64) -> Finding {
+        let mut s = owner_pc_fixture();
+        let valorant = s.storage.valorant.as_mut().unwrap();
+        valorant.free_gb = free_gb;
+        valorant.total_gb = total_gb;
+        get(&run_health_check(&s, today()), "drive-space").clone()
+    }
+
+    #[test]
+    fn a_big_drive_with_plenty_of_room_is_not_nearly_full() {
+        // 150 GB is only 8% of a 2 TB drive, but it is plenty for updates and the shader cache.
+        let d = drive_space_finding(150.0, 1863.0);
+        assert_eq!(d.status, Status::Pass, "{}", d.title);
+    }
+
+    #[test]
+    fn drive_space_is_a_problem_under_20_gb_or_under_50_gb_and_a_tenth() {
+        let problem = |free, total| drive_space_finding(free, total).status == Status::Problem;
+        assert!(problem(15.0, 500.0));
+        assert!(problem(40.0, 1000.0));
+        // Under 20 GB is a problem on any drive; 20 GB on a small one is enough.
+        assert!(problem(19.9, 128.0));
+        assert!(!problem(20.0, 128.0));
+        // 50 GB is the most any drive is asked to keep free.
+        assert!(problem(49.9, 1000.0));
+        assert!(!problem(50.0, 1000.0));
+        // 45 GB is over a tenth of a 400 GB drive.
+        assert!(!problem(45.0, 400.0));
+        assert!(problem(35.0, 400.0));
+    }
+
+    #[test]
+    fn the_drive_space_detail_states_the_rule_that_flagged_it() {
+        assert!(drive_space_finding(15.0, 500.0)
+            .detail
+            .contains("at least 50 GB"));
+        assert!(drive_space_finding(40.0, 1000.0)
+            .detail
+            .contains("at least 50 GB"));
+        assert!(drive_space_finding(35.0, 400.0)
+            .detail
+            .contains("at least 40 GB"));
+        assert!(drive_space_finding(12.0, 100.0)
+            .detail
+            .contains("at least 20 GB"));
+    }
+
+    #[test]
+    fn startup_apps_agree_with_their_count() {
+        let title = |count| {
+            let mut s = owner_pc_fixture();
+            s.windows.startup_app_count = Some(count);
+            get(&run_health_check(&s, today()), "startup-apps")
+                .title
+                .clone()
+        };
+        assert_eq!(title(0), "0 apps start with Windows");
+        assert_eq!(title(1), "1 app starts with Windows");
+        assert_eq!(title(7), "7 apps start with Windows");
+        assert_eq!(title(11), "11 apps start with Windows");
+    }
+
+    #[test]
+    fn one_busy_app_is_called_it_and_several_are_called_them() {
+        let busy = |names: &[&str]| {
+            let mut s = owner_pc_fixture();
+            s.background.busy_processes = Some(
+                names
+                    .iter()
+                    .map(|name| BusyProcess {
+                        name: (*name).into(),
+                        cpu_percent: 12.0,
+                    })
+                    .collect(),
+            );
+            get(&run_health_check(&s, today()), "background-cpu").clone()
+        };
+        let one = busy(&["chrome.exe"]);
+        assert!(
+            one.detail.ends_with("Close it before you play."),
+            "{}",
+            one.detail
+        );
+        assert_eq!(
+            one.fix,
+            steps(&["Close this app before you play, or stop it starting with Windows (Task Manager → Startup apps)."])
+        );
+        let two = busy(&["chrome.exe", "obs64.exe"]);
+        assert!(
+            two.detail.ends_with("Close them before you play."),
+            "{}",
+            two.detail
+        );
+        assert_eq!(two.title, "2 apps are using CPU in the background");
+        assert_eq!(
+            two.fix,
+            steps(&["Close these apps before you play, or stop them starting with Windows (Task Manager → Startup apps)."])
         );
     }
 
