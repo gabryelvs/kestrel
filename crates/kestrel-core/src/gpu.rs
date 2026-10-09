@@ -3,19 +3,26 @@ use crate::snapshot::{GpuInfo, GpuVendor};
 use regex::Regex;
 use std::sync::OnceLock;
 
-const VIRTUAL_HINTS: [&str; 5] = [
+const VIRTUAL_HINTS: &[&str] = &[
     "virtual",
     "parsec",
     "basic display",
     "remote display",
     "indirect display",
+    "displaylink",
 ];
 
+/// PCI vendor ids (uppercase) of virtual adapters: Microsoft, VMware, VirtIO and Parallels.
+const VIRTUAL_VENDOR_IDS: &[&str] = &["VEN_1414", "VEN_15AD", "VEN_1AF4", "VEN_1AB8"];
+
 /// Vendor from the PCI id inside a PNP device id ("PCI\\VEN_10DE&…"), falling back to the name.
+/// Virtual name hints and virtual vendor ids are checked first and override the PCI vendor.
 pub fn vendor_from(pnp_device_id: &str, name: &str) -> GpuVendor {
     let id = pnp_device_id.to_ascii_uppercase();
     let lower = name.to_ascii_lowercase();
-    if VIRTUAL_HINTS.iter().any(|h| lower.contains(h)) || id.contains("VEN_1414") {
+    if VIRTUAL_HINTS.iter().any(|h| lower.contains(h))
+        || VIRTUAL_VENDOR_IDS.iter().any(|v| id.contains(v))
+    {
         GpuVendor::Virtual
     } else if id.contains("VEN_10DE") || lower.contains("nvidia") {
         GpuVendor::Nvidia
@@ -28,7 +35,9 @@ pub fn vendor_from(pnp_device_id: &str, name: &str) -> GpuVendor {
     }
 }
 
-/// Integrated graphics: Intel without a discrete Arc model number, or AMD "…Graphics" without "RX".
+/// Integrated graphics. Intel: anything without a discrete Arc model number (A- or B-series).
+/// AMD: a name ending in "Graphics" unless it contains "Vega M " (Kaby Lake-G's on-package discrete GPU),
+/// or a name with no "RX" and a known VRAM under 512 MB. Nvidia, virtual and other vendors are never integrated.
 pub fn looks_integrated(vendor: GpuVendor, name: &str, vram_mb: Option<u64>) -> bool {
     static DISCRETE_ARC: OnceLock<Regex> = OnceLock::new();
     let lower = name.to_ascii_lowercase();
@@ -37,8 +46,9 @@ pub fn looks_integrated(vendor: GpuVendor, name: &str, vram_mb: Option<u64>) -> 
             .get_or_init(|| Regex::new(r"arc(\(tm\))?\s+[ab]\d{3}").expect("valid pattern"))
             .is_match(&lower),
         GpuVendor::Amd => {
-            !lower.contains("rx")
-                && (lower.ends_with("graphics") || vram_mb.is_some_and(|v| v < 512))
+            let on_package_vega_m = lower.contains("vega m ");
+            (lower.ends_with("graphics") && !on_package_vega_m)
+                || (!lower.contains("rx") && vram_mb.is_some_and(|v| v < 512))
         }
         _ => false,
     }
@@ -130,6 +140,26 @@ mod tests {
             GpuVendor::Virtual
         );
         assert_eq!(vendor_from("", "Mystery GPU"), GpuVendor::Other);
+        assert_eq!(
+            vendor_from("USB\\VID_17E9&PID_4301", "DisplayLink USB Device"),
+            GpuVendor::Virtual
+        );
+        assert_eq!(
+            vendor_from("PCI\\VEN_15AD&DEV_0405", "VMware SVGA 3D"),
+            GpuVendor::Virtual
+        );
+        assert_eq!(
+            vendor_from("PCI\\VEN_1414&DEV_008E", "Microsoft Hyper-V Video"),
+            GpuVendor::Virtual
+        );
+        assert_eq!(
+            vendor_from("PCI\\VEN_1AF4&DEV_1050", "Red Hat VirtIO GPU"),
+            GpuVendor::Virtual
+        );
+        assert_eq!(
+            vendor_from("PCI\\VEN_1AB8&DEV_4005", "Parallels Display Adapter (WDDM)"),
+            GpuVendor::Virtual
+        );
     }
 
     #[test]
@@ -168,6 +198,21 @@ mod tests {
             GpuVendor::Nvidia,
             "NVIDIA GeForce RTX 4060 Laptop GPU",
             Some(8192)
+        ));
+        assert!(looks_integrated(
+            GpuVendor::Amd,
+            "AMD Radeon(TM) RX Vega 10 Graphics",
+            Some(2048)
+        ));
+        assert!(looks_integrated(
+            GpuVendor::Amd,
+            "AMD Radeon(TM) RX Vega 10 Graphics",
+            None
+        ));
+        assert!(!looks_integrated(
+            GpuVendor::Amd,
+            "AMD Radeon RX Vega M GH Graphics",
+            Some(4096)
         ));
     }
 
