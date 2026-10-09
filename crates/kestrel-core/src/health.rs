@@ -165,9 +165,11 @@ fn ram_speed(s: &SystemSnapshot) -> Finding {
             Fix::BiosGuide { topic: BiosTopic::Xmp },
         ),
         (Some(now), Some(rated)) => c.pass(format!("RAM runs at {now} MT/s, its rated speed"), format!("The kit is rated {rated} MT/s.")),
-        _ => c.unknown(
+        _ => c.result(
+            Status::Unknown,
             "Couldn't tell your RAM's rated speed",
             "Kestrel reads the rated speed from the module part number, and this kit's format isn't one it knows yet. The BIOS guide shows how to check XMP yourself.",
+            Fix::BiosGuide { topic: BiosTopic::Xmp },
         ),
     }
 }
@@ -885,6 +887,28 @@ mod tests {
             "{}",
             ram.title
         );
+        assert_eq!(
+            ram.fix,
+            Fix::BiosGuide {
+                topic: BiosTopic::Xmp
+            }
+        );
+    }
+
+    #[test]
+    fn unrecognised_ram_part_number_is_unknown_not_a_false_xmp_alarm() {
+        // A laptop's Samsung SODIMM: the platform runs it at 2933 MT/s, and SMBIOS reports the module's 3200 maximum.
+        let mut s = owner_pc_fixture();
+        let sodimm = MemoryModule {
+            capacity_mb: 8192,
+            configured_mts: Some(2933),
+            max_mts: Some(3200),
+            part_number: "M471A1K43DB1-CWE".into(),
+            ..Default::default()
+        };
+        s.memory.modules = vec![sodimm.clone(), sodimm];
+        let ram = get(&run_health_check(&s, today()), "ram-speed").clone();
+        assert_eq!(ram.status, Status::Unknown);
         assert_eq!(
             ram.fix,
             Fix::BiosGuide {

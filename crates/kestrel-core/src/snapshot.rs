@@ -42,7 +42,18 @@ model! {
     pub struct CpuInfo { pub name: String, pub vendor: CpuVendor, pub cores: u32, pub threads: u32 }
     pub struct GpuInfo { pub name: String, pub vendor: GpuVendor, pub driver_version: String, pub driver_date: Option<String>, pub vram_mb: Option<u64>, pub is_integrated: bool }
     pub struct MemoryInfo { pub total_mb: u64, pub ddr_generation: Option<u8>, pub modules: Vec<MemoryModule> }
-    pub struct MemoryModule { pub capacity_mb: u64, pub configured_mts: Option<u32>, pub max_mts: Option<u32>, pub part_number: String, pub manufacturer: String, pub bank_label: String, pub device_locator: String }
+    pub struct MemoryModule {
+        pub capacity_mb: u64,
+        /// The speed the module runs at now, in MT/s (`Win32_PhysicalMemory.ConfiguredClockSpeed`).
+        pub configured_mts: Option<u32>,
+        /// The module's own maximum from SMBIOS, in MT/s (`Win32_PhysicalMemory.Speed`). This is its JEDEC
+        /// maximum, never an XMP or EXPO rating, so it must not be read as the kit's rated speed.
+        pub max_mts: Option<u32>,
+        pub part_number: String,
+        pub manufacturer: String,
+        pub bank_label: String,
+        pub device_locator: String,
+    }
     pub struct DisplayInfo { pub name: String, pub adapter: String, pub current_hz: u32, pub max_hz: u32, pub width: u32, pub height: u32, pub is_primary: bool, pub is_virtual: bool }
     pub struct BoardInfo { pub manufacturer: String, pub product: String, pub bios_version: String, pub bios_date: Option<String> }
     pub struct StorageInfo { pub valorant: Option<ValorantInstall> }

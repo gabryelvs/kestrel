@@ -71,26 +71,15 @@ pub fn rated_mts_from_part(part: &str) -> Option<u32> {
     })
 }
 
-/// The kit's rated speed: the slowest module's part-number rating. When a part number isn't
-/// recognised, fall back to the SMBIOS maximum, but only if every module reports one.
+/// The kit's rated speed: the slowest module's part-number rating. If any module's part number isn't
+/// recognised the rating is unknown (`None`). The SMBIOS maximum (`MemoryModule::max_mts`) is the module's
+/// JEDEC maximum, which a platform can cap below the kit's real rating, so it is never used in its place.
 pub fn rated_mts(modules: &[MemoryModule]) -> Option<u32> {
-    if modules.is_empty() {
-        return None;
-    }
-    let from_parts: Vec<u32> = modules
+    let ratings: Option<Vec<u32>> = modules
         .iter()
-        .filter_map(|m| rated_mts_from_part(&m.part_number))
+        .map(|m| rated_mts_from_part(&m.part_number))
         .collect();
-    if from_parts.len() == modules.len() {
-        return from_parts.into_iter().min();
-    }
-    let maxima: Vec<u32> = modules
-        .iter()
-        .filter_map(|m| m.max_mts.filter(|&v| v > 0))
-        .collect();
-    (maxima.len() == modules.len())
-        .then(|| maxima.into_iter().min())
-        .flatten()
+    ratings?.into_iter().min()
 }
 
 /// The speed the RAM actually runs at (slowest module). `None` if any module doesn't report it.
@@ -242,10 +231,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_parts_fall_back_to_smbios_max_only_when_every_module_reports_it() {
+    fn unrecognised_parts_have_no_rating_whatever_smbios_reports() {
+        // Win32_PhysicalMemory.Speed is the module's JEDEC maximum, never an XMP rating, so it is not a rating here.
         assert_eq!(
             rated_mts(&[module("CT16G4DFRA32A", Some(2400), Some(3200), "", "")]),
-            Some(3200)
+            None
         );
         assert_eq!(
             rated_mts(&[module("CT16G4DFRA32A", Some(2400), None, "", "")]),
@@ -327,16 +317,17 @@ mod tests {
     #[test]
     fn partially_recognised_kit_is_not_guessed() {
         let known = module("CMG32GX4M2D3600C18", Some(3200), Some(3600), "", "");
-        let unknown = module("CT16G4DFRA32A", Some(3200), None, "", "");
+        let unknown = module("CT16G4DFRA32A", Some(3200), Some(3200), "", "");
         assert_eq!(rated_mts(&[known, unknown]), None);
     }
 
     #[test]
-    fn smbios_fallback_needs_every_module_and_takes_the_slowest() {
-        let with = |max| module("CT16G4DFRA32A", Some(2400), max, "", "");
+    fn smbios_maxima_never_rate_a_kit() {
+        // A Samsung laptop SODIMM that the platform caps at 2933: the 3200 SMBIOS reports is not a rating.
+        let with = |max| module("M471A1K43DB1-CWE", Some(2933), max, "", "");
+        assert_eq!(rated_mts(&[with(Some(3200)), with(Some(3200))]), None);
+        assert_eq!(rated_mts(&[with(Some(3200)), with(Some(2666))]), None);
         assert_eq!(rated_mts(&[with(Some(3200)), with(None)]), None);
-        assert_eq!(rated_mts(&[with(Some(3200)), with(Some(0))]), None);
-        assert_eq!(rated_mts(&[with(Some(3200)), with(Some(2666))]), Some(2666));
     }
 
     #[test]
