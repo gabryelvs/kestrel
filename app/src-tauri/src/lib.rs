@@ -34,6 +34,7 @@ async fn rescan(state: State<'_, AppState>) -> Result<Report, String> {
 }
 
 /// One live-load reading; the UI polls this about once a second.
+// Keep `async`: the PDH and NVML reads must stay off the UI thread.
 #[tauri::command(async)]
 fn get_load(state: State<'_, AppState>) -> Result<LoadSample, String> {
     let mut sampler = state.load.lock().map_err(|e| e.to_string())?;
