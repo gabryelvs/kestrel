@@ -56,6 +56,28 @@ pub fn board_vendor(manufacturer: &str) -> BoardVendor {
     }
 }
 
+const XMP: &str = "XMP";
+const EXPO: &str = "EXPO";
+const DOCP: &str = "D.O.C.P.";
+const A_XMP: &str = "A-XMP";
+
+/// What this PC's BIOS calls the one-click memory speed profile. Intel boards say XMP. EXPO is AMD's name on AM5,
+/// which takes DDR5. On AM4 (DDR4) each board maker names it: ASUS D.O.C.P., MSI A-XMP, Gigabyte and ASRock XMP.
+/// An AMD PC whose memory generation isn't known is taken to be AM4 and goes by its board maker too.
+pub fn memory_profile_name(s: &SystemSnapshot) -> &'static str {
+    if s.cpu.vendor != CpuVendor::Amd {
+        return XMP;
+    }
+    if s.memory.ddr_generation == Some(5) {
+        return EXPO;
+    }
+    match board_vendor(&s.board.manufacturer) {
+        BoardVendor::Asus => DOCP,
+        BoardVendor::Msi => A_XMP,
+        _ => XMP,
+    }
+}
+
 struct Ctx<'a> {
     vendor: BoardVendor,
     board: &'a str,
@@ -86,7 +108,7 @@ pub fn build_guide(s: &SystemSnapshot) -> BiosGuide {
         board,
         amd,
         tweaker: if rog { "Extreme Tweaker" } else { "Ai Tweaker" },
-        profile: if amd { "EXPO" } else { "XMP" },
+        profile: memory_profile_name(s),
     };
 
     let mut sections = vec![xmp(&ctx)];
@@ -130,10 +152,10 @@ fn xmp(c: &Ctx) -> GuideSection {
             "Restart and press Del to open the BIOS.".into(),
             "Press F7 for Advanced Mode.".into(),
             format!("Open the {} tab.", c.tweaker),
-            if c.amd {
-                "Set Ai Overclock Tuner to EXPO I (older boards call it D.O.C.P.).".into()
-            } else {
-                "Set Ai Overclock Tuner to XMP I.".into()
+            match profile {
+                EXPO => "Set Ai Overclock Tuner to EXPO I.".into(),
+                DOCP => "Set Ai Overclock Tuner to D.O.C.P. (if it then lists profiles, pick the one that matches your kit's speed).".into(),
+                _ => "Set Ai Overclock Tuner to XMP I.".into(),
             },
             "Check that DRAM Frequency shows your kit's speed, then press F10 and choose Yes."
                 .into(),
@@ -146,19 +168,19 @@ fn xmp(c: &Ctx) -> GuideSection {
         BoardVendor::Gigabyte => vec![
             "Restart and press Del to open the BIOS.".into(),
             "Press F2 for Advanced Mode if needed, then open the Tweaker tab.".into(),
-            if c.amd {
+            if profile == EXPO {
                 "Set Extreme Memory Profile (X.M.P.) or EXPO to Profile1.".into()
             } else {
                 "Set Extreme Memory Profile (X.M.P.) to Profile1.".into()
             },
             "Press F10 and choose Yes.".into(),
         ],
-        BoardVendor::Asrock => v(&[
-            "Restart and press F2 or Del to open the BIOS.",
-            "Open OC Tweaker → DRAM Configuration.",
-            "Set Load XMP Setting (EXPO on newer AMD boards) to Profile 1.",
-            "Press F10 and choose Yes.",
-        ]),
+        BoardVendor::Asrock => vec![
+            "Restart and press F2 or Del to open the BIOS.".into(),
+            "Open OC Tweaker → DRAM Configuration.".into(),
+            format!("Set Load {profile} Setting to Profile 1."),
+            "Press F10 and choose Yes.".into(),
+        ],
         BoardVendor::Other => vec![
             "Restart and open the BIOS (usually Del or F2 at start-up).".into(),
             format!("Find the memory overclocking or {profile} setting."),
@@ -167,7 +189,7 @@ fn xmp(c: &Ctx) -> GuideSection {
     };
     GuideSection {
         topic: BiosTopic::Xmp,
-        title: if c.amd { "Turn on EXPO (or DOCP)".into() } else { "Turn on XMP".into() },
+        title: format!("Turn on {profile}"),
         why: format!("Most RAM starts at a safe, slow default speed. {profile} runs it at the speed on the box, which can add a lot of FPS in CPU-heavy games like VALORANT."),
         steps,
         caution: Some("If the PC won't start, it usually retries with safe settings by itself. If it doesn't, clear the BIOS settings (Clear CMOS) and try a lower speed.".into()),
@@ -400,15 +422,120 @@ mod tests {
         let mut s = owner_pc_fixture();
         s.cpu.vendor = CpuVendor::Amd;
         s.cpu.name = "AMD Ryzen 7 7800X3D 8-Core Processor".into();
+        s.memory.ddr_generation = Some(5);
         let g = build_guide(&s);
         let xmp = section(&g, BiosTopic::Xmp);
-        assert_eq!(xmp.title, "Turn on EXPO (or DOCP)");
+        assert_eq!(xmp.title, "Turn on EXPO");
         assert!(xmp.steps.join(" ").contains("EXPO I"));
         assert!(g.sections.iter().all(|s| s.topic != BiosTopic::MemoryGear));
         assert!(section(&g, BiosTopic::Iommu)
             .steps
             .join(" ")
             .contains("AMD CBS"));
+    }
+
+    /// A Ryzen 5000 on DDR4, made by `maker`, with the owner's PC for everything else.
+    fn am4_pc(maker: &str) -> SystemSnapshot {
+        let mut s = owner_pc_fixture();
+        s.cpu.vendor = CpuVendor::Amd;
+        s.cpu.name = "AMD Ryzen 5 5600X 6-Core Processor".into();
+        s.board.manufacturer = maker.into();
+        s.memory.ddr_generation = Some(4);
+        s
+    }
+
+    #[test]
+    fn am4_asus_board_calls_it_docp_not_expo() {
+        let g = build_guide(&am4_pc("ASUSTeK COMPUTER INC."));
+        let xmp = section(&g, BiosTopic::Xmp);
+        assert_eq!(xmp.title, "Turn on D.O.C.P.");
+        let steps = xmp.steps.join(" ");
+        assert!(steps.contains("Ai Overclock Tuner to D.O.C.P."), "{steps}");
+        assert!(!steps.contains("EXPO") && !xmp.why.contains("EXPO"));
+        let caution = section(&g, BiosTopic::UpdateBios).caution.clone().unwrap();
+        assert!(caution.contains("turn D.O.C.P. back on"), "{caution}");
+    }
+
+    #[test]
+    fn am4_msi_board_calls_it_a_xmp_not_expo() {
+        let g = build_guide(&am4_pc("Micro-Star International Co., Ltd."));
+        let xmp = section(&g, BiosTopic::Xmp);
+        assert_eq!(xmp.title, "Turn on A-XMP");
+        let steps = xmp.steps.join(" ");
+        assert!(steps.contains("switch on A-XMP"), "{steps}");
+        assert!(!steps.contains("EXPO"));
+    }
+
+    #[test]
+    fn am4_gigabyte_and_asrock_boards_say_xmp() {
+        for maker in ["Gigabyte Technology Co., Ltd.", "ASRock"] {
+            let g = build_guide(&am4_pc(maker));
+            let xmp = section(&g, BiosTopic::Xmp);
+            assert_eq!(xmp.title, "Turn on XMP", "{maker}");
+            assert!(!xmp.steps.join(" ").contains("EXPO"), "{maker}");
+        }
+    }
+
+    #[test]
+    fn am5_steps_name_expo_on_every_board() {
+        for maker in [
+            "ASUSTeK COMPUTER INC.",
+            "Micro-Star International Co., Ltd.",
+            "Gigabyte Technology Co., Ltd.",
+            "ASRock",
+            "Dell Inc.",
+        ] {
+            let mut s = am4_pc(maker);
+            s.memory.ddr_generation = Some(5);
+            let xmp = section(&build_guide(&s), BiosTopic::Xmp).clone();
+            assert_eq!(xmp.title, "Turn on EXPO", "{maker}");
+            assert!(xmp.steps.join(" ").contains("EXPO"), "{maker}");
+        }
+    }
+
+    #[test]
+    fn memory_profile_names() {
+        let name = |vendor, ddr, maker: &str| {
+            let mut s = owner_pc_fixture();
+            s.cpu.vendor = vendor;
+            s.memory.ddr_generation = ddr;
+            s.board.manufacturer = maker.into();
+            memory_profile_name(&s)
+        };
+        let makers = [
+            "ASUSTeK COMPUTER INC.",
+            "Micro-Star International Co., Ltd.",
+            "Gigabyte Technology Co., Ltd.",
+            "ASRock",
+            "Dell Inc.",
+        ];
+        for maker in makers {
+            // Intel is XMP, and AMD on DDR5 is EXPO, whoever made the board.
+            for ddr in [Some(4), Some(5), None] {
+                assert_eq!(name(CpuVendor::Intel, ddr, maker), "XMP", "{maker}");
+            }
+            assert_eq!(name(CpuVendor::Amd, Some(5), maker), "EXPO", "{maker}");
+        }
+        // AMD on DDR4, or when the generation isn't known, goes by the board maker.
+        for ddr in [Some(4), None] {
+            assert_eq!(name(CpuVendor::Amd, ddr, makers[0]), "D.O.C.P.");
+            assert_eq!(name(CpuVendor::Amd, ddr, makers[1]), "A-XMP");
+            for maker in &makers[2..] {
+                assert_eq!(name(CpuVendor::Amd, ddr, maker), "XMP", "{maker}");
+            }
+        }
+        // No known CPU maker: the common name.
+        assert_eq!(name(CpuVendor::Other, Some(4), makers[0]), "XMP");
+    }
+
+    #[test]
+    fn the_owners_intel_pc_still_reads_xmp() {
+        let g = build_guide(&owner_pc_fixture());
+        let xmp = section(&g, BiosTopic::Xmp);
+        assert_eq!(xmp.title, "Turn on XMP");
+        assert!(xmp.why.contains("XMP runs it"), "{}", xmp.why);
+        let caution = section(&g, BiosTopic::UpdateBios).caution.clone().unwrap();
+        assert!(caution.contains("turn XMP back on"), "{caution}");
     }
 
     #[test]

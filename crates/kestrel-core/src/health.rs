@@ -1,4 +1,5 @@
 //! The Health Check: one finding per check, in plain words, each with a way to fix it.
+use crate::bios_guide::memory_profile_name;
 use crate::gpu;
 use crate::ram::{self, ChannelLayout};
 use crate::snapshot::*;
@@ -158,17 +159,18 @@ fn ram_speed(s: &SystemSnapshot) -> Finding {
         severity: Severity::High,
     };
     let modules = &s.memory.modules;
+    let profile = memory_profile_name(s);
     match (ram::configured_mts(modules), ram::rated_mts(modules)) {
         (Some(now), Some(rated)) if now + 50 < rated => c.problem(
             format!("RAM runs at {now} MT/s, but the kit is rated {rated}"),
-            "XMP (Intel) or EXPO (AMD) is probably off in the BIOS. Turning it on is often the biggest single FPS gain. If you lowered the speed on purpose for stability, you can ignore this.",
+            format!("{profile} is probably off in the BIOS. Turning it on is often the biggest single FPS gain. If you lowered the speed on purpose for stability, you can ignore this."),
             Fix::BiosGuide { topic: BiosTopic::Xmp },
         ),
         (Some(now), Some(rated)) => c.pass(format!("RAM runs at {now} MT/s, its rated speed"), format!("The kit is rated {rated} MT/s.")),
         _ => c.result(
             Status::Unknown,
             "Couldn't tell your RAM's rated speed",
-            "Kestrel reads the rated speed from the module part number, and this kit's format isn't one it knows yet. The BIOS guide shows how to check XMP yourself.",
+            format!("Kestrel reads the rated speed from the module part number, and this kit's format isn't one it knows yet. The BIOS guide shows how to check {profile} yourself."),
             Fix::BiosGuide { topic: BiosTopic::Xmp },
         ),
     }
@@ -924,6 +926,55 @@ mod tests {
             Fix::BiosGuide {
                 topic: BiosTopic::Xmp
             }
+        );
+    }
+
+    #[test]
+    fn the_ram_speed_text_uses_the_name_this_pcs_bios_uses() {
+        let slow_ram = |configure: &dyn Fn(&mut SystemSnapshot)| {
+            let mut s = owner_pc_fixture();
+            for m in &mut s.memory.modules {
+                m.configured_mts = Some(2133);
+            }
+            configure(&mut s);
+            get(&run_health_check(&s, today()), "ram-speed").clone()
+        };
+        let intel = slow_ram(&|_| {});
+        assert!(
+            intel.detail.starts_with("XMP is probably off"),
+            "{}",
+            intel.detail
+        );
+        let am5 = slow_ram(&|s| {
+            s.cpu.vendor = CpuVendor::Amd;
+            s.memory.ddr_generation = Some(5);
+        });
+        assert!(
+            am5.detail.starts_with("EXPO is probably off"),
+            "{}",
+            am5.detail
+        );
+        // The owner's board is an ASUS: on AM4 it says D.O.C.P.
+        let am4 = slow_ram(&|s| s.cpu.vendor = CpuVendor::Amd);
+        assert!(
+            am4.detail.starts_with("D.O.C.P. is probably off"),
+            "{}",
+            am4.detail
+        );
+        assert!(!am4.detail.contains("EXPO") && !am4.detail.contains("(Intel)"));
+    }
+
+    #[test]
+    fn the_unknown_ram_speed_text_names_the_profile_too() {
+        let mut s = owner_pc_fixture();
+        s.cpu.vendor = CpuVendor::Amd;
+        s.memory.modules[0].part_number = "CT16G4DFRA32A".into();
+        let ram = get(&run_health_check(&s, today()), "ram-speed").clone();
+        assert_eq!(ram.status, Status::Unknown);
+        assert!(
+            ram.detail.contains("check D.O.C.P. yourself"),
+            "{}",
+            ram.detail
         );
     }
 
