@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kestrel-core"]
+members = ["crates/kestrel-core", "crates/kestrel-probe"]
 
 [workspace.package]
 edition = "2021"

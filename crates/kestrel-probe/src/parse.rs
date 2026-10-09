@@ -1,0 +1,202 @@
+//! Pure helpers that turn raw Windows values into Kestrel's model. No OS calls, so they're tested anywhere.
+use kestrel_core::{BusyProcess, CpuVendor, DriveMedia, FormFactor, NetKind};
+
+/// CIM datetime "20240520000000.000000+000" → "2024-05-20".
+pub fn cim_date(raw: &str) -> Option<String> {
+    let digits = raw.get(0..8)?;
+    if !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let (y, m, d) = (&digits[0..4], &digits[4..6], &digits[6..8]);
+    chrono::NaiveDate::from_ymd_opt(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?)?;
+    Some(format!("{y}-{m}-{d}"))
+}
+
+/// Built-in plan names are stored as "@…powrprof.dll,-14,Balanced"; custom names are plain.
+pub fn power_plan_name(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.starts_with('@') {
+        raw.rsplit(',').next().unwrap_or(raw).trim().to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+/// "SwapEffectUpgradeEnable=1;GpuPreference=2;" → Some(2).
+pub fn gpu_preference(raw: &str) -> Option<u8> {
+    raw.split(';')
+        .find_map(|part| part.trim().strip_prefix("GpuPreference=")?.parse().ok())
+}
+
+/// Delivery Optimization download mode 3 means "PCs on my local network and on the internet".
+pub fn delivery_optimization_internet(mode: Option<u32>) -> bool {
+    mode == Some(3)
+}
+
+/// StartupApproved entries: even first byte (0x02, 0x06) = enabled, odd (0x03, 0x07) = disabled. Missing = enabled.
+pub fn startup_entry_enabled(approved: Option<&[u8]>) -> bool {
+    approved
+        .and_then(|bytes| bytes.first())
+        .is_none_or(|first| first % 2 == 0)
+}
+
+/// MSFT_NetAdapter.NdisPhysicalMedium: 14 = 802.3 Ethernet, 9 = native 802.11 Wi-Fi.
+pub fn net_kind(ndis_physical_medium: u64) -> NetKind {
+    match ndis_physical_medium {
+        14 => NetKind::Ethernet,
+        9 => NetKind::Wifi,
+        _ => NetKind::Other,
+    }
+}
+
+/// MSFT_PhysicalDisk: BusType 17 = NVMe; MediaType 4 = SSD, 3 = HDD.
+pub fn drive_media(bus_type: Option<u64>, media_type: Option<u64>) -> DriveMedia {
+    if bus_type == Some(17) {
+        return DriveMedia::Nvme;
+    }
+    match media_type {
+        Some(4) => DriveMedia::Ssd,
+        Some(3) => DriveMedia::Hdd,
+        _ => DriveMedia::Unknown,
+    }
+}
+
+/// Win32_ComputerSystem.PCSystemType 2 = mobile. A battery also means laptop.
+pub fn form_factor(pc_system_type: Option<u64>, has_battery: bool) -> FormFactor {
+    if pc_system_type == Some(2) || has_battery {
+        FormFactor::Laptop
+    } else {
+        FormFactor::Desktop
+    }
+}
+
+pub fn cpu_vendor(manufacturer: &str) -> CpuVendor {
+    if manufacturer.contains("Intel") {
+        CpuVendor::Intel
+    } else if manufacturer.contains("AMD") {
+        CpuVendor::Amd
+    } else {
+        CpuVendor::Other
+    }
+}
+
+/// SMBIOSMemoryType: 24 = DDR3, 26 = DDR4, 34 = DDR5.
+pub fn ddr_generation(smbios_memory_type: u64) -> Option<u8> {
+    match smbios_memory_type {
+        24 => Some(3),
+        26 => Some(4),
+        34 => Some(5),
+        _ => None,
+    }
+}
+
+/// Kestrel's own work (its window, its probe, and the WMI host answering its queries) isn't background load.
+const NOT_BACKGROUND: [&str; 6] = [
+    "system idle process",
+    "idle",
+    "kestrel.exe",
+    "kestrel-probe.exe",
+    "wmiprvse.exe",
+    "msedgewebview2.exe",
+];
+
+/// Per-process CPU samples (100 = one full core) → share of the whole CPU, ≥ 5%, busiest first, at most 5.
+pub fn busy_processes(samples: Vec<(String, f32)>, logical_cpus: u32) -> Vec<BusyProcess> {
+    let cores = logical_cpus.max(1) as f32;
+    let mut busy: Vec<BusyProcess> = samples
+        .into_iter()
+        .filter(|(name, _)| !NOT_BACKGROUND.contains(&name.to_ascii_lowercase().as_str()))
+        .map(|(name, usage)| BusyProcess {
+            name,
+            cpu_percent: usage / cores,
+        })
+        .filter(|p| p.cpu_percent >= 5.0)
+        .collect();
+    busy.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
+    busy.truncate(5);
+    busy
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cim_dates() {
+        assert_eq!(
+            cim_date("20240520000000.000000+000").as_deref(),
+            Some("2024-05-20")
+        );
+        assert_eq!(cim_date("2024"), None);
+        assert_eq!(cim_date("20241340000000.000000+000"), None);
+        assert_eq!(cim_date(""), None);
+    }
+
+    #[test]
+    fn power_plan_names() {
+        assert_eq!(
+            power_plan_name("@%SystemRoot%\\system32\\powrprof.dll,-14,Balanced"),
+            "Balanced"
+        );
+        assert_eq!(power_plan_name("Kestrel"), "Kestrel");
+        assert_eq!(power_plan_name("  My plan, tuned "), "My plan, tuned");
+    }
+
+    #[test]
+    fn gpu_preferences() {
+        assert_eq!(gpu_preference("GpuPreference=2;"), Some(2));
+        assert_eq!(
+            gpu_preference("SwapEffectUpgradeEnable=1;GpuPreference=1;"),
+            Some(1)
+        );
+        assert_eq!(gpu_preference("SwapEffectUpgradeEnable=1;"), None);
+    }
+
+    #[test]
+    fn delivery_optimization_modes() {
+        assert!(delivery_optimization_internet(Some(3)));
+        assert!(!delivery_optimization_internet(Some(1)));
+        assert!(!delivery_optimization_internet(None));
+    }
+
+    #[test]
+    fn startup_approved_bytes() {
+        assert!(startup_entry_enabled(None));
+        assert!(startup_entry_enabled(Some(&[0x02, 0, 0, 0])));
+        assert!(startup_entry_enabled(Some(&[0x06, 0, 0, 0])));
+        assert!(!startup_entry_enabled(Some(&[0x03, 0, 0, 0])));
+    }
+
+    #[test]
+    fn hardware_codes() {
+        assert_eq!(net_kind(14), NetKind::Ethernet);
+        assert_eq!(net_kind(9), NetKind::Wifi);
+        assert_eq!(net_kind(0), NetKind::Other);
+        assert_eq!(drive_media(Some(17), Some(4)), DriveMedia::Nvme);
+        assert_eq!(drive_media(Some(11), Some(4)), DriveMedia::Ssd);
+        assert_eq!(drive_media(Some(11), Some(3)), DriveMedia::Hdd);
+        assert_eq!(drive_media(None, None), DriveMedia::Unknown);
+        assert_eq!(form_factor(Some(2), false), FormFactor::Laptop);
+        assert_eq!(form_factor(Some(1), true), FormFactor::Laptop);
+        assert_eq!(form_factor(Some(1), false), FormFactor::Desktop);
+        assert_eq!(cpu_vendor("GenuineIntel"), CpuVendor::Intel);
+        assert_eq!(cpu_vendor("AuthenticAMD"), CpuVendor::Amd);
+        assert_eq!(ddr_generation(26), Some(4));
+        assert_eq!(ddr_generation(34), Some(5));
+        assert_eq!(ddr_generation(0), None);
+    }
+
+    #[test]
+    fn busy_process_list() {
+        let samples = vec![
+            ("chrome.exe".to_string(), 160.0),
+            ("System Idle Process".to_string(), 1500.0),
+            ("Kestrel.exe".to_string(), 80.0),
+            ("explorer.exe".to_string(), 4.0),
+        ];
+        let busy = busy_processes(samples, 16);
+        assert_eq!(busy.len(), 1);
+        assert_eq!(busy[0].name, "chrome.exe");
+        assert!((busy[0].cpu_percent - 10.0).abs() < 0.01);
+    }
+}
