@@ -3,6 +3,8 @@ pub mod parse;
 
 #[cfg(not(windows))]
 mod mock;
+#[cfg(windows)]
+mod win;
 
 use kestrel_core::{Report, SystemSnapshot};
 
@@ -14,7 +16,7 @@ pub fn collect_snapshot() -> SystemSnapshot {
     }
     #[cfg(windows)]
     {
-        unimplemented!("Windows probes arrive in Task 9")
+        win::collect()
     }
 }
 
