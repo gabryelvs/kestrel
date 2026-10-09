@@ -1,5 +1,6 @@
 //! Pure helpers that turn raw Windows values into Kestrel's model. No OS calls, so they're tested anywhere.
 use kestrel_core::{BusyProcess, CpuVendor, DriveMedia, FormFactor, NetKind};
+use std::collections::HashMap;
 
 /// CIM datetime "20240520000000.000000+000" → "2024-05-20".
 pub fn cim_date(raw: &str) -> Option<String> {
@@ -13,10 +14,16 @@ pub fn cim_date(raw: &str) -> Option<String> {
 }
 
 /// Built-in plan names are stored as "@…powrprof.dll,-14,Balanced"; custom names are plain.
+/// A resource reference with no name after it ("@…powrprof.dll,-14") has nothing to show, so it gives "".
 pub fn power_plan_name(raw: &str) -> String {
     let raw = raw.trim();
     if raw.starts_with('@') {
-        raw.rsplit(',').next().unwrap_or(raw).trim().to_string()
+        let last = raw.rsplit(',').next().unwrap_or(raw).trim();
+        if last.parse::<i64>().is_ok() {
+            String::new()
+        } else {
+            last.to_string()
+        }
     } else {
         raw.to_string()
     }
@@ -101,11 +108,27 @@ const NOT_BACKGROUND: [&str; 6] = [
 ];
 
 /// Per-process CPU samples (100 = one full core) → share of the whole CPU, ≥ 5%, busiest first, at most 5.
+/// An app often runs as many processes (a browser has dozens), so samples with the same name (any letter case)
+/// are added up first, under the spelling of the first one seen.
 pub fn busy_processes(samples: Vec<(String, f32)>, logical_cpus: u32) -> Vec<BusyProcess> {
     let cores = logical_cpus.max(1) as f32;
-    let mut busy: Vec<BusyProcess> = samples
+    let mut position_by_name: HashMap<String, usize> = HashMap::new();
+    let mut totals: Vec<(String, f32)> = Vec::new();
+    for (name, usage) in samples {
+        let key = name.to_ascii_lowercase();
+        if NOT_BACKGROUND.contains(&key.as_str()) {
+            continue;
+        }
+        match position_by_name.get(&key) {
+            Some(&at) => totals[at].1 += usage,
+            None => {
+                position_by_name.insert(key, totals.len());
+                totals.push((name, usage));
+            }
+        }
+    }
+    let mut busy: Vec<BusyProcess> = totals
         .into_iter()
-        .filter(|(name, _)| !NOT_BACKGROUND.contains(&name.to_ascii_lowercase().as_str()))
         .map(|(name, usage)| BusyProcess {
             name,
             cpu_percent: usage / cores,
@@ -140,6 +163,15 @@ mod tests {
         );
         assert_eq!(power_plan_name("Kestrel"), "Kestrel");
         assert_eq!(power_plan_name("  My plan, tuned "), "My plan, tuned");
+    }
+
+    #[test]
+    fn power_plan_resource_id_without_a_name_is_empty() {
+        // A bare string-resource id carries no name; the caller falls back to its table of known plan GUIDs.
+        assert_eq!(
+            power_plan_name("@%SystemRoot%\\system32\\powrprof.dll,-14"),
+            ""
+        );
     }
 
     #[test]
@@ -198,5 +230,30 @@ mod tests {
         assert_eq!(busy.len(), 1);
         assert_eq!(busy[0].name, "chrome.exe");
         assert!((busy[0].cpu_percent - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn busy_processes_with_the_same_name_are_added_up() {
+        // One app runs as many processes: each is under the 5% bar alone, but together they are over it.
+        let samples = vec![
+            ("chrome.exe".to_string(), 48.0),
+            ("Chrome.exe".to_string(), 40.0),
+            ("discord.exe".to_string(), 8.0),
+        ];
+        let busy = busy_processes(samples, 16);
+        assert_eq!(busy.len(), 1);
+        assert_eq!(busy[0].name, "chrome.exe");
+        assert!((busy[0].cpu_percent - 5.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn busy_processes_keep_the_spelling_of_the_first_sample() {
+        let samples = vec![
+            ("Chrome.exe".to_string(), 48.0),
+            ("chrome.exe".to_string(), 40.0),
+        ];
+        let busy = busy_processes(samples, 16);
+        assert_eq!(busy.len(), 1);
+        assert_eq!(busy[0].name, "Chrome.exe");
     }
 }
