@@ -36,6 +36,23 @@ fn rules() -> &'static [Rule] {
     })
 }
 
+/// Standard DDR4/DDR5 speed bins in MT/s. Scaled part-number codes snap to the nearest one.
+const SPEED_BINS: &[u32] = &[
+    1600, 1866, 2133, 2400, 2666, 2800, 2933, 3000, 3200, 3333, 3466, 3600, 3733, 3866, 4000, 4133,
+    4266, 4400, 4600, 4800, 5200, 5600, 6000, 6400, 6800, 7200, 7600, 8000, 8400,
+];
+
+/// Snaps a speed read from a scaled code (e.g. "26" x 100) to the nearest bin within 70 MT/s,
+/// or keeps it when no bin is that close.
+fn snap_to_bin(mts: u32) -> u32 {
+    SPEED_BINS
+        .iter()
+        .copied()
+        .min_by_key(|bin| bin.abs_diff(mts))
+        .filter(|bin| bin.abs_diff(mts) <= 70)
+        .unwrap_or(mts)
+}
+
 /// Rated speed in MT/s read from a module's part number, if the brand's format is known.
 pub fn rated_mts_from_part(part: &str) -> Option<u32> {
     let part = part.trim().to_ascii_uppercase();
@@ -44,7 +61,12 @@ pub fn rated_mts_from_part(part: &str) -> Option<u32> {
     }
     rules().iter().find_map(|rule| {
         let digits = rule.re.captures(&part)?.get(1)?.as_str();
-        let mts = digits.parse::<u32>().ok()? * rule.scale;
+        let scaled = digits.parse::<u32>().ok()? * rule.scale;
+        let mts = if rule.scale == 1 {
+            scaled
+        } else {
+            snap_to_bin(scaled)
+        };
         (1600..=12_000).contains(&mts).then_some(mts)
     })
 }
@@ -100,20 +122,38 @@ fn channel_letter(module: &MemoryModule) -> Option<char> {
         })
 }
 
+/// The socket or controller a module sits behind: the N in `Controller<N>` or a `P<N>` socket token.
+fn socket_qualifier(module: &MemoryModule) -> Option<u32> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re =
+        RE.get_or_init(|| Regex::new(r"(?i)controller\s*(\d+)|\bp(\d+)\b").expect("valid pattern"));
+    [&module.device_locator, &module.bank_label]
+        .into_iter()
+        .find_map(|text| {
+            let caps = re.captures(text)?;
+            caps.get(1)
+                .or_else(|| caps.get(2))?
+                .as_str()
+                .parse::<u32>()
+                .ok()
+        })
+}
+
+/// A module's channel: its letter, qualified by the socket or controller it sits behind.
+fn channel_key(module: &MemoryModule) -> Option<(Option<u32>, char)> {
+    Some((socket_qualifier(module), channel_letter(module)?))
+}
+
 /// Whether the modules sit on more than one memory channel.
 pub fn channel_layout(modules: &[MemoryModule]) -> ChannelLayout {
     match modules.len() {
         0 => ChannelLayout::Unknown,
         1 => ChannelLayout::Single,
-        _ => match modules
-            .iter()
-            .map(channel_letter)
-            .collect::<Option<Vec<char>>>()
-        {
-            Some(mut letters) => {
-                letters.sort_unstable();
-                letters.dedup();
-                if letters.len() >= 2 {
+        _ => match modules.iter().map(channel_key).collect::<Option<Vec<_>>>() {
+            Some(mut keys) => {
+                keys.sort_unstable();
+                keys.dedup();
+                if keys.len() >= 2 {
                     ChannelLayout::Dual
                 } else {
                     ChannelLayout::Single
@@ -266,5 +306,73 @@ mod tests {
         assert_eq!(channel_layout(&unknown), ChannelLayout::Unknown);
         assert_eq!(channel_layout(&dual[..1]), ChannelLayout::Single);
         assert_eq!(channel_layout(&[]), ChannelLayout::Unknown);
+    }
+
+    #[test]
+    fn scaled_part_codes_snap_to_standard_speed_bins() {
+        assert_eq!(rated_mts_from_part("KF426C16BB/8"), Some(2666));
+        assert_eq!(rated_mts_from_part("HX426C16FB3/8"), Some(2666));
+        assert_eq!(rated_mts_from_part("KF429C17BB1/16"), Some(2933));
+        assert_eq!(rated_mts_from_part("KF437C19BBA/16"), Some(3733));
+        assert_eq!(rated_mts_from_part("HX421C14FB/8"), Some(2133));
+        assert_eq!(rated_mts_from_part("BL8G26C16U4B.M8FE1"), Some(2666));
+        assert_eq!(rated_mts_from_part("PVS416G266C5K"), Some(2666));
+    }
+
+    #[test]
+    fn scaled_part_code_far_from_every_bin_is_kept() {
+        assert_eq!(rated_mts_from_part("KF425C16BB/8"), Some(2500));
+    }
+
+    #[test]
+    fn partially_recognised_kit_is_not_guessed() {
+        let known = module("CMG32GX4M2D3600C18", Some(3200), Some(3600), "", "");
+        let unknown = module("CT16G4DFRA32A", Some(3200), None, "", "");
+        assert_eq!(rated_mts(&[known, unknown]), None);
+    }
+
+    #[test]
+    fn smbios_fallback_needs_every_module_and_takes_the_slowest() {
+        let with = |max| module("CT16G4DFRA32A", Some(2400), max, "", "");
+        assert_eq!(rated_mts(&[with(Some(3200)), with(None)]), None);
+        assert_eq!(rated_mts(&[with(Some(3200)), with(Some(0))]), None);
+        assert_eq!(rated_mts(&[with(Some(3200)), with(Some(2666))]), Some(2666));
+    }
+
+    #[test]
+    fn configured_speed_is_the_slowest_module() {
+        let at = |mts| module("", mts, None, "", "");
+        assert_eq!(
+            configured_mts(&[at(Some(2133)), at(Some(3200))]),
+            Some(2133)
+        );
+        assert_eq!(configured_mts(&[at(Some(3600)), at(None)]), None);
+    }
+
+    #[test]
+    fn channel_layout_is_unknown_unless_every_module_can_be_placed() {
+        let one_known = [
+            module("", None, None, "ChannelA-DIMM0", ""),
+            module("", None, None, "DIMM 1", "BANK 2"),
+        ];
+        assert_eq!(channel_layout(&one_known), ChannelLayout::Unknown);
+        let four =
+            ["DIMM_A1", "DIMM_A2", "DIMM_B1", "DIMM_B2"].map(|l| module("", None, None, l, ""));
+        assert_eq!(channel_layout(&four), ChannelLayout::Dual);
+        assert_eq!(channel_layout(&four[..2]), ChannelLayout::Single);
+    }
+
+    #[test]
+    fn controllers_and_sockets_are_separate_channels() {
+        let controllers = [
+            module("", None, None, "Controller0-ChannelA-DIMM0", ""),
+            module("", None, None, "Controller1-ChannelA-DIMM0", ""),
+        ];
+        assert_eq!(channel_layout(&controllers), ChannelLayout::Dual);
+        let sockets = [
+            module("", None, None, "DIMM 0", "P0 CHANNEL A"),
+            module("", None, None, "DIMM 1", "P1 CHANNEL A"),
+        ];
+        assert_eq!(channel_layout(&sockets), ChannelLayout::Dual);
     }
 }
