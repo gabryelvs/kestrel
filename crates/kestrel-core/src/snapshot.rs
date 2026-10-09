@@ -96,9 +96,20 @@ mod tests {
 
     #[test]
     fn enums_use_kebab_case_and_fields_camel_case() {
-        assert_eq!(serde_json::to_string(&DriveMedia::Nvme).unwrap(), "\"nvme\"");
-        assert_eq!(serde_json::to_string(&ServiceState::NotInstalled).unwrap(), "\"not-installed\"");
-        let json = serde_json::to_string(&OsInfo { caption: "x".into(), build: 1, display_version: None }).unwrap();
+        assert_eq!(
+            serde_json::to_string(&DriveMedia::Nvme).unwrap(),
+            "\"nvme\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ServiceState::NotInstalled).unwrap(),
+            "\"not-installed\""
+        );
+        let json = serde_json::to_string(&OsInfo {
+            caption: "x".into(),
+            build: 1,
+            display_version: None,
+        })
+        .unwrap();
         assert!(json.contains("displayVersion"));
     }
 
