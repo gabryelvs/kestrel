@@ -19,6 +19,11 @@ pub struct Query {
     counter: PDH_HCOUNTER,
 }
 
+// SAFETY: PDH handles can be used from any thread, they are not tied to the one that opened them. A `Query` has a
+// single owner and is never used from two threads at once: the live load sampler that holds one sits behind a Mutex
+// in the app's state.
+unsafe impl Send for Query {}
+
 impl Query {
     /// Opens a query for the counter at `counter_path`, written in English whatever language Windows speaks,
     /// for example `\Process(*)\% Processor Time`. None if Windows can't provide that counter.

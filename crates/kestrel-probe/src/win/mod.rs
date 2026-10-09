@@ -1,6 +1,7 @@
 //! Real probes for Windows. Each one is independent: a failure becomes `None` plus a ProbeError.
 mod display;
 mod firmware;
+pub(crate) mod gpu_usage;
 mod pdh;
 mod registry_probe;
 mod system_info;

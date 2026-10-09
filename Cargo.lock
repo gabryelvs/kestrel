@@ -281,6 +281,7 @@ dependencies = [
  "chrono",
  "kestrel-core",
  "nvml-wrapper",
+ "serde",
  "serde_json",
  "sysinfo",
  "windows-sys",

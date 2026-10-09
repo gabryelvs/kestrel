@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 kestrel-core = { version = "0.1.0", path = "../kestrel-core" }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sysinfo = "0.39.6"
 

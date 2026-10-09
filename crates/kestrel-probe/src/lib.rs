@@ -1,4 +1,5 @@
 //! Kestrel probe: looks at the PC and fills a `SystemSnapshot`. Read-only by design.
+pub mod load;
 pub mod parse;
 
 #[cfg(not(windows))]
