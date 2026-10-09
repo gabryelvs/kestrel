@@ -4,6 +4,7 @@ import type { Report } from './api/types';
 import { Banner } from './components/Banner';
 import { TitleBar, type Tab } from './components/TitleBar';
 import { ComingSoon } from './pages/ComingSoon';
+import { Home } from './pages/Home';
 import { strings } from './strings';
 
 type Scan = { state: 'loading' } | { state: 'ready'; report: Report } | { state: 'failed'; message: string };
@@ -63,13 +64,6 @@ function Page({ tab, report, onTab, onRescan }: PageProps) {
     case 'benchmark':
       return <ComingSoon {...strings.comingSoon.benchmark} />;
     default:
-      return (
-        <section className="panel">
-          <div className="label">{strings.home.score}</div>
-          <p className="num">{report.score.value}/100</p>
-          <button className="link" onClick={() => onTab('health')}>{strings.home.seeAll}</button>{' '}
-          <button className="link" onClick={onRescan}>{strings.home.rescan}</button>
-        </section>
-      );
+      return <Home report={report} onTab={onTab} onGuide={() => onTab('toolbox')} onRescan={onRescan} />;
   }
 }

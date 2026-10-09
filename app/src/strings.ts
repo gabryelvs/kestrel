@@ -12,6 +12,7 @@ export const strings = {
     score: 'System score',
     fixes: (n: number) => (n === 0 ? 'Nothing to fix' : n === 1 ? '1 fix found' : `${n} fixes found`),
     gain: (n: number) => `Fixes could add up to ${n} points`,
+    stage: (n: number) => `Stage ${n}`,
     applyPlan: 'Apply plan',
     seeAll: 'See all checks',
     hardware: 'Hardware',
