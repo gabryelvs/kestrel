@@ -1,6 +1,7 @@
 //! Real probes for Windows. Each one is independent: a failure becomes `None` plus a ProbeError.
 mod display;
 mod firmware;
+mod pdh;
 mod registry_probe;
 mod system_info;
 mod wmi_probe;
@@ -39,7 +40,7 @@ fn collect_here() -> SystemSnapshot {
     registry_probe::fill(&mut s, &mut errors);
     display::fill(&mut s);
     s.security.iommu = Some(firmware::iommu_enabled());
-    system_info::fill(&mut s);
+    system_info::fill(&mut s, &mut errors);
     s.probe_errors = errors;
     s
 }

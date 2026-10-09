@@ -97,14 +97,49 @@ pub fn ddr_generation(smbios_memory_type: u64) -> Option<u8> {
     }
 }
 
-/// Kestrel's own work (its window, its probe, and the WMI host answering its queries) isn't background load.
-const NOT_BACKGROUND: [&str; 6] = [
+/// Entries of the "Process" performance counters that are Windows itself, not an app.
+const PDH_NOT_APPS: [&str; 6] = [
+    "_Total",
+    "Idle",
+    "System",
+    "Registry",
+    "Memory Compression",
+    "Secure System",
+];
+
+/// A "Process" performance counter instance name → the process's exe name: "chrome#3" → "chrome.exe".
+/// The counters tell apart processes that share a name by adding "#<digits>", and leave out ".exe".
+/// The totals and Windows' own entries (`PDH_NOT_APPS`) give None.
+pub fn pdh_instance_to_exe(instance: &str) -> Option<String> {
+    let name = instance
+        .rsplit_once('#')
+        .filter(|(_, digits)| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(instance, |(name, _)| name);
+    if name.is_empty() || PDH_NOT_APPS.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+        return None;
+    }
+    Some(format!("{name}.exe"))
+}
+
+/// Kestrel's own work (its window, its probe, and the WMI host answering its queries) isn't background load, and
+/// neither is Windows' own: svchost.exe alone adds up dozens of services, which no one can close to free the CPU.
+const NOT_BACKGROUND: &[&str] = &[
     "system idle process",
     "idle",
     "kestrel.exe",
     "kestrel-probe.exe",
     "wmiprvse.exe",
     "msedgewebview2.exe",
+    "svchost.exe",
+    "dwm.exe",
+    "csrss.exe",
+    "lsass.exe",
+    "services.exe",
+    "wininit.exe",
+    "winlogon.exe",
+    "smss.exe",
+    "audiodg.exe",
+    "fontdrvhost.exe",
 ];
 
 /// Per-process CPU samples (100 = one full core) → share of the whole CPU, ≥ 5%, busiest first, at most 5.
@@ -255,5 +290,61 @@ mod tests {
         let busy = busy_processes(samples, 16);
         assert_eq!(busy.len(), 1);
         assert_eq!(busy[0].name, "Chrome.exe");
+    }
+
+    #[test]
+    fn pdh_instances_become_exe_names() {
+        assert_eq!(
+            pdh_instance_to_exe("chrome#3").as_deref(),
+            Some("chrome.exe")
+        );
+        assert_eq!(
+            pdh_instance_to_exe("Kestrel").as_deref(),
+            Some("Kestrel.exe")
+        );
+        assert_eq!(
+            pdh_instance_to_exe("svchost#12").as_deref(),
+            Some("svchost.exe")
+        );
+        // Only a trailing "#<digits>" marks a second process with the same name.
+        assert_eq!(pdh_instance_to_exe("C#Tool").as_deref(), Some("C#Tool.exe"));
+    }
+
+    #[test]
+    fn pdh_system_instances_are_not_apps() {
+        for name in [
+            "_Total",
+            "Idle",
+            "System",
+            "Registry",
+            "Memory Compression",
+            "Secure System",
+        ] {
+            assert_eq!(pdh_instance_to_exe(name), None, "{name}");
+        }
+        assert_eq!(pdh_instance_to_exe(""), None);
+        assert_eq!(pdh_instance_to_exe("#2"), None);
+    }
+
+    #[test]
+    fn windows_system_processes_are_never_background_apps() {
+        // svchost.exe hosts dozens of services; added up, it would otherwise be named as an app to close.
+        let svchost = vec![("svchost.exe".to_string(), 200.0)];
+        assert!(busy_processes(svchost, 16).is_empty());
+        for name in [
+            "svchost.exe",
+            "dwm.exe",
+            "csrss.exe",
+            "lsass.exe",
+            "services.exe",
+            "wininit.exe",
+            "winlogon.exe",
+            "smss.exe",
+            "audiodg.exe",
+            "fontdrvhost.exe",
+        ] {
+            let busy = busy_processes(vec![(name.to_string(), 800.0)], 16);
+            assert!(busy.is_empty(), "{name}");
+        }
     }
 }
