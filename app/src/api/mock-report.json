@@ -1,0 +1,517 @@
+{
+  "appVersion": "0.1.0",
+  "snapshot": {
+    "schemaVersion": 1,
+    "collectedAt": "2026-10-09T21:26:00Z",
+    "os": {
+      "caption": "Microsoft Windows 11 Pro",
+      "build": 26200,
+      "displayVersion": "25H2"
+    },
+    "machine": {
+      "formFactor": "desktop",
+      "manufacturer": "ASUS",
+      "model": "System Product Name",
+      "onBattery": null
+    },
+    "cpu": {
+      "name": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz",
+      "vendor": "intel",
+      "cores": 8,
+      "threads": 16
+    },
+    "gpus": [
+      {
+        "name": "Parsec Virtual Display Adapter",
+        "vendor": "virtual",
+        "driverVersion": "0.45.0.0",
+        "driverDate": null,
+        "vramMb": null,
+        "isIntegrated": false
+      },
+      {
+        "name": "NVIDIA GeForce RTX 3060 Ti",
+        "vendor": "nvidia",
+        "driverVersion": "32.0.16.1074",
+        "driverDate": "2026-09-15",
+        "vramMb": 8192,
+        "isIntegrated": false
+      }
+    ],
+    "memory": {
+      "totalMb": 32768,
+      "ddrGeneration": 4,
+      "modules": [
+        {
+          "capacityMb": 16384,
+          "configuredMts": 3600,
+          "maxMts": 2133,
+          "partNumber": "CMG32GX4M2D3600C18",
+          "manufacturer": "Corsair",
+          "bankLabel": "BANK 1",
+          "deviceLocator": "ChannelA-DIMM2"
+        },
+        {
+          "capacityMb": 16384,
+          "configuredMts": 3600,
+          "maxMts": 2133,
+          "partNumber": "CMG32GX4M2D3600C18",
+          "manufacturer": "Corsair",
+          "bankLabel": "BANK 3",
+          "deviceLocator": "ChannelB-DIMM2"
+        }
+      ]
+    },
+    "displays": [
+      {
+        "name": "\\\\.\\DISPLAY1",
+        "adapter": "NVIDIA GeForce RTX 3060 Ti",
+        "currentHz": 360,
+        "maxHz": 360,
+        "width": 1920,
+        "height": 1080,
+        "isPrimary": true,
+        "isVirtual": false
+      }
+    ],
+    "board": {
+      "manufacturer": "ASUSTeK COMPUTER INC.",
+      "product": "ROG MAXIMUS XIII HERO",
+      "biosVersion": "2103",
+      "biosDate": "2024-05-20"
+    },
+    "storage": {
+      "valorant": {
+        "path": "C:/Riot Games/VALORANT/live",
+        "driveLetter": "C",
+        "media": "nvme",
+        "freeGb": 210.5,
+        "totalGb": 931.5
+      }
+    },
+    "windows": {
+      "powerPlan": {
+        "guid": "381b4222-f694-41f0-9685-ff5bb260df2e",
+        "name": "Balanced"
+      },
+      "gameMode": true,
+      "backgroundRecording": false,
+      "hags": true,
+      "valorantGpuPreference": null,
+      "pendingRestart": false,
+      "startupAppCount": 7
+    },
+    "security": {
+      "tpm2": true,
+      "secureBoot": true,
+      "vbsRunning": false,
+      "hvciRunning": false,
+      "iommu": false,
+      "vanguard": "running"
+    },
+    "network": {
+      "adapters": [
+        {
+          "name": "Intel(R) Ethernet Controller (3) I225-V",
+          "kind": "ethernet",
+          "linkMbps": 2500,
+          "connected": true,
+          "powerSaving": true
+        }
+      ],
+      "deliveryOptimizationInternet": false
+    },
+    "background": {
+      "busyProcesses": []
+    },
+    "probeErrors": [
+      {
+        "probe": "mock",
+        "message": "Not running on Windows, so this is the sample PC from fixtures/owner-pc.json."
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "ram-speed",
+      "category": "hardware",
+      "severity": "high",
+      "status": "pass",
+      "title": "RAM runs at 3600 MT/s, its rated speed",
+      "detail": "The kit is rated 3600 MT/s.",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "ram-channels",
+      "category": "hardware",
+      "severity": "high",
+      "status": "pass",
+      "title": "RAM runs in dual channel",
+      "detail": "Your sticks sit on separate memory channels, which doubles memory bandwidth.",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "bios-age",
+      "category": "hardware",
+      "severity": "low",
+      "status": "problem",
+      "title": "BIOS is from 2024-05-20",
+      "detail": "Riot has asked some players to install a BIOS update released after December 2025 to fix a security flaw. Updates also improve memory stability. Updating resets BIOS settings, so turn XMP back on afterwards.",
+      "fix": {
+        "kind": "bios-guide",
+        "topic": "update-bios"
+      }
+    },
+    {
+      "id": "display-refresh",
+      "category": "display",
+      "severity": "high",
+      "status": "pass",
+      "title": "Monitor runs at its top refresh rate (360 Hz)",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "virtual-display",
+      "category": "display",
+      "severity": "low",
+      "status": "pass",
+      "title": "No virtual displays active",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "gpu-driver-age",
+      "category": "gpu",
+      "severity": "medium",
+      "status": "pass",
+      "title": "Graphics driver is recent (610.74, from 2026-09-15)",
+      "detail": "NVIDIA GeForce RTX 3060 Ti",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "valorant-gpu",
+      "category": "gpu",
+      "severity": "high",
+      "status": "pass",
+      "title": "VALORANT runs on your NVIDIA GeForce RTX 3060 Ti",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "on-battery",
+      "category": "gpu",
+      "severity": "medium",
+      "status": "pass",
+      "title": "Running on mains power",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "power-plan",
+      "category": "windows",
+      "severity": "medium",
+      "status": "problem",
+      "title": "Power plan is Balanced",
+      "detail": "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 3; until then you can pick High performance in Control Panel → Power Options.",
+      "fix": {
+        "kind": "later-stage",
+        "stage": 3
+      }
+    },
+    {
+      "id": "game-mode",
+      "category": "windows",
+      "severity": "medium",
+      "status": "pass",
+      "title": "Game Mode is on",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "background-recording",
+      "category": "windows",
+      "severity": "medium",
+      "status": "pass",
+      "title": "Background recording is off",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "pending-restart",
+      "category": "windows",
+      "severity": "low",
+      "status": "pass",
+      "title": "No restart pending",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "windows-build",
+      "category": "windows",
+      "severity": "medium",
+      "status": "pass",
+      "title": "Windows 11 25H2",
+      "detail": "Build 26200.",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "valorant-drive",
+      "category": "storage",
+      "severity": "high",
+      "status": "pass",
+      "title": "VALORANT is on an NVMe SSD (C:)",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "drive-space",
+      "category": "storage",
+      "severity": "low",
+      "status": "pass",
+      "title": "Drive C: has 210 GB free",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "background-cpu",
+      "category": "background",
+      "severity": "medium",
+      "status": "pass",
+      "title": "Nothing heavy is running in the background",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "startup-apps",
+      "category": "background",
+      "severity": "low",
+      "status": "pass",
+      "title": "7 apps start with Windows",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "tpm",
+      "category": "vanguard",
+      "severity": "high",
+      "status": "pass",
+      "title": "TPM 2.0 is on",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "secure-boot",
+      "category": "vanguard",
+      "severity": "high",
+      "status": "pass",
+      "title": "Secure Boot is on",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "memory-integrity",
+      "category": "vanguard",
+      "severity": "info",
+      "status": "info",
+      "title": "Memory Integrity is off",
+      "detail": "VALORANT works fine like this. Riot can require it on for flagged accounts, and Vanguard's On-Demand mode needs it.",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "iommu",
+      "category": "vanguard",
+      "severity": "info",
+      "status": "info",
+      "title": "IOMMU is off",
+      "detail": "Only needed for Vanguard's On-Demand mode, or if Riot asks for it. It's called VT-d on Intel and IOMMU or AMD-Vi on AMD.",
+      "fix": {
+        "kind": "bios-guide",
+        "topic": "iommu"
+      }
+    },
+    {
+      "id": "vanguard",
+      "category": "vanguard",
+      "severity": "high",
+      "status": "pass",
+      "title": "Vanguard is installed and running",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "on-demand",
+      "category": "vanguard",
+      "severity": "info",
+      "status": "info",
+      "title": "Not eligible for Vanguard On-Demand mode",
+      "detail": "Missing: VBS, Memory Integrity, IOMMU. On-Demand is optional; VALORANT works without it.",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "wired",
+      "category": "network",
+      "severity": "medium",
+      "status": "pass",
+      "title": "Connected by cable",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "link-speed",
+      "category": "network",
+      "severity": "low",
+      "status": "pass",
+      "title": "Network link: 2500 Mbps",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "adapter-power",
+      "category": "network",
+      "severity": "low",
+      "status": "problem",
+      "title": "Network adapter power saving is on",
+      "detail": "Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage 4.",
+      "fix": {
+        "kind": "later-stage",
+        "stage": 4
+      }
+    },
+    {
+      "id": "delivery-optimization",
+      "category": "network",
+      "severity": "low",
+      "status": "pass",
+      "title": "Windows Update doesn't upload to the internet",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    }
+  ],
+  "score": {
+    "value": 86,
+    "problems": 3,
+    "potentialGain": 14
+  },
+  "guide": {
+    "vendor": "asus",
+    "board": "ROG MAXIMUS XIII HERO",
+    "enterKey": "Del",
+    "tip": "Press F7 to switch between EZ Mode and Advanced Mode. The Search button at the top finds any setting by name.",
+    "sections": [
+      {
+        "topic": "xmp",
+        "title": "Turn on XMP",
+        "why": "Most RAM starts at a safe, slow default speed. XMP runs it at the speed on the box, which can add a lot of FPS in CPU-heavy games like VALORANT.",
+        "steps": [
+          "Restart and press Del to open the BIOS.",
+          "Press F7 for Advanced Mode.",
+          "Open the Extreme Tweaker tab.",
+          "Set Ai Overclock Tuner to XMP I.",
+          "Check that DRAM Frequency shows your kit's speed, then press F10 and choose Yes."
+        ],
+        "caution": "If the PC won't start, it usually retries with safe settings by itself. If it doesn't, clear the BIOS settings (Clear CMOS) and try a lower speed.",
+        "link": null
+      },
+      {
+        "topic": "memory-gear",
+        "title": "Keep the memory controller in Gear 1",
+        "why": "On 11th-gen Intel CPUs, Gear 1 runs the memory controller at full speed. Gear 2 adds delay that usually costs more FPS than the extra RAM speed gains.",
+        "steps": [
+          "On the Extreme Tweaker tab, set Memory Controller : DRAM Frequency Ratio to 1:1.",
+          "If the PC is unstable at your kit's speed in 1:1, set DRAM Frequency to DDR4-3200 and keep 1:1.",
+          "Press F10 and choose Yes."
+        ],
+        "caution": "Crashes or blue screens after this change mean the memory can't hold that speed in Gear 1. Lower the frequency.",
+        "link": null
+      },
+      {
+        "topic": "update-bios",
+        "title": "Update the BIOS",
+        "why": "Riot has asked some players to install BIOS updates released after December 2025 to fix a security flaw. Updates also improve memory compatibility.",
+        "steps": [
+          "Download the latest BIOS for ROG MAXIMUS XIII HERO from ASUS support and copy it to a USB stick.",
+          "In the BIOS, open Tool → ASUS EZ Flash 3 Utility.",
+          "Pick the file on the USB stick and confirm."
+        ],
+        "caution": "Don't turn off the PC while it updates. Updating resets BIOS settings, so turn XMP back on afterwards.",
+        "link": {
+          "label": "Open ASUS support",
+          "url": "https://www.asus.com/support/download-center/"
+        }
+      },
+      {
+        "topic": "iommu",
+        "title": "Turn on IOMMU (only if you need it)",
+        "why": "Vanguard's optional On-Demand mode needs it, and Riot can ask for it on some accounts. It doesn't change FPS.",
+        "steps": [
+          "Press F7 for Advanced Mode.",
+          "Open Advanced → System Agent (SA) Configuration.",
+          "Set VT-d to Enabled.",
+          "Press F10 and choose Yes."
+        ],
+        "caution": "Menu names vary between boards and BIOS versions. If you can't find it, search the BIOS for VT-d or IOMMU.",
+        "link": null
+      },
+      {
+        "topic": "resizable-bar",
+        "title": "Resizable BAR (optional)",
+        "why": "Lets the CPU reach all of the graphics card's memory at once. VALORANT gains little, but some other games do.",
+        "steps": [
+          "Press F7 for Advanced Mode.",
+          "Open Advanced → PCI Subsystem Settings.",
+          "Set Above 4G Decoding to Enabled, then Re-Size BAR Support to Auto.",
+          "Press F10 and choose Yes."
+        ],
+        "caution": "Windows must start in UEFI mode (CSM off) for this to work.",
+        "link": null
+      }
+    ]
+  }
+}

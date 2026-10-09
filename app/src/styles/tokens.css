@@ -1,0 +1,18 @@
+:root {
+  --bg: #0c0e11;
+  --panel: #15181d;
+  --panel-2: #1b1f25;
+  --line: #232830;
+  --line-strong: #3a414b;
+  --text: #e9ecef;
+  --muted: #8c949e;
+  --accent: #c8f53c;
+  --accent-ink: #0c0e11;
+  --warn: #ffb547;
+  --warn-ink: #2a1d05;
+  --danger: #ff6b6b;
+  --font-ui: 'Chakra Petch', system-ui, sans-serif;
+  --font-num: 'JetBrains Mono', ui-monospace, monospace;
+  --cut: 10px;
+  --cut-s: 5px;
+}
