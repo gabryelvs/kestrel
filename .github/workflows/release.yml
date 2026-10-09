@@ -1,0 +1,37 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: Kestrel ${{ github.ref_name }} (test build)
+          releaseBody: |
+            Test build. It only reads your PC; it changes nothing.
+
+            Install: download `Kestrel_*_x64-setup.exe` below and run it. Test builds aren't signed yet, so Windows may show "Windows protected your PC". Click More info → Run anyway.
+
+            Kestrel is not affiliated with Riot Games. VALORANT is a trademark of Riot Games, Inc.
+          prerelease: true
+          releaseDraft: false

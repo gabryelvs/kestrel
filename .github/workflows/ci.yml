@@ -1,0 +1,73 @@
+name: CI
+on:
+  push:
+    branches: [main, "stage-*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core logic (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy -p kestrel-core -p kestrel-probe -- -D warnings
+      - run: cargo test -p kestrel-core -p kestrel-probe
+
+  ui:
+    name: UI tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npx tsc --noEmit
+
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: cargo clippy -p kestrel-probe -- -D warnings
+      - run: cargo test -p kestrel-core -p kestrel-probe
+      - name: Probe this runner (smoke test)
+        run: cargo run -q -p kestrel-probe --bin kestrel-probe -- --pretty > probe-report.json
+      - run: npm ci
+        working-directory: app
+      - run: npx tauri build
+        working-directory: app
+      - name: Check the admin manifest
+        shell: pwsh
+        run: |
+          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("target/release/Kestrel.exe"))
+          if (-not $text.Contains('level="requireAdministrator"')) { throw "Kestrel.exe is missing the requireAdministrator manifest" }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kestrel-windows
+          path: |
+            target/release/bundle/nsis/*.exe
+            probe-report.json
