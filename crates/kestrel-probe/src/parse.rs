@@ -132,6 +132,8 @@ pub fn pdh_instance_to_exe(instance: &str) -> Option<String> {
 
 /// Kestrel's own work (its window, its probe, and the WMI host answering its queries) isn't background load, and
 /// neither is Windows' own: svchost.exe alone adds up dozens of services, which no one can close to free the CPU.
+/// Nor are VALORANT, the Riot Client, Vanguard and Windows Defender, so a scan run mid-game never tells the player
+/// to close the game or its anti-cheat, or to stop Defender. All lower case, like the names they are compared with.
 const NOT_BACKGROUND: &[&str] = &[
     "system idle process",
     "idle",
@@ -149,6 +151,17 @@ const NOT_BACKGROUND: &[&str] = &[
     "smss.exe",
     "audiodg.exe",
     "fontdrvhost.exe",
+    "valorant-win64-shipping.exe",
+    "valorant.exe",
+    "vgc.exe",
+    "vgtray.exe",
+    "riotclientservices.exe",
+    "riot client.exe",
+    "riotclientux.exe",
+    "riotclientuxrender.exe",
+    "msmpeng.exe",
+    "mpdefendercoreservice.exe",
+    "nissrv.exe",
 ];
 
 /// Per-process CPU samples (100 = one full core) → share of the whole CPU, ≥ 5%, busiest first, at most 5.
@@ -311,6 +324,9 @@ mod tests {
             ("System Idle Process".to_string(), 1500.0),
             ("Kestrel.exe".to_string(), 80.0),
             ("explorer.exe".to_string(), 4.0),
+            // A scan run mid-game: VALORANT and Defender are well over the bar, but are not apps to close.
+            ("VALORANT-Win64-Shipping.exe".to_string(), 480.0),
+            ("MsMpEng.exe".to_string(), 320.0),
         ];
         let busy = busy_processes(samples, 16);
         assert_eq!(busy.len(), 1);
@@ -375,6 +391,28 @@ mod tests {
         }
         assert_eq!(pdh_instance_to_exe(""), None);
         assert_eq!(pdh_instance_to_exe("#2"), None);
+    }
+
+    #[test]
+    fn the_game_riot_software_and_defender_are_never_background_apps() {
+        // Instance names as the performance counters give them: no ".exe", and "#<n>" on a second process.
+        for instance in [
+            "VALORANT-Win64-Shipping",
+            "VALORANT",
+            "vgc",
+            "vgtray",
+            "RiotClientServices",
+            "Riot Client",
+            "RiotClientUx",
+            "RiotClientUxRender#2",
+            "MsMpEng",
+            "MpDefenderCoreService",
+            "NisSrv",
+        ] {
+            let exe = pdh_instance_to_exe(instance).expect(instance);
+            let busy = busy_processes(vec![(exe.clone(), 800.0)], 16);
+            assert!(busy.is_empty(), "{exe}");
+        }
     }
 
     #[test]
