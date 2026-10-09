@@ -2,7 +2,7 @@
   "appVersion": "0.1.0",
   "snapshot": {
     "schemaVersion": 1,
-    "collectedAt": "2026-10-09T21:26:00Z",
+    "collectedAt": "2026-10-09T23:31:59Z",
     "os": {
       "caption": "Microsoft Windows 11 Pro",
       "build": 26200,
@@ -227,7 +227,7 @@
       "severity": "medium",
       "status": "problem",
       "title": "Power plan is Balanced",
-      "detail": "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 3; until then you can pick High performance in Control Panel → Power Options.",
+      "detail": "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 3. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead.",
       "fix": {
         "kind": "later-stage",
         "stage": 3
