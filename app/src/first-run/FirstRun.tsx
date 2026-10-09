@@ -19,6 +19,7 @@ export function FirstRun({ onDone }: { onDone: (report: Report) => void }) {
   }, [phase.name]);
 
   const start = async () => {
+    setStep(0);
     setPhase({ name: 'scanning' });
     try {
       setPhase({ name: 'result', report: await rescan() });
