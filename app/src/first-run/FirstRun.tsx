@@ -14,7 +14,7 @@ export function FirstRun({ onDone }: { onDone: (report: Report) => void }) {
 
   useEffect(() => {
     if (phase.name !== 'scanning') return;
-    const id = window.setInterval(() => setStep((s) => (s + 1) % strings.firstRun.steps.length), 450);
+    const id = window.setInterval(() => setStep((s) => Math.min(s + 1, strings.firstRun.steps.length - 1)), 450);
     return () => window.clearInterval(id);
   }, [phase.name]);
 

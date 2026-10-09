@@ -41,6 +41,7 @@ export function App() {
   };
 
   const chooseTab = (next: Tab) => {
+    if (firstRun) return;
     if (next !== 'toolbox') setGuideTopic(null);
     setTab(next);
   };
@@ -62,7 +63,7 @@ export function App() {
       {firstRun ? (
         <FirstRun onDone={finishFirstRun} />
       ) : (
-        <main className="content scroll">
+        <main key={tab} className="content scroll">
           {scan.state === 'loading' && <p className="center muted">{strings.loading.scanning}</p>}
           {scan.state === 'failed' && (
             <div className="center">
@@ -74,9 +75,9 @@ export function App() {
           {report && tab === 'home' && <Home report={report} onTab={chooseTab} onGuide={openGuide} onRescan={() => void run(true)} />}
           {report && tab === 'health' && <Health report={report} onGuide={openGuide} />}
           {report && tab === 'toolbox' && <Toolbox guide={report.guide} focus={guideTopic} />}
-          {tab === 'tweaks' && <ComingSoon {...strings.comingSoon.tweaks} />}
-          {tab === 'lockIn' && <ComingSoon {...strings.comingSoon.lockIn} />}
-          {tab === 'benchmark' && <ComingSoon {...strings.comingSoon.benchmark} />}
+          {report && tab === 'tweaks' && <ComingSoon {...strings.comingSoon.tweaks} />}
+          {report && tab === 'lockIn' && <ComingSoon {...strings.comingSoon.lockIn} />}
+          {report && tab === 'benchmark' && <ComingSoon {...strings.comingSoon.benchmark} />}
         </main>
       )}
     </div>

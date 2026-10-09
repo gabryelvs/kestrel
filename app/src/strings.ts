@@ -37,7 +37,7 @@ export const strings = {
     biosGuide: 'Open BIOS guide',
     laterStage: (n: number) => `Kestrel fixes this in stage ${n}`,
     howToFix: 'How to fix',
-    probeErrors: (n: number) => `${n} probe${n === 1 ? '' : 's'} couldn’t read everything. Copy diagnostics to share the details.`,
+    probeErrors: (n: number) => `${n} probe${n === 1 ? '' : 's'} couldn’t read everything. Use Copy diagnostics on Home to share the details.`,
   },
   toolbox: {
     title: 'BIOS guide',
