@@ -1,0 +1,18 @@
+[package]
+name = "kestrel-probe"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+kestrel-core = { version = "0.1.0", path = "../kestrel-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sysinfo = "0.39.6"
+
+[target."cfg(windows)".dependencies]
+nvml-wrapper = "0.13.0"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_SystemInformation", "Win32_System_Performance"] }
+winreg = "0.56.0"
+wmi = "0.18.4"

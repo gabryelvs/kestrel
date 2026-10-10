@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "collectedAt": "2026-10-09T16:30:00Z",
+  "os": { "caption": "Microsoft Windows 11 Pro", "build": 26200, "displayVersion": "25H2" },
+  "machine": { "formFactor": "desktop", "manufacturer": "ASUS", "model": "System Product Name", "onBattery": null },
+  "cpu": { "name": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz", "vendor": "intel", "cores": 8, "threads": 16 },
+  "gpus": [
+    { "name": "Parsec Virtual Display Adapter", "vendor": "virtual", "driverVersion": "0.45.0.0", "driverDate": null, "vramMb": null, "isIntegrated": false },
+    { "name": "NVIDIA GeForce RTX 3060 Ti", "vendor": "nvidia", "driverVersion": "32.0.16.1074", "driverDate": "2026-09-15", "vramMb": 8192, "isIntegrated": false }
+  ],
+  "memory": { "totalMb": 32768, "ddrGeneration": 4, "modules": [
+    { "capacityMb": 16384, "configuredMts": 3600, "maxMts": 2133, "partNumber": "CMG32GX4M2D3600C18", "manufacturer": "Corsair", "bankLabel": "BANK 1", "deviceLocator": "ChannelA-DIMM2" },
+    { "capacityMb": 16384, "configuredMts": 3600, "maxMts": 2133, "partNumber": "CMG32GX4M2D3600C18", "manufacturer": "Corsair", "bankLabel": "BANK 3", "deviceLocator": "ChannelB-DIMM2" }
+  ] },
+  "displays": [
+    { "name": "\\\\.\\DISPLAY1", "adapter": "NVIDIA GeForce RTX 3060 Ti", "currentHz": 360, "maxHz": 360, "width": 1920, "height": 1080, "isPrimary": true, "isVirtual": false }
+  ],
+  "board": { "manufacturer": "ASUSTeK COMPUTER INC.", "product": "ROG MAXIMUS XIII HERO", "biosVersion": "2103", "biosDate": "2024-05-20" },
+  "storage": { "valorant": { "path": "C:/Riot Games/VALORANT/live", "driveLetter": "C", "media": "nvme", "freeGb": 210.5, "totalGb": 931.5 } },
+  "windows": { "powerPlan": { "guid": "381b4222-f694-41f0-9685-ff5bb260df2e", "name": "Balanced" }, "gameMode": true, "backgroundRecording": false, "hags": true, "valorantGpuPreference": null, "pendingRestart": false, "startupAppCount": 7 },
+  "security": { "tpm2": true, "secureBoot": true, "vbsRunning": false, "hvciRunning": false, "iommu": false, "vanguard": "running" },
+  "network": { "adapters": [ { "name": "Intel(R) Ethernet Controller (3) I225-V", "kind": "ethernet", "linkMbps": 2500, "connected": true, "powerSaving": true } ], "deliveryOptimizationInternet": false },
+  "background": { "busyProcesses": [] },
+  "probeErrors": []
+}

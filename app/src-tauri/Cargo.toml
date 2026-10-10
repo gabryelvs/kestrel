@@ -1,0 +1,24 @@
+[package]
+name = "kestrel"
+description = "Kestrel: a free, honest FPS optimiser for VALORANT"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "kestrel_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+kestrel-core = { path = "../../crates/kestrel-core" }
+kestrel-probe = { path = "../../crates/kestrel-probe" }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Shell"] }
