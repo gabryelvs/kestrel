@@ -16,6 +16,8 @@ pub enum Phase {
     Review {
         flags: Vec<Flag>,
     },
+    /// All three runs are in. Set as soon as the third run is accepted, before the result is saved: the view's
+    /// `resultId` stays null while saving, and a failed save turns the phase into `Failed`.
     Done,
     Failed {
         message: String,
@@ -236,6 +238,19 @@ mod tests {
         s
     }
 
+    /// A session whose warm-up and three runs are all in: Done.
+    fn finished() -> Session {
+        let mut s = armed();
+        s.start_pressed();
+        s.capture_finished(Ok(clean(1.0)));
+        for _ in 0..RUNS {
+            s.start_pressed();
+            s.capture_finished(Ok(clean(400.0)));
+        }
+        assert_eq!(s.phase(), &Phase::Done);
+        s
+    }
+
     #[test]
     fn warm_up_then_three_runs_then_finish() {
         let mut s = armed();
@@ -271,6 +286,28 @@ mod tests {
             vec![401.0, 402.0, 403.0]
         );
         assert!(s.is_over());
+        // Done is final: nothing starts, captures, keeps, redoes or cancels, and the view stays put.
+        assert_eq!(s.view().result_id, None);
+        let done_view = serde_json::to_value(s.view()).unwrap();
+        assert!(s.start_pressed().is_empty());
+        assert!(s.capture_finished(Ok(flagged())).is_empty());
+        assert!(s
+            .capture_finished(Err("PresentMon failed".into()))
+            .is_empty());
+        assert!(s.redo().is_empty());
+        assert!(s.keep().is_empty());
+        assert!(s.cancel().is_empty());
+        assert_eq!(serde_json::to_value(s.view()).unwrap(), done_view);
+        assert_eq!(s.phase(), &Phase::Done);
+        // Saving the result can still fail: the session ends as Failed, with its three runs kept.
+        s.fail("Couldn't save the result.".into());
+        assert_eq!(
+            s.phase(),
+            &Phase::Failed {
+                message: "Couldn't save the result.".into()
+            }
+        );
+        assert_eq!(s.runs().len(), 3);
     }
 
     #[test]
@@ -307,12 +344,36 @@ mod tests {
             "keeping the third run finishes"
         );
         assert_eq!(s.phase(), &Phase::Done);
+        // A failure while a flagged run waits for its decision leaves nothing for keep or redo to revive.
+        let mut failed = armed();
+        failed.start_pressed();
+        failed.capture_finished(Ok(clean(1.0)));
+        failed.start_pressed();
+        failed.capture_finished(Ok(flagged()));
+        failed.fail("Couldn't save the result.".into());
+        let failed_view = serde_json::to_value(failed.view()).unwrap();
+        assert!(failed.keep().is_empty());
+        assert!(failed.redo().is_empty());
+        assert_eq!(serde_json::to_value(failed.view()).unwrap(), failed_view);
+        assert_eq!(
+            failed.phase(),
+            &Phase::Failed {
+                message: "Couldn't save the result.".into()
+            }
+        );
     }
 
     #[test]
     fn start_key_is_ignored_unless_waiting_with_the_game() {
         let mut s = Session::new("valorant");
         assert!(s.start_pressed().is_empty(), "the game isn't running");
+        assert_eq!(s.phase(), &Phase::Waiting);
+        s.set_game_running(true);
+        s.set_game_running(false);
+        assert!(
+            s.start_pressed().is_empty(),
+            "the game closed again while waiting"
+        );
         assert_eq!(s.phase(), &Phase::Waiting);
         s.set_game_running(true);
         assert_eq!(s.start_pressed().len(), 2);
@@ -339,11 +400,35 @@ mod tests {
         s.start_pressed();
         assert_eq!(s.cancel(), vec![Action::StopCapture]);
         assert_eq!(s.phase(), &Phase::Cancelled);
+        let cancelled_view = serde_json::to_value(s.view()).unwrap();
         assert!(s.capture_finished(Ok(clean(1.0))).is_empty());
+        assert!(s
+            .capture_finished(Err("PresentMon failed".into()))
+            .is_empty());
         assert!(s.start_pressed().is_empty() && s.cancel().is_empty());
+        assert!(s.redo().is_empty());
+        assert!(s.keep().is_empty());
+        assert_eq!(serde_json::to_value(s.view()).unwrap(), cancelled_view);
+        // Cancelled is final: a failure doesn't revive it either.
+        s.fail("Couldn't save the result.".into());
+        assert_eq!(s.phase(), &Phase::Cancelled);
         let mut waiting = armed();
         assert!(waiting.cancel().is_empty());
         assert_eq!(waiting.phase(), &Phase::Cancelled);
+        // Cancelling while a flagged run waits for its decision ends the session; keep then changes nothing.
+        let mut reviewing = armed();
+        reviewing.start_pressed();
+        reviewing.capture_finished(Ok(clean(1.0)));
+        reviewing.start_pressed();
+        reviewing.capture_finished(Ok(flagged()));
+        assert!(reviewing.cancel().is_empty());
+        assert_eq!(reviewing.phase(), &Phase::Cancelled);
+        let reviewing_view = serde_json::to_value(reviewing.view()).unwrap();
+        assert!(reviewing.keep().is_empty());
+        assert_eq!(
+            serde_json::to_value(reviewing.view()).unwrap(),
+            reviewing_view
+        );
     }
 
     #[test]
@@ -360,11 +445,20 @@ mod tests {
                 message: "PresentMon failed".into()
             }
         );
+        let failed_view = serde_json::to_value(s.view()).unwrap();
         assert!(s.start_pressed().is_empty() && s.is_over());
-        let mut done = armed();
-        done.fail("Couldn't save the result".into());
+        assert!(s.capture_finished(Ok(clean(1.0))).is_empty());
+        assert!(s
+            .capture_finished(Err("PresentMon failed again".into()))
+            .is_empty());
+        assert!(s.redo().is_empty());
+        assert!(s.keep().is_empty());
+        assert!(s.cancel().is_empty());
+        assert_eq!(serde_json::to_value(s.view()).unwrap(), failed_view);
+        let mut waiting = armed();
+        waiting.fail("Couldn't save the result".into());
         assert_eq!(
-            done.phase(),
+            waiting.phase(),
             &Phase::Failed {
                 message: "Couldn't save the result".into()
             }
@@ -386,5 +480,13 @@ mod tests {
         assert_eq!(v["gameRunning"], json!(true));
         assert_eq!(v["runs"], json!([null, null, null]));
         assert_eq!(v["resultId"], json!(null));
+        // Once the result is saved, its id shows up in the view.
+        let mut saved = finished();
+        saved.set_result_id("x".to_string());
+        assert_eq!(saved.view().result_id, Some("x".to_string()));
+        assert_eq!(
+            serde_json::to_value(saved.view()).unwrap()["resultId"],
+            json!("x")
+        );
     }
 }
