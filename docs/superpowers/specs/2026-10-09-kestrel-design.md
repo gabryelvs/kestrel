@@ -70,6 +70,11 @@ Games, Ubisoft or Activision.
 | 64 | Redesign timing | The visual redesign is the last stage; the owner designs it in Claude Design (handoff: `docs/superpowers/notes/2026-10-12-claude-design-handoff.md`) |
 | 65 | Home hero | Decided in the owner's Claude Design work (preview options: particle falcon, tactical radar, wind currents) |
 | 66 | Stage order | As in the table below |
+| 67 | Redesign handoff | Arrived 2026-10-12 (Claude Design "Kestrel Redesign v4"): icon rail, status bar, HUD look, a motion system that pauses while a game is in front; Home hero is a hex shield over a rotating radar sweep (settles 65). The redesign stays the last stage (64) |
+| 68 | Benchmark in the redesign | Keeps the approved stage-2 flow (warm-up + 3 runs on Route v1, F10, beeps, review, starting point, real gain vs noise) in the design's visual language: an overlay per pass with ring and timer, a before→after chart, history. No live FPS during a pass |
+| 69 | Multi-game copy | The redesign's copy is game-neutral ("FPS optimiser for your games", "While your game runs"); animations pause when any supported game (VALORANT, FiveM, Rainbow Six Siege, Warzone) is in the foreground, found from the foreground window's process id in a Toolhelp32 snapshot (no handle to the game) |
+| 70 | Design data | Real data in the redesign stage: points per finding from `kestrel-core` ("What if you fix"), Kestrel's own CPU and RAM in the status bar, and status, note and menu path per BIOS-guide topic (menu paths only for boards Kestrel knows, ASUS first; hidden otherwise) |
+| 71 | Handoff in the repo | When the redesign stage starts, the handoff is copied to `docs/design/redesign-v4/` (public in the repo) |
 
 ## Stages
 
@@ -115,13 +120,14 @@ Left out on purpose: Defender/UAC/Windows Update off; Spectre/Meltdown mitigatio
 edits; Nagle/TcpAckFrequency/TCP autotuning; HPET/dynamic-tick boot tweaks; clearing shader caches;
 removing Xbox Game Bar; third-party timer or memory-cleaner drivers.
 
-## Lock In (stage 5)
+## Lock In (stage 7)
 
 Kestrel power plan; pause Windows Search indexing and Windows Update downloads (not on a PC with
 FiveM — decision 61); close user-chosen
 apps (none by default); purge standby memory when free RAM is low on PCs with ≤16 GB; 0.5 ms timer
 resolution only if that Extreme tweak is on; never touches VALORANT or Vanguard processes; everything
-reverted on game exit or at next start-up after a crash.
+reverted on game exit or at next start-up after a crash. The redesign mock-up's "Raise VALORANT
+priority to High" row is not built: changing a game's priority needs a handle to the game process.
 
 ## Known limits
 
