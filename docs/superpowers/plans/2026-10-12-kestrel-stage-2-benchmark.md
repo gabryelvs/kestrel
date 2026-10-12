@@ -2226,8 +2226,8 @@ mod tests {
         later.result.metrics.bottleneck = Bottleneck::Cpu;
         let comparison = Comparison {
             metrics: vec![
-                MetricDelta { metric: MetricId::AvgFps, baseline: 410.0, current: 430.24, delta_pct: 4.94, verdict: Verdict::RealGain },
-                MetricDelta { metric: MetricId::Low1Fps, baseline: 288.0, current: 290.9, delta_pct: 1.0, verdict: Verdict::Noise },
+                MetricDelta { metric: MetricId::AvgFps, baseline: 410.0, current: 430.24, delta_pct: Some(4.94), verdict: Verdict::RealGain },
+                MetricDelta { metric: MetricId::Low1Fps, baseline: 288.0, current: 290.9, delta_pct: Some(1.0), verdict: Verdict::Noise },
             ],
             settings_differ: vec!["Resolution".into()],
             ..Default::default()
@@ -2295,7 +2295,11 @@ pub fn results_text(bench: &Benchmark, comparison: Option<&Comparison>, baseline
             let parts: Vec<String> = c
                 .metrics
                 .iter()
-                .map(|d| format!("{} {:+.1}% ({})", metric_text(d.metric), d.delta_pct, verdict_text(d.verdict)))
+                .map(|d| match d.delta_pct {
+                    Some(pct) => format!("{} {pct:+.1}% ({})", metric_text(d.metric), verdict_text(d.verdict)),
+                    // No percentage exists from a baseline of 0.
+                    None => format!("{} ({})", metric_text(d.metric), verdict_text(d.verdict)),
+                })
                 .collect();
             lines.push(format!("Versus {name}: {}", parts.join(", ")));
         }
@@ -4260,7 +4264,7 @@ export interface BenchmarkSummary {
 }
 export type MetricId = 'avg-fps' | 'low1-fps' | 'low01-fps' | 'stutters-per-min' | 'pc-latency-ms';
 export type Verdict = 'real-gain' | 'real-loss' | 'noise';
-export interface MetricDelta { metric: MetricId; baseline: number; current: number; deltaPct: number; verdict: Verdict }
+export interface MetricDelta { metric: MetricId; baseline: number; current: number; deltaPct: number | null; verdict: Verdict }
 export interface Comparison { baselineId: string; currentId: string; metrics: MetricDelta[]; settingsDiffer: string[]; routeMismatch: boolean }
 export interface BenchDetail { benchmark: Benchmark; graph: number[]; comparison: Comparison | null; baselineName: string | null }
 export interface GameProfile { id: string; name: string; processName: string; route: { version: number; captureSeconds: number; switchAtSeconds: number } }
@@ -5002,7 +5006,7 @@ export function ResultDetail({ id, onChanged }: { id: string; onChanged: () => v
                 <li key={d.metric}>
                   <span>{b.metrics[d.metric]}</span>
                   <span className="num">{metricText(d.metric, d.baseline)} → {metricText(d.metric, d.current)}</span>
-                  <span className={`num verdict-${verdictTone(d.verdict)}`}>{pct(d.deltaPct)} · {verdictText(d.verdict)}</span>
+                  <span className={`num verdict-${verdictTone(d.verdict)}`}>{d.deltaPct !== null && `${pct(d.deltaPct)} · `}{verdictText(d.verdict)}</span>
                 </li>
               ))}
             </ul>
@@ -5274,7 +5278,7 @@ export function LastBenchmark({ onTab }: { onTab: (tab: Tab) => void }) {
           return (
             <span key={id} className="num">
               {metricText(id, metricValue(m, id))} <span className="muted small">{strings.bench.metrics[id]}</span>
-              {d && <span className={`small verdict-${verdictTone(d.verdict)}`}> {pct(d.deltaPct)}</span>}
+              {d && d.deltaPct !== null && <span className={`small verdict-${verdictTone(d.verdict)}`}> {pct(d.deltaPct)}</span>}
             </span>
           );
         })}
