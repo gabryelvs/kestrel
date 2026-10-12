@@ -1,9 +1,22 @@
 //! VALORANT's video settings, read from its config files and never written (decision 43). Keys confirmed on the
-//! owner's PC: docs/superpowers/notes/2026-10-12-valorant-settings-keys.md. VALORANT only writes settings changed
-//! from their default, so a missing key means "default", never an error.
+//! owner's PC: docs/superpowers/notes/2026-10-12-valorant-settings-keys.md. GameUserSettings.ini lists every
+//! setting, so a missing key there is unknown. RiotUserSettings.ini lists only settings changed from their default,
+//! so a missing key there means "default", never an error.
 use crate::model::ValorantSettings;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+/// RiotUserSettings.ini settings kept in `quality` under their own name.
+const RIOT_QUALITY: [&str; 7] = [
+    "AnisotropicFiltering",
+    "AntiAliasing",
+    "DetailQuality",
+    "MaterialQuality",
+    "TextureQuality",
+    "UIQuality",
+    "ShadowsEnabled",
+];
 
 /// Settings from the text of GameUserSettings.ini and RiotUserSettings.ini (either may be empty).
 pub fn parse(game_user_settings: &str, riot_user_settings: &str) -> ValorantSettings {
@@ -25,6 +38,7 @@ pub fn parse(game_user_settings: &str, riot_user_settings: &str) -> ValorantSett
     if let (Some(w), Some(h)) = (width, height) {
         s.resolution = Some([w, h]);
     }
+    s.riot_settings_read = !riot_user_settings.trim().is_empty();
     for (key, value) in pairs(riot_user_settings) {
         // "EAresIntSettingName::NvidiaReflexLowLatencySetting" → "NvidiaReflexLowLatencySetting"
         let name = key.rsplit("::").next().unwrap_or(key);
@@ -32,13 +46,7 @@ pub fn parse(game_user_settings: &str, riot_user_settings: &str) -> ValorantSett
         match name {
             "NvidiaReflexLowLatencySetting" => s.reflex = value.parse().ok(),
             "MultithreadedRenderingEnabled" => s.multithreaded_rendering = boolean(value),
-            "AnisotropicFiltering"
-            | "AntiAliasing"
-            | "DetailQuality"
-            | "MaterialQuality"
-            | "TextureQuality"
-            | "UIQuality"
-            | "ShadowsEnabled" => {
+            name if RIOT_QUALITY.contains(&name) => {
                 s.quality.insert(name.to_string(), value.to_string());
             }
             // The in-game FPS counter: its name says "FrameRate" but it limits nothing.
@@ -55,25 +63,43 @@ pub fn parse(game_user_settings: &str, riot_user_settings: &str) -> ValorantSett
     s
 }
 
-/// The most recently written GameUserSettings.ini and RiotUserSettings.ini under `config_root`
-/// (`%LOCALAPPDATA%\VALORANT\Saved\Config`). There's one folder per Riot account; the newest is the one in use.
+/// The GameUserSettings.ini and RiotUserSettings.ini to read under `config_root`
+/// (`%LOCALAPPDATA%\VALORANT\Saved\Config`). There's one folder per Riot account, and both files come from one of
+/// them: the folder holding the newest RiotUserSettings.ini supplies its newest GameUserSettings.ini, at any depth.
+/// The newest GameUserSettings.ini anywhere is the fallback, used when there is no RiotUserSettings.ini, when that
+/// file sits directly in `config_root`, or when its folder has no GameUserSettings.ini.
 pub fn find_files(config_root: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
     let mut files = Vec::new();
     collect_files(config_root, 0, &mut files);
-    let newest = |name: &str| {
+    let newest = |name: &str, within: Option<&Path>| {
         files
             .iter()
             .filter(|(path, _)| {
                 path.file_name()
                     .is_some_and(|n| n.eq_ignore_ascii_case(name))
             })
+            .filter(|(path, _)| within.is_none_or(|dir| path.starts_with(dir)))
             .max_by_key(|(_, modified)| *modified)
             .map(|(path, _)| path.clone())
     };
-    (
-        newest("GameUserSettings.ini"),
-        newest("RiotUserSettings.ini"),
-    )
+    let riot = newest("RiotUserSettings.ini", None);
+    let account = riot
+        .as_deref()
+        .and_then(|path| account_folder(config_root, path));
+    let game = account
+        .as_deref()
+        .and_then(|dir| newest("GameUserSettings.ini", Some(dir)))
+        .or_else(|| newest("GameUserSettings.ini", None));
+    (game, riot)
+}
+
+/// The folder directly under `config_root` that holds `file`; None when `file` sits directly in `config_root`.
+fn account_folder(config_root: &Path, file: &Path) -> Option<PathBuf> {
+    let mut parts = file.strip_prefix(config_root).ok()?.components();
+    let folder = parts.next()?;
+    // The file's own name is the last component, so a folder must come between it and the root.
+    parts.next()?;
+    Some(config_root.join(folder.as_os_str()))
 }
 
 /// The settings in use, or None when VALORANT's settings files aren't there.
@@ -90,51 +116,83 @@ pub fn read(config_root: &Path) -> Option<ValorantSettings> {
     Some(parse(&text(game), &text(riot)))
 }
 
-/// Names of settings that differ. Settings either side doesn't know are skipped, so missing data never counts as
-/// a difference.
+/// Names of the settings that differ between `a` and `b`, in the order the UI shows them: the named settings, then
+/// quality keys, then limit keys, each sorted by key. A setting counts when both sides know it and their values
+/// differ. GameUserSettings.ini lists every setting, so a key one side lacks there is unknown and never counts.
+/// RiotUserSettings.ini lists only settings changed from their default: when both sides read it, a Riot setting that
+/// one side lacks is at its default there, so it counts.
 pub fn differences(a: &ValorantSettings, b: &ValorantSettings) -> Vec<String> {
-    let resolution = |s: &ValorantSettings| s.resolution.map(|[w, h]| format!("{w}x{h}"));
-    let known = [
-        ("Resolution", resolution(a), resolution(b)),
+    let both_read = a.riot_settings_read && b.riot_settings_read;
+    let resolution = |s: &ValorantSettings| as_text(s.resolution.map(|[w, h]| format!("{w}x{h}")));
+    // Name, value on each side, and whether the setting comes from RiotUserSettings.ini.
+    let named = [
+        ("Resolution", resolution(a), resolution(b), false),
         (
             "Fullscreen mode",
-            a.fullscreen_mode.map(|v| v.to_string()),
-            b.fullscreen_mode.map(|v| v.to_string()),
+            as_text(a.fullscreen_mode),
+            as_text(b.fullscreen_mode),
+            false,
         ),
-        (
-            "V-Sync",
-            a.vsync.map(|v| v.to_string()),
-            b.vsync.map(|v| v.to_string()),
-        ),
+        ("V-Sync", as_text(a.vsync), as_text(b.vsync), false),
         (
             "Frame-rate limit",
-            a.frame_rate_limit.map(|v| v.to_string()),
-            b.frame_rate_limit.map(|v| v.to_string()),
+            as_text(a.frame_rate_limit),
+            as_text(b.frame_rate_limit),
+            false,
         ),
-        (
-            "NVIDIA Reflex",
-            a.reflex.map(|v| v.to_string()),
-            b.reflex.map(|v| v.to_string()),
-        ),
+        ("NVIDIA Reflex", as_text(a.reflex), as_text(b.reflex), true),
         (
             "Multithreaded rendering",
-            a.multithreaded_rendering.map(|v| v.to_string()),
-            b.multithreaded_rendering.map(|v| v.to_string()),
+            as_text(a.multithreaded_rendering),
+            as_text(b.multithreaded_rendering),
+            true,
         ),
     ];
-    let mut out: Vec<String> = known
-        .into_iter()
-        .filter_map(|(name, x, y)| match (x, y) {
-            (Some(x), Some(y)) if x != y => Some(name.to_string()),
-            _ => None,
-        })
-        .collect();
-    for (key, value) in &a.quality {
-        if b.quality.get(key).is_some_and(|other| other != value) {
+    let mut out = Vec::new();
+    for (name, x, y, riot) in named {
+        if differs(x.as_deref(), y.as_deref(), riot, both_read) {
+            out.push(name.to_string());
+        }
+    }
+    // The `sg.*` quality keys come from GameUserSettings.ini; the others come from RiotUserSettings.ini.
+    let quality: BTreeSet<&String> = a.quality.keys().chain(b.quality.keys()).collect();
+    for key in quality {
+        let riot = RIOT_QUALITY.contains(&key.as_str());
+        let (x, y) = (
+            a.quality.get(key).map(String::as_str),
+            b.quality.get(key).map(String::as_str),
+        );
+        if differs(x, y, riot, both_read) {
+            out.push(key.clone());
+        }
+    }
+    let limits: BTreeSet<&String> = a.limits.keys().chain(b.limits.keys()).collect();
+    for key in limits {
+        let (x, y) = (
+            a.limits.get(key).map(String::as_str),
+            b.limits.get(key).map(String::as_str),
+        );
+        if differs(x, y, true, both_read) {
             out.push(key.clone());
         }
     }
     out
+}
+
+/// A setting's value as text, so values of different types compare the same way.
+fn as_text<T: ToString>(value: Option<T>) -> Option<String> {
+    value.map(|v| v.to_string())
+}
+
+/// Whether a setting counts as changed. When both sides know it, the values must differ. When only one side knows
+/// it, it counts only if it comes from RiotUserSettings.ini (`riot`) and both sides read that file: the side without
+/// it has the default.
+fn differs(x: Option<&str>, y: Option<&str>, riot: bool, both_read: bool) -> bool {
+    match (x, y) {
+        (Some(x), Some(y)) => x != y,
+        (None, None) => false,
+        _ => riot && both_read,
+    }
 }
 
 fn pairs(text: &str) -> impl Iterator<Item = (&str, &str)> {
@@ -175,7 +233,8 @@ fn decode(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Files up to four folders deep (Config\<account>\Windows\file.ini is three).
+/// Collects the files under `dir`, where `depth` is how many folders `dir` sits below `config_root`. The walk stops
+/// at depth four.
 fn collect_files(dir: &Path, depth: u32, out: &mut Vec<(PathBuf, SystemTime)>) {
     if depth > 4 {
         return;
@@ -267,53 +326,132 @@ mod tests {
 
     #[test]
     fn the_newest_account_folder_wins() {
+        const SMALL: &str = "ResolutionSizeX=1280\nResolutionSizeY=720\n";
+        const LARGE: &str = "ResolutionSizeX=1920\nResolutionSizeY=1080\n";
+        let write = |path: &Path, text: &str| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        // Ages are set explicitly, so the result never depends on when the files were written.
+        let age = |path: &Path, seconds: u64| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(seconds))
+                .unwrap();
+        };
+
+        // "alpha" sorts first but holds the newest RiotUserSettings.ini; "zeta" sorts last but holds the newest
+        // GameUserSettings.ini. Both files must come from one account, so "alpha" supplies both.
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("old-account").join("Windows");
-        let new = dir.path().join("new-account").join("Windows");
-        fs::create_dir_all(&old).unwrap();
-        fs::create_dir_all(&new).unwrap();
-        fs::write(
-            old.join("GameUserSettings.ini"),
-            "ResolutionSizeX=1280\nResolutionSizeY=720\n",
-        )
-        .unwrap();
-        fs::write(
-            new.join("GameUserSettings.ini"),
-            "ResolutionSizeX=1920\nResolutionSizeY=1080\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("new-account").join("RiotUserSettings.ini"),
-            RIOT_USER_SETTINGS,
-        )
-        .unwrap();
-        let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
-        fs::File::options()
-            .write(true)
-            .open(old.join("GameUserSettings.ini"))
-            .unwrap()
-            .set_modified(an_hour_ago)
-            .unwrap();
-        let (game, riot) = find_files(dir.path());
-        assert_eq!(game.unwrap(), new.join("GameUserSettings.ini"));
-        assert_eq!(
-            riot.unwrap(),
-            dir.path().join("new-account").join("RiotUserSettings.ini")
+        let (alpha_game, alpha_riot) = (
+            dir.path()
+                .join("alpha")
+                .join("Windows")
+                .join("GameUserSettings.ini"),
+            dir.path().join("alpha").join("RiotUserSettings.ini"),
         );
-        assert_eq!(read(dir.path()).unwrap().resolution, Some([1920, 1080]));
+        let (zeta_game, zeta_riot) = (
+            dir.path()
+                .join("zeta")
+                .join("Windows")
+                .join("GameUserSettings.ini"),
+            dir.path().join("zeta").join("RiotUserSettings.ini"),
+        );
+        write(&alpha_game, SMALL);
+        write(&alpha_riot, RIOT_USER_SETTINGS);
+        write(&zeta_game, LARGE);
+        write(&zeta_riot, RIOT_USER_SETTINGS);
+        age(&alpha_riot, 30 * 60);
+        age(&alpha_game, 2 * 3600);
+        age(&zeta_riot, 3 * 3600);
+        age(&zeta_game, 3600);
+        assert_eq!(find_files(dir.path()), (Some(alpha_game), Some(alpha_riot)));
+        assert_eq!(read(dir.path()).unwrap().resolution, Some([1280, 720]));
+
+        // Without a RiotUserSettings.ini, the newest GameUserSettings.ini anywhere wins.
+        let other = tempfile::tempdir().unwrap();
+        let old_game = other
+            .path()
+            .join("old")
+            .join("Windows")
+            .join("GameUserSettings.ini");
+        let new_game = other
+            .path()
+            .join("new")
+            .join("Windows")
+            .join("GameUserSettings.ini");
+        write(&old_game, SMALL);
+        write(&new_game, LARGE);
+        age(&old_game, 3600);
+        age(&new_game, 60);
+        assert_eq!(find_files(other.path()), (Some(new_game), None));
+        assert_eq!(read(other.path()).unwrap().resolution, Some([1920, 1080]));
+
+        // A RiotUserSettings.ini directly in the config root names no account folder, so the same fallback applies.
+        let root = tempfile::tempdir().unwrap();
+        let account_game = root
+            .path()
+            .join("account")
+            .join("Windows")
+            .join("GameUserSettings.ini");
+        let root_riot = root.path().join("RiotUserSettings.ini");
+        write(&account_game, SMALL);
+        write(&root_riot, RIOT_USER_SETTINGS);
+        age(&account_game, 3600);
+        age(&root_riot, 60);
+        assert_eq!(
+            find_files(root.path()),
+            (Some(account_game), Some(root_riot))
+        );
+
+        // An account folder without a GameUserSettings.ini falls back to the newest one anywhere.
+        let lonely = tempfile::tempdir().unwrap();
+        let riot_only = lonely.path().join("riot-only").join("RiotUserSettings.ini");
+        let elsewhere = lonely
+            .path()
+            .join("elsewhere")
+            .join("Windows")
+            .join("GameUserSettings.ini");
+        write(&riot_only, RIOT_USER_SETTINGS);
+        write(&elsewhere, LARGE);
+        age(&riot_only, 60);
+        age(&elsewhere, 3600);
+        assert_eq!(
+            find_files(lonely.path()),
+            (Some(elsewhere), Some(riot_only))
+        );
     }
 
     #[test]
-    fn differences_name_only_settings_both_sides_know() {
+    fn differences_count_riot_defaults_but_never_missing_files() {
         let a = parse(GAME_USER_SETTINGS, RIOT_USER_SETTINGS);
+        assert!(a.riot_settings_read);
         let mut b = a.clone();
         assert!(differences(&a, &b).is_empty());
+        // GameUserSettings.ini lists every setting, so a key one side lacks there is unknown, not changed.
         b.resolution = Some([1280, 720]);
         b.quality.insert("sg.ShadowQuality".into(), "2".into());
+        b.quality.remove("sg.TextureQuality");
+        // RiotUserSettings.ini lists only changed settings, so a key one side lacks is its default: a change.
         b.reflex = None;
+        b.quality.remove("TextureQuality");
+        b.limits
+            .insert("LimitFramerateInMenu".into(), "False".into());
         assert_eq!(
             differences(&a, &b),
-            vec!["Resolution".to_string(), "sg.ShadowQuality".to_string()]
+            vec![
+                "Resolution",
+                "NVIDIA Reflex",
+                "TextureQuality",
+                "sg.ShadowQuality",
+                "LimitFramerateInMenu"
+            ]
         );
+        // A side without RiotUserSettings.ini knows none of its settings: nothing there counts as changed.
+        let no_riot = parse(GAME_USER_SETTINGS, "");
+        assert!(!no_riot.riot_settings_read);
+        assert!(differences(&a, &no_riot).is_empty());
     }
 }

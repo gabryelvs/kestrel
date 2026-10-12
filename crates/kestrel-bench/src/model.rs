@@ -70,8 +70,9 @@ pub struct BenchResult {
     pub spread: Spread,
 }
 
-/// VALORANT's video settings as read from its files (decision 43). None: not found, or never changed from the
-/// default (VALORANT only writes settings you changed).
+/// VALORANT's video settings as read from its files (decision 43). None: the file doesn't hold the setting.
+/// GameUserSettings.ini lists every setting. RiotUserSettings.ini lists only those changed from the default, so
+/// there None means the default.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ValorantSettings {
@@ -85,6 +86,9 @@ pub struct ValorantSettings {
     pub quality: BTreeMap<String, String>,
     /// Any frame-limit setting found in RiotUserSettings.ini, by key as written.
     pub limits: BTreeMap<String, String>,
+    /// Whether RiotUserSettings.ini was read. It holds only settings changed from their default, so when both
+    /// sides read it, a Riot setting one side lacks is at its default there.
+    pub riot_settings_read: bool,
 }
 
 /// The PC and game when the benchmark ran (spec "Saved data").
@@ -167,7 +171,7 @@ pub struct Comparison {
     pub baseline_id: String,
     pub current_id: String,
     pub metrics: Vec<MetricDelta>,
-    /// VALORANT settings that differ between the two (only settings both sides know).
+    /// VALORANT settings that differ between the two, counted as `settings::differences` counts them.
     pub settings_differ: Vec<String>,
     /// Different game or route version: not compared, `metrics` is empty.
     pub route_mismatch: bool,
