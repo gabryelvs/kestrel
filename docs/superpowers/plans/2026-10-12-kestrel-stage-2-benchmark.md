@@ -21,7 +21,7 @@
 - VALORANT's settings files are only read, never written.
 - Version `0.2.0` everywhere (workspace, `tauri.conf.json`, `app/package.json`).
 - Every Rust type crossing to the UI is `serde` with `rename_all = "camelCase"`; enums `rename_all = "kebab-case"`.
-- All UI copy lives in `app/src/strings.ts`: English, sentence case, no exclamation marks. Keep the current look (tokens.css/base.css classes); no redesign in this stage.
+- All UI copy lives in `app/src/strings.ts`: English, sentence case, no exclamation marks. Text built in Rust (the Copy results text, the VALORANT setting names from `settings::differences`, error messages) is the exception, so each piece has one source. Keep the current look (tokens.css/base.css classes); no redesign in this stage.
 - Commits end with a `Co-Authored-By:` line naming the model that wrote the commit (stage 1 ruling).
 - `cargo` is in `~/.cargo/bin`; prefix commands with `PATH="$HOME/.cargo/bin:$PATH"` where it isn't on PATH. Windows-only Rust is checked on the Mac with `cargo clippy --target x86_64-pc-windows-msvc` (non-Tauri crates) and built on CI.
 
@@ -30,7 +30,7 @@
 1. A capture that recorded nothing or garbage (game never in front, PresentMon writes only a header, `NA` frame times, reordered columns) must give a flagged "Too short" run with finite numbers — never a panic, NaN or a crash. Pinned by `metrics::tests::no_frames_gives_zeroes_not_nan` (Task 3) and `flags::tests::empty_capture_is_only_too_short` (Task 5).
 2. A single long freeze (a 2-second hitch) or 1,000+ FPS in the Range must stay finite and show in the 0.1% low and stutters. Pinned by `metrics::tests::one_long_freeze_drags_the_lows_down` (Task 3).
 3. VALORANT never run, settings in another account's folder, UTF-16 files or junk lines: settings are "unknown", and comparisons never claim settings differ on missing data. Pinned by `settings::tests::missing_and_odd_files_are_unknown_not_errors` (Task 4) and `result::tests::unknown_settings_never_differ` (Task 6).
-4. Saved data damaged by hand (index missing or corrupt, a benchmark folder deleted, renaming to blanks, deleting the baseline): the list skips what it can't read, blank names are refused, and deleting the baseline clears it. Pinned by `store::tests::damaged_folders_are_skipped_not_fatal` (Task 7).
+4. Saved data damaged by hand (index missing or corrupt, a benchmark folder deleted, renaming to blanks, deleting the baseline): the list skips what it can't read, blank names are refused, and deleting the baseline clears it. Pinned by `store::tests::damaged_folders_are_skipped_not_fatal` and `store::tests::rename_delete_and_baseline` (Task 7).
 5. F10 pressed twice, during a capture, before the game runs, or Cancel during a capture: never two captures at once, nothing starts without the game, and Cancel stops the capture. Pinned by `session::tests::start_key_is_ignored_unless_waiting_with_the_game` (Task 8) and `controller::tests::cancel_during_capture_stops_it` (Task 12).
 
 ## File Structure
@@ -76,7 +76,7 @@ app/src/{App.tsx,strings.ts,main.tsx,pages/Home.tsx,pages/Toolbox.tsx,first-run/
 ### Task 1: `kestrel-bench` crate, game profiles, data model, version 0.2.0
 
 **Files:**
-- Modify: `Cargo.toml` (members, version), `crates/kestrel-probe/Cargo.toml` (kestrel-core version), `app/src-tauri/tauri.conf.json` (version), `app/package.json` + `app/package-lock.json` (version)
+- Modify: `Cargo.toml` (members, version), `crates/kestrel-probe/Cargo.toml` (kestrel-core version), `app/src-tauri/tauri.conf.json` (version), `app/package.json` + `app/package-lock.json` (version), `app/src/api/mock-report.json` (appVersion)
 - Create: `crates/kestrel-bench/Cargo.toml`, `crates/kestrel-bench/src/lib.rs`, `crates/kestrel-bench/src/profile.rs`, `crates/kestrel-bench/src/model.rs`
 
 **Interfaces:**
@@ -105,6 +105,8 @@ kestrel-core = { version = "0.2.0", path = "../kestrel-core" }
 
 In `app/src-tauri/tauri.conf.json` change `"version": "0.1.0"` to `"version": "0.2.0"`.
 
+In `app/src/api/mock-report.json` (the browser-preview report) change `"appVersion": "0.1.0"` to `"appVersion": "0.2.0"`.
+
 Run: `cd app && npm version 0.2.0 --no-git-tag-version && cd ..`
 Expected: prints `v0.2.0`; `app/package.json` and `app/package-lock.json` now say `0.2.0`.
 
@@ -117,7 +119,6 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 
@@ -423,7 +424,7 @@ Expected: all pass (the version bump changes nothing else).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/kestrel-bench crates/kestrel-probe/Cargo.toml app/src-tauri/tauri.conf.json app/package.json app/package-lock.json
+git add Cargo.toml Cargo.lock crates/kestrel-bench crates/kestrel-probe/Cargo.toml app/src-tauri/tauri.conf.json app/package.json app/package-lock.json app/src/api/mock-report.json
 git commit -m "feat(bench): kestrel-bench crate with game profiles and the benchmark data model; version 0.2.0"
 ```
 
@@ -788,7 +789,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     const GAME_USER_SETTINGS: &str = "[/Script/ShooterGame.ShooterGameUserSettings]\r\nsg.ResolutionQuality=100.000000\r\nsg.ShadowQuality=0\r\nsg.TextureQuality=0\r\nbUseVSync=False\r\nbUseDynamicResolution=False\r\nResolutionSizeX=1920\r\nResolutionSizeY=1080\r\nFullscreenMode=0\r\nFrameRateLimit=0.000000\r\n";
-    const RIOT_USER_SETTINGS: &str = "[Settings]\nEAresBoolSettingName::MultithreadedRenderingEnabled=True\nEAresIntSettingName::NvidiaReflexLowLatencySetting=2\nEAresIntSettingName::TextureQuality=0\nEAresBoolSettingName::ShadowsEnabled=False\nEAresStringSettingName::SavedCrosshairProfileData={\"profiles\":[]}\nEAresBoolSettingName::LimitFramerateInMenu=True\n";
+    const RIOT_USER_SETTINGS: &str = "[Settings]\nEAresBoolSettingName::MultithreadedRenderingEnabled=True\nEAresIntSettingName::NvidiaReflexLowLatencySetting=2\nEAresIntSettingName::TextureQuality=0\nEAresBoolSettingName::ShadowsEnabled=False\nEAresStringSettingName::SavedCrosshairProfileData={\"profiles\":[]}\nEAresBoolSettingName::LimitFramerateInMenu=True\nEAresIntSettingName::PlayerPerfShowFrameRate=1\n";
 
     #[test]
     fn reads_the_settings_that_affect_fps() {
@@ -804,6 +805,7 @@ mod tests {
         assert_eq!(s.quality.get("TextureQuality").map(String::as_str), Some("0"));
         assert_eq!(s.quality.get("ShadowsEnabled").map(String::as_str), Some("False"));
         assert_eq!(s.limits.get("LimitFramerateInMenu").map(String::as_str), Some("True"));
+        assert_eq!(s.limits.keys().collect::<Vec<_>>(), vec!["LimitFramerateInMenu"], "the FPS counter is not a limit");
         assert!(!s.quality.contains_key("SavedCrosshairProfileData"));
     }
 
@@ -900,6 +902,8 @@ pub fn parse(game_user_settings: &str, riot_user_settings: &str) -> ValorantSett
             | "TextureQuality" | "UIQuality" | "ShadowsEnabled" => {
                 s.quality.insert(name.to_string(), value.to_string());
             }
+            // The in-game FPS counter: its name says "FrameRate" but it limits nothing.
+            "PlayerPerfShowFrameRate" => {}
             _ if lower.contains("limit") || lower.contains("maxfps") || lower.contains("framerate") => {
                 s.limits.insert(name.to_string(), value.to_string());
             }
@@ -988,7 +992,8 @@ fn boolean(value: &str) -> Option<bool> {
 /// Text from UTF-8 (with or without BOM) or UTF-16 LE with BOM.
 fn decode(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let (byte_pairs, _) = rest.as_chunks::<2>();
+        let units: Vec<u16> = byte_pairs.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
         return String::from_utf16_lossy(&units);
     }
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
@@ -1240,7 +1245,8 @@ mod tests {
     fn metrics_one_side_lacks_and_other_routes_are_not_compared() {
         let base = bench("a", vec![run(400.0, 280.0, 2.0, None, Bottleneck::Gpu); 3]);
         let current = bench("b", vec![run(420.0, 285.0, 1.0, Some(12.0), Bottleneck::Gpu); 3]);
-        assert!(compare(&base, &current).metrics.iter().all(|m| m.metric != MetricId::PcLatencyMs));
+        let compared: Vec<MetricId> = compare(&base, &current).metrics.iter().map(|m| m.metric).collect();
+        assert_eq!(compared, vec![MetricId::AvgFps, MetricId::Low1Fps, MetricId::Low01Fps, MetricId::StuttersPerMin]);
         let mut other_route = current.clone();
         other_route.route_version = 2;
         let c = compare(&base, &other_route);
@@ -1459,7 +1465,7 @@ git commit -m "feat(bench): middle-of-three results, real-or-noise comparisons a
 
 **Interfaces:**
 - Consumes: `model::{Benchmark, BenchmarkSummary, STARTING_POINT}`.
-- Produces: `kestrel_bench::Store` with `new(dir)`, `dir() -> &Path`, `save(&self, bench: &mut Benchmark, frame_times: &[Vec<f32>]) -> io::Result<String>` (assigns `bench.id`; the first benchmark ever saved, or the first after the baseline was deleted, is renamed "Starting point" and becomes the baseline), `list() -> Vec<BenchmarkSummary>` (newest first, unreadable ones left out), `get(id) -> Option<Benchmark>`, `frame_times(id, run: usize /*1-based*/) -> Option<Vec<f32>>`, `rename(id, name) -> io::Result<()>` (trimmed, blank refused, at most 60 characters), `delete(id) -> io::Result<()>` (clears the baseline if it was it), `set_baseline(id) -> io::Result<()>`, `baseline() -> Option<String>`. Layout: `index.json`, `<id>/summary.json`, `<id>/run-<n>.bin` (little-endian f32). Ids are digits and dashes from `created_at` ("20261012-213005", then "-2", "-3" on clashes); any id with other characters is refused, so the UI can never reach outside the folder.
+- Produces: `kestrel_bench::Store` with `new(dir)`, `dir() -> &Path`, `save(&self, bench: &mut Benchmark, frame_times: &[Vec<f32>]) -> io::Result<String>` (assigns `bench.id`; the first benchmark ever saved, or the first after the baseline was deleted, is renamed "Starting point" and becomes the baseline), `list() -> Vec<BenchmarkSummary>` (newest first, unreadable ones left out), `get(id) -> Option<Benchmark>`, `frame_times(id, run: usize /*1-based*/) -> Option<Vec<f32>>`, `rename(id, name) -> io::Result<()>` (trimmed, blank refused, at most 60 characters), `delete(id) -> io::Result<()>` (clears the baseline if it was it), `set_baseline(id) -> io::Result<()>`, `baseline() -> Option<String>`. Layout: `index.json`, `<id>/summary.json`, `<id>/run-<n>.bin` (little-endian f32). Ids come from `created_at`'s digits ("20261012-213005", then "-2", "-3" on clashes); any id with characters other than ASCII letters, digits and dashes is refused, so the UI can never reach outside the folder.
 
 - [ ] **Step 1: Write the failing tests** — create `store.rs` with only the tests; in `lib.rs` add `pub mod store;` and `pub use store::Store;`:
 
@@ -1576,9 +1582,13 @@ Expected: FAIL — cannot find `Store`.
 
 ```rust
 //! Saved benchmarks, in Kestrel's own folder (decision 40):
-//!   index.json          {"ids": [oldest … newest], "baseline": id}
-//!   <id>/summary.json   the Benchmark
-//!   <id>/run-<n>.bin    run n's frame times, little-endian f32
+//!
+//! ```text
+//! index.json          {"ids": [oldest … newest], "baseline": id}
+//! <id>/summary.json   the Benchmark
+//! <id>/run-<n>.bin    run n's frame times, little-endian f32
+//! ```
+//!
 //! Each file is written under a temporary name and then renamed, so a crash never leaves half a file.
 use crate::model::{Benchmark, BenchmarkSummary, STARTING_POINT};
 use serde::{Deserialize, Serialize};
@@ -1661,7 +1671,8 @@ impl Store {
             return None;
         }
         let bytes = std::fs::read(self.dir.join(id).join(format!("run-{run}.bin"))).ok()?;
-        Some(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+        let (quads, _) = bytes.as_chunks::<4>();
+        Some(quads.iter().map(|&quad| f32::from_le_bytes(quad)).collect())
     }
 
     pub fn rename(&self, id: &str, name: &str) -> io::Result<()> {
@@ -1781,7 +1792,7 @@ git commit -m "feat(bench): save benchmarks in Kestrel's own folder, safely"
 
 **Interfaces:**
 - Consumes: `model::{Flag, RunRecord}`.
-- Produces: `kestrel_bench::session::{Session, Phase {Waiting, Capturing, Review {flags}, Done, Failed {message}, Cancelled}, Action {BeepStart, BeepEnd, StartCapture {pass: u8}, StopCapture, Finish}, SessionView {profile_id, pass, phase (flattened, JSON tag "phase"), game_running, runs: Vec<Option<RunRecord>>, result_id}, RUNS = 3}`. `Session` methods: `new(profile_id)`, `phase()`, `pass()` (0 = warm-up, 1–3 = runs), `is_over()`, `set_game_running(bool)`, `start_pressed() -> Vec<Action>`, `capture_finished(Result<RunRecord, String>) -> Vec<Action>`, `redo()`, `keep()`, `cancel()`, `fail(message)`, `set_result_id(id)`, `runs() -> Vec<RunRecord>`, `view() -> SessionView`. Rules: the start key works only while waiting and the game runs; the warm-up's numbers and flags are never kept; a flagged run waits for redo or keep; the third accepted run returns `Finish`; cancel during a capture returns `StopCapture`; anything after the session is over does nothing.
+- Produces: `kestrel_bench::session::{Session, Phase {Waiting, Capturing, Review {flags}, Done, Failed {message}, Cancelled}, Action {BeepStart, BeepEnd, StartCapture {pass: u8}, StopCapture, Finish}, SessionView {profile_id, pass, phase (flattened, JSON tag "phase"), game_running, runs: Vec<Option<RunRecord>>, result_id}, RUNS = 3}`. `Session` methods: `new(profile_id)`, `phase()`, `pass()` (0 = warm-up, 1–3 = runs), `is_over()`, `set_game_running(bool)`, `start_pressed() -> Vec<Action>`, `capture_finished(Result<RunRecord, String>) -> Vec<Action>`, `redo()`, `keep()`, `cancel()`, `fail(message)`, `set_result_id(id)`, `runs() -> Vec<RunRecord>`, `view() -> SessionView`. Rules: the start key works only while waiting and the game runs; the warm-up's numbers and flags are never kept; a flagged run waits for redo or keep; the third accepted run returns `Finish`; cancel during a capture returns `StopCapture`; anything after the session is over does nothing, except `fail` (saving the finished result can still fail) and `set_result_id`.
 
 - [ ] **Step 1: Write the failing tests** — create `session.rs` with only the tests and add `pub mod session;` to `lib.rs`:
 
@@ -4260,7 +4271,7 @@ export type BenchState = SessionPhase & {
     failed: 'The benchmark stopped.',
     cancelled: 'Benchmark cancelled.',
     startRun: 'Start run',
-    redo: 'Redo run',
+    redo: (pass: number) => `Redo run ${pass}`,
     keep: 'Keep anyway',
     cancel: 'Cancel',
     seeResult: 'See the result',
@@ -4274,7 +4285,7 @@ export type BenchState = SessionPhase & {
     metrics: { 'avg-fps': 'Average FPS', 'low1-fps': '1% low', 'low01-fps': '0.1% low', 'stutters-per-min': 'Stutters', 'pc-latency-ms': 'PC latency' },
     bottleneckLabel: 'Limited by',
     bottleneck: { gpu: 'GPU-bound', cpu: 'CPU-bound', mixed: 'CPU and GPU both limit', unknown: 'Not measured' },
-    spread: (text: string) => `runs within ${text}`,
+    spread: (text: string) => `Runs within ${text}`,
     notReported: 'Not reported',
     perMinute: (text: string) => `${text}/min`,
     milliseconds: (text: string) => `${text} ms`,
@@ -4285,7 +4296,12 @@ export type BenchState = SessionPhase & {
     graph: 'Frame times of the middle run',
     graphAxis: 'ms per frame, lower is smoother',
     context: 'PC at the time',
-    contextRows: { powerPlan: 'Power plan', ram: 'RAM', gpu: 'Graphics', windows: 'Windows build', display: 'Monitor' },
+    contextRows: { powerPlan: 'Power plan', ram: 'RAM', gpu: 'Graphics', windows: 'Windows build', display: 'Monitor', game: 'VALORANT' },
+    gameSettings: {
+      notFound: 'Settings not found',
+      vsync: (on: boolean) => (on ? 'V-Sync on' : 'V-Sync off'),
+      limit: (fps: number) => (fps > 0 ? `${fps} FPS limit` : 'No FPS limit'),
+    },
     rename: 'Rename',
     save: 'Save',
     setBaseline: 'Use as baseline',
@@ -4708,9 +4724,10 @@ export function RouteCard({ profile, starting, onStart }: { profile: GameProfile
 `app/src/components/bench/SessionPanel.tsx`:
 ```tsx
 import { benchCancel, benchKeep, benchRedo, benchStartRun } from '../../api/client';
-import { flagText, passLabel, sessionHeadline } from '../../api/bench';
+import { flagText, sessionHeadline } from '../../api/bench';
 import type { BenchState } from '../../api/types';
 import { strings } from '../../strings';
+import { CopyDiagnostics } from '../CopyDiagnostics';
 
 /** The running session: what to do now, the countdown, each pass's status, and the session's buttons. */
 export function SessionPanel({ state, onClose }: { state: BenchState; onClose: (resultId: string | null) => void }) {
@@ -4718,19 +4735,19 @@ export function SessionPanel({ state, onClose }: { state: BenchState; onClose: (
   const over = state.phase === 'done' || state.phase === 'failed' || state.phase === 'cancelled';
   const big = state.countdown ?? (state.phase === 'capturing' ? state.secondsLeft : null);
   return (
-    <section className="panel session" aria-live="polite">
+    <section className="panel session">
       <div className="session-head">
-        <h2>{sessionHeadline(state)}</h2>
+        <h2 aria-live="polite">{sessionHeadline(state)}</h2>
         {big !== null && <span className="num session-clock">{b.secondsLeft(big)}</span>}
       </div>
       <ol className="pass-chips">
         {[0, 1, 2, 3].map((pass) => {
           const record = pass > 0 ? state.runs[pass - 1] : null;
-          const status = pass < state.pass || state.phase === 'done' ? (record?.kept ? b.runKept : b.runOk) : pass === state.pass ? passLabel(pass) : '';
+          const finished = pass < state.pass || state.phase === 'done';
           return (
-            <li key={pass} className={`cut-s${pass === state.pass && !over ? ' current' : ''}${pass < state.pass || state.phase === 'done' ? ' finished' : ''}`}>
+            <li key={pass} className={`cut-s${pass === state.pass && !over ? ' current' : ''}${finished ? ' finished' : ''}`}>
               <span>{b.passChip(pass)}</span>
-              {status && pass !== state.pass && <span className="muted small"> · {status}</span>}
+              {finished && <span className="muted small"> · {record?.kept ? b.runKept : b.runOk}</span>}
             </li>
           );
         })}
@@ -4743,13 +4760,14 @@ export function SessionPanel({ state, onClose }: { state: BenchState; onClose: (
         </ul>
       )}
       {state.phase === 'failed' && <p className="caution">{state.message}</p>}
+      {state.phase === 'failed' && <CopyDiagnostics />}
       <div className="actions">
         {state.phase === 'waiting' && state.startMode === 'countdown' && state.countdown === null && state.gameRunning && (
           <button className="btn btn-primary cut-s" onClick={() => void benchStartRun()}>{b.startRun}</button>
         )}
         {state.phase === 'review' && (
           <>
-            <button className="btn btn-primary cut-s" onClick={() => void benchRedo()}>{b.redo}</button>
+            <button className="btn btn-primary cut-s" onClick={() => void benchRedo()}>{b.redo(state.pass)}</button>
             <button className="btn btn-ghost cut-s" onClick={() => void benchKeep()}>{b.keep}</button>
           </>
         )}
