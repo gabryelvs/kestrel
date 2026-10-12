@@ -1465,7 +1465,7 @@ git commit -m "feat(bench): middle-of-three results, real-or-noise comparisons a
 
 **Interfaces:**
 - Consumes: `model::{Benchmark, BenchmarkSummary, STARTING_POINT}`.
-- Produces: `kestrel_bench::Store` with `new(dir)`, `dir() -> &Path`, `save(&self, bench: &mut Benchmark, frame_times: &[Vec<f32>]) -> io::Result<String>` (assigns `bench.id`; the first benchmark ever saved, or the first after the baseline was deleted, is renamed "Starting point" and becomes the baseline), `list() -> Vec<BenchmarkSummary>` (newest first, unreadable ones left out), `get(id) -> Option<Benchmark>`, `frame_times(id, run: usize /*1-based*/) -> Option<Vec<f32>>`, `rename(id, name) -> io::Result<()>` (trimmed, blank refused, at most 60 characters), `delete(id) -> io::Result<()>` (clears the baseline if it was it), `set_baseline(id) -> io::Result<()>`, `baseline() -> Option<String>`. Layout: `index.json`, `<id>/summary.json`, `<id>/run-<n>.bin` (little-endian f32). Ids come from `created_at`'s digits ("20261012-213005", then "-2", "-3" on clashes); any id with characters other than ASCII letters, digits and dashes is refused, so the UI can never reach outside the folder.
+- Produces: `kestrel_bench::Store` with `new(dir)`, `dir() -> &Path`, `save(&self, bench: &mut Benchmark, frame_times: &[Vec<f32>]) -> io::Result<String>` (assigns `bench.id`; the first benchmark ever saved, or the first after the baseline was deleted, is renamed "Starting point" and becomes the baseline), `list() -> Vec<BenchmarkSummary>` (newest first, unreadable ones left out), `get(id) -> Option<Benchmark>`, `frame_times(id, run: usize /*1-based*/) -> Option<Vec<f32>>`, `rename(id, name) -> io::Result<()>` (trimmed, blank refused, at most 60 characters), `delete(id) -> io::Result<()>` (clears the baseline if it was it), `set_baseline(id) -> io::Result<()>`, `baseline() -> Option<String>`. Layout: `index.json`, `<id>/summary.json`, `<id>/run-<n>.bin` (little-endian f32). Ids come from `created_at`'s digits ("20261012-213005", then "-2", "-3" on clashes); any id with characters other than ASCII letters, digits and dashes is refused, so the UI can never reach outside the folder. Every change (`save`, `rename`, `delete`, `set_baseline`) holds the store's own lock from reading to writing, so two threads (the capture thread saving, a command deleting) can't lose each other's update to `index.json`.
 
 - [ ] **Step 1: Write the failing tests** — create `store.rs` with only the tests; in `lib.rs` add `pub mod store;` and `pub use store::Store;`:
 
@@ -1594,6 +1594,7 @@ use crate::model::{Benchmark, BenchmarkSummary, STARTING_POINT};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -1604,11 +1605,14 @@ struct Index {
 
 pub struct Store {
     dir: PathBuf,
+    /// Held through every read-change-write, so two callers at once (the capture thread saving, a command deleting)
+    /// can't lose each other's change to the index.
+    changing: Mutex<()>,
 }
 
 impl Store {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self { dir: dir.into(), changing: Mutex::new(()) }
     }
 
     pub fn dir(&self) -> &Path {
@@ -1618,6 +1622,7 @@ impl Store {
     /// Saves a new benchmark and its runs' frame times; returns (and sets) its id. With no baseline yet, it is
     /// named "Starting point" and becomes the baseline (decision 41).
     pub fn save(&self, bench: &mut Benchmark, frame_times: &[Vec<f32>]) -> io::Result<String> {
+        let _changing = self.change();
         std::fs::create_dir_all(&self.dir)?;
         let mut index = self.index();
         let base = id_from(&bench.created_at);
@@ -1680,6 +1685,7 @@ impl Store {
         if name.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "A name can't be empty."));
         }
+        let _changing = self.change();
         let mut bench = self.get(id).ok_or_else(not_found)?;
         bench.name = name.chars().take(60).collect();
         write_atomic(&self.dir.join(id).join("summary.json"), &serde_json::to_vec_pretty(&bench)?)
@@ -1689,6 +1695,7 @@ impl Store {
         if !safe_id(id) {
             return Err(not_found());
         }
+        let _changing = self.change();
         let mut index = self.index();
         index.ids.retain(|i| i != id);
         if index.baseline.as_deref() == Some(id) {
@@ -1702,6 +1709,7 @@ impl Store {
     }
 
     pub fn set_baseline(&self, id: &str) -> io::Result<()> {
+        let _changing = self.change();
         let mut index = self.index();
         if !index.ids.iter().any(|i| i == id) || self.get(id).is_none() {
             return Err(not_found());
@@ -1730,6 +1738,12 @@ impl Store {
     fn write_index(&self, index: &Index) -> io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         write_atomic(&self.dir.join("index.json"), &serde_json::to_vec_pretty(index)?)
+    }
+
+    /// One change at a time. Every write is atomic, so a panic mid-change leaves nothing half-written and a poisoned
+    /// lock is simply taken over.
+    fn change(&self) -> MutexGuard<'_, ()> {
+        self.changing.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -2398,6 +2412,7 @@ Create `crates/kestrel-probe/src/process.rs` with only its tests, and add `pub m
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn a_process_that_does_not_exist_is_not_running() {
         assert!(!game_running("definitely-not-a-real-game-kestrel.exe"));
@@ -2414,7 +2429,8 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn off_windows_the_game_runs_only_when_faked() {
-        // Only this test touches KESTREL_FAKE_GAME.
+        // Off Windows, `game_running` only reads KESTREL_FAKE_GAME, and this is the only test that calls it there (the
+        // not-running test above is Windows-only), so setting the variable can't race another test.
         std::env::remove_var("KESTREL_FAKE_GAME");
         assert!(!game_running("VALORANT-Win64-Shipping.exe"));
         std::env::set_var("KESTREL_FAKE_GAME", "1");
@@ -2518,7 +2534,7 @@ pub fn busy_now() -> Option<Vec<kestrel_core::BusyProcess>> {
 - [ ] **Step 3: Run the tests and the Windows check**
 
 Run: `cargo test -p kestrel-probe && cargo clippy -p kestrel-probe --all-targets -- -D warnings && cargo clippy -p kestrel-probe --target x86_64-pc-windows-msvc --all-targets -- -D warnings && cargo fmt -p kestrel-probe`
-Expected: all pass (the Windows-only test runs on CI); both clippy runs clean.
+Expected: all pass (the two Windows-only process tests run on CI); both clippy runs clean.
 
 - [ ] **Step 4: Commit**
 
@@ -2537,7 +2553,7 @@ git commit -m "feat(probe): find a game by process name without opening it; samp
 
 **Interfaces:**
 - Consumes: `kestrel_bench::csv::parse` (Task 2) in tests.
-- Produces: `bench::capture::{CaptureOutput {csv: String, stderr: String}, Capture` trait (`run(&self, process_name: &str, seconds: u32, csv_path: &Path, cancel: &AtomicBool) -> Result<CaptureOutput, String>`, `clean_up_stale_session(&self)`), `PresentMon::new(exe: PathBuf)`, `Simulated { seconds_per_capture: f32 }`, `simulated_csv(seconds: u32) -> String`, `presentmon_args(process_name, seconds, csv_path) -> Vec<String>`, `SESSION_NAME = "KestrelBench"`, `CANCELLED = "cancelled"}`; `bench::beep::{Cue {Start, Switch, End, Tick}, tones(Cue) -> &'static [(u32, u32)], play(Cue)}`. Bundled files land at `presentmon/PresentMon.exe` and `presentmon/LICENSE.txt` in the app's resource folder (Windows builds only).
+- Produces: `bench::capture::{CaptureOutput {csv: String, stderr: String}, Capture` trait (`run(&self, process_name: &str, seconds: u32, csv_path: &Path, cancel: &AtomicBool) -> Result<CaptureOutput, String>`, `clean_up_stale_session(&self)`), `PresentMon::new(exe: PathBuf)`, `Simulated { seconds_per_capture: f32 }`, `simulated_csv(seconds: u32) -> String`, `presentmon_args(process_name, seconds, csv_path) -> Vec<String>`, `SESSION_NAME = "KestrelBench"`, `CANCELLED = "cancelled"`, `MISSING = "PresentMon is missing. Reinstall Kestrel and try again."}`; `PresentMon` runs only the exe it was given (a missing one fails with `MISSING`, never a search of PATH) and deletes a cancelled or timed-out capture's CSV; `bench::beep::{Cue {Start, Switch, End, Tick}, tones(Cue) -> &'static [(u32, u32)], play(Cue)}`. Bundled files land at `presentmon/PresentMon.exe` and `presentmon/LICENSE.txt` in the app's resource folder (Windows builds only).
 
 - [ ] **Step 1: Build-time download with hash check** — `app/scripts/fetch-presentmon.mjs`:
 
@@ -2583,8 +2599,9 @@ for (const file of files) {
 }
 ```
 
-In `app/package.json` `scripts`, add after `"mock"`:
+In `app/package.json` `scripts`, `"mock"` is the last entry: give it a trailing comma and add the new script after it, so the two lines read:
 ```json
+    "mock": "cargo run -q -p kestrel-probe --bin kestrel-probe -- --pretty > src/api/mock-report.json",
     "fetch:presentmon": "node scripts/fetch-presentmon.mjs"
 ```
 
@@ -2757,6 +2774,8 @@ use std::time::{Duration, Instant};
 pub const SESSION_NAME: &str = "KestrelBench";
 /// The error text of a cancelled capture.
 pub const CANCELLED: &str = "cancelled";
+/// The error when Kestrel's copy of PresentMon isn't there (spec Errors table: "PresentMon missing").
+pub const MISSING: &str = "PresentMon is missing. Reinstall Kestrel and try again.";
 
 #[derive(Debug, Clone, Default)]
 pub struct CaptureOutput {
@@ -2813,6 +2832,7 @@ impl PresentMon {
     }
 
     fn command(&self) -> Command {
+        #[cfg_attr(not(windows), allow(unused_mut))] // only Windows changes it (no console window)
         let mut command = Command::new(&self.exe);
         #[cfg(windows)]
         {
@@ -2824,6 +2844,11 @@ impl PresentMon {
     }
 
     fn attempt(&self, process_name: &str, seconds: u32, csv_path: &Path, cancel: &AtomicBool) -> Attempt {
+        // Only Kestrel's own copy runs: a missing file (or the empty path `capture_engine` passes when the resource
+        // can't be found) fails here, before Windows could go looking for another PresentMon.exe.
+        if !self.exe.is_file() {
+            return Attempt::Failed(MISSING.into());
+        }
         let _ = std::fs::remove_file(csv_path);
         let spawned = self
             .command()
@@ -2849,6 +2874,8 @@ impl PresentMon {
                 let _ = child.kill();
                 let _ = child.wait();
                 self.clean_up_stale_session();
+                // A stopped capture's partial CSV is never read: delete it now (spec: temporary CSVs are deleted).
+                let _ = std::fs::remove_file(csv_path);
                 return Attempt::Failed(CANCELLED.into());
             }
             match child.try_wait() {
@@ -2857,6 +2884,7 @@ impl PresentMon {
                     let _ = child.kill();
                     let _ = child.wait();
                     self.clean_up_stale_session();
+                    let _ = std::fs::remove_file(csv_path);
                     return Attempt::Failed("PresentMon didn't finish in time.".into());
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(200)),
@@ -2952,7 +2980,7 @@ pub fn simulated_csv(seconds: u32) -> String {
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p kestrel bench:: && cargo clippy -p kestrel --all-targets -- -D warnings && cargo fmt -p kestrel`
-Expected: `4 passed`; clippy clean. (The Windows path of `PresentMon` first compiles on CI; nothing in it is Windows-only except the `CREATE_NO_WINDOW` block.)
+Expected: `4 passed`; clippy clean. (Two pieces are Windows-only and first compile on CI: the `CREATE_NO_WINDOW` block in `PresentMon::command` and `beep::sound`, which calls Windows' `Beep`. Everything else here builds and runs on the Mac.)
 
 - [ ] **Step 7: Commit**
 
@@ -2971,7 +2999,7 @@ git commit -m "feat(app): bundled PresentMon capture with a pinned download, bee
 **Interfaces:**
 - Consumes: `kestrel_bench::{session::*, flags::*, csv, metrics, result, Benchmark, Context, GameProfile, RunRecord, Store, ValorantSettings, PRESENTMON_VERSION, profile}`, `bench::capture::{Capture, CaptureOutput, CANCELLED}`, `bench::beep::Cue`.
 - Produces: `bench::controller::{Platform` trait (`register_start_key() -> bool`, `unregister_start_key()`, `game_running(&str) -> bool`, `beep(Cue)`, `busy_now() -> Vec<(String, f32)>`, `game_settings() -> Option<ValorantSettings>`, `emit(Option<&BenchState>)`), `StartMode {Hotkey, Countdown}`, `BenchState {session: SessionView (flattened), start_mode, start_key: &'static str, capture_seconds, switch_at_seconds, seconds_left: Option<u32>, countdown: Option<u32>}`, `Controller` (Clone) with `new(platform, capture, store: Arc<Store>, work_dir, kestrel_version)`, `with_timing(poll, tick)`, `store() -> &Store`, `game_settings()`, `state() -> Option<BenchState>`, `start(profile_id, context) -> Result<BenchState, String>`, `start_pressed()`, `start_countdown() -> Result<(), String>`, `redo()`, `keep()`, `cancel()`, `dismiss()`, `START_KEY = "F10"`, `ACTIVE_MARKER = "capture.active"`}`.
-- Rules: the platform is never called while the controller's lock is held (claiming or releasing the key runs on the UI thread, which may be waiting for that lock to handle a key press); one session at a time; the key is given back as soon as a session is over; a capture's results only ever reach the session that started it; a capture marker file exists in `work_dir` while PresentMon runs (Task 13 cleans up after a crash).
+- Rules: the platform is never called while the controller's lock is held (claiming or releasing the key runs on the UI thread, which may be waiting for that lock to handle a key press); one session at a time; the key is given back as soon as a session is over; a capture's results (and a saved result's id) only ever reach the session that started it; the end-of-run double beep sounds as soon as PresentMon stops, before the 1.5 s analysis (spec: at 90 s), so `Action::BeepEnd` plays nothing more; a capture marker file exists in `work_dir` while PresentMon runs (Task 13 cleans up after a crash).
 
 - [ ] **Step 1: Write the failing tests** — add to `app/src-tauri/Cargo.toml`:
 ```toml
@@ -3492,7 +3520,8 @@ impl Controller {
         for action in actions {
             match action {
                 Action::BeepStart => self.platform.beep(Cue::Start),
-                Action::BeepEnd => self.platform.beep(Cue::End),
+                // Already played by the capture thread the moment PresentMon stopped (see `spawn_capture`).
+                Action::BeepEnd => {}
                 Action::StartCapture { pass } => self.spawn_capture(pass),
                 Action::StopCapture => {} // cancel() already raised the flag the capture watches
                 Action::Finish => self.finish(),
@@ -3524,9 +3553,21 @@ impl Controller {
             let _ = std::fs::remove_file(&marker);
             done.store(true, Ordering::SeqCst);
             let _ = pacer.join();
+            // The double beep marks the end of the run as soon as PresentMon stops (spec: at 90 s), not after the
+            // analysis below, which samples the CPU for 1.5 s. It sounds in the cases where the session answers with
+            // `BeepEnd` (a capture that wasn't cancelled, for the session still capturing it), so `perform` skips that.
+            let cancelled = matches!(&outcome, Err(message) if message == CANCELLED);
+            if !cancelled && me.capturing(&cancel) {
+                me.platform.beep(Cue::End);
+            }
             let outcome = outcome.and_then(|output| me.analyse(&output));
             me.capture_finished(&cancel, pass, outcome);
         });
+    }
+
+    /// Whether the session `cancel` belongs to is still the live one and still capturing.
+    fn capturing(&self, cancel: &Arc<AtomicBool>) -> bool {
+        self.lock().as_ref().is_some_and(|l| Arc::ptr_eq(&l.cancel, cancel) && l.session.phase() == &Phase::Capturing)
     }
 
     /// Counts the capture down for the UI and beeps when it's time to switch to the bots.
@@ -3585,9 +3626,11 @@ impl Controller {
         self.perform(actions);
     }
 
-    /// Combines the three runs and saves the benchmark (the first one becomes the starting point).
+    /// Combines the three runs and saves the benchmark (the first one becomes the starting point). Only a done session
+    /// without a result is saved, and the id (or a save error) goes back only to that session, even if it was
+    /// dismissed and another one started while saving.
     fn finish(&self) {
-        let prepared = self.lock().as_ref().map(|live| {
+        let prepared = self.lock().as_ref().filter(|l| l.session.phase() == &Phase::Done && l.session.view().result_id.is_none()).map(|live| {
             let runs = live.session.runs();
             let bench = Benchmark {
                 name: format!("Benchmark {}", chrono::Local::now().format("%Y-%m-%d %H:%M")),
@@ -3602,14 +3645,14 @@ impl Controller {
                 ..Default::default()
             };
             let frames: Vec<Vec<f32>> = live.frames.iter().map(|f| f.clone().unwrap_or_default()).collect();
-            (bench, frames)
+            (bench, frames, live.cancel.clone())
         });
-        let Some((mut bench, frames)) = prepared else {
+        let Some((mut bench, frames, cancel)) = prepared else {
             return;
         };
         bench.context.game_settings = self.platform.game_settings();
         let saved = self.store.save(&mut bench, &frames);
-        if let Some(live) = self.lock().as_mut() {
+        if let Some(live) = self.lock().as_mut().filter(|l| Arc::ptr_eq(&l.cancel, &cancel)) {
             match saved {
                 Ok(id) => live.session.set_result_id(id),
                 Err(e) => live.session.fail(format!("Couldn't save the result: {e}")),
@@ -3688,7 +3731,7 @@ git commit -m "feat(app): benchmark session controller with start key, beeps, ca
 
 **Interfaces:**
 - Consumes: `Controller` and friends (Task 12), `PresentMon`/`Simulated` (Task 11), `kestrel_bench::{result, settings, text, Store, PROFILES, …}`, `kestrel_probe::{process::game_running, busy_now}`, `kestrel_core::{Report, gpu}`.
-- Produces: commands (all JSON camelCase) `bench_profiles() -> Vec<GameProfile>`, `bench_state() -> Option<BenchState>`, `bench_start(profile: String) -> Result<BenchState, String>`, `bench_start_run() -> Result<(), String>`, `bench_cancel()`, `bench_redo()`, `bench_keep()`, `bench_dismiss()`, `bench_list() -> Vec<BenchmarkSummary>`, `bench_get(id) -> Result<BenchDetail, String>` where `BenchDetail {benchmark, graph: Vec<f32> /* ≤ 600 points */, comparison: Option<Comparison>, baselineName: Option<String>}`, `bench_rename(id, name)`, `bench_delete(id)`, `bench_set_baseline(id)` (each `-> Result<(), String>`), `bench_compare(baselineId, currentId) -> Result<Comparison, String>`, `bench_copy_results(id) -> Result<String, String>`; event `bench-state` (payload `BenchState` or `null`); `get_diagnostics` now returns `{"report": …, "benchmarks": [...], "valorantSettings": …}`. Pure helpers for tests: `context_from(&Report) -> Context`, `detail(&Store, id) -> Result<BenchDetail, String>`, `copy_results(&Store, id) -> Result<String, String>`, `start_key() -> Shortcut`.
+- Produces: commands (all JSON camelCase) `bench_profiles() -> Vec<GameProfile>`, `bench_state() -> Result<Option<BenchState>, String>`, `bench_start(profile: String) -> Result<BenchState, String>`, `bench_start_run() -> Result<(), String>`, `bench_cancel()`, `bench_redo()`, `bench_keep()`, `bench_dismiss()` (each `-> Result<(), String>`), `bench_list() -> Result<Vec<BenchmarkSummary>, String>`, `bench_get(id) -> Result<BenchDetail, String>` where `BenchDetail {benchmark, graph: Vec<f32> /* ≤ 600 points */, comparison: Option<Comparison>, baselineName: Option<String>}`, `bench_rename(id, name)`, `bench_delete(id)`, `bench_set_baseline(id)` (each `-> Result<(), String>`), `bench_compare(baselineId, currentId) -> Result<Comparison, String>`, `bench_copy_results(id) -> Result<String, String>`; event `bench-state` (payload `BenchState` or `null`); `get_diagnostics` now returns `{"report": …, "benchmarks": [...], "valorantSettings": …}`. Pure helpers for tests: `context_from(&Report) -> Context`, `detail(&Store, id) -> Result<BenchDetail, String>`, `copy_results(&Store, id) -> Result<String, String>`, `start_key() -> Shortcut`. Saved benchmarks live in app-data `benchmarks`; the capture's work files (CSVs and the `capture.active` marker) in its sibling `bench-work`, which no benchmark id can name. Only the bundled `presentmon/PresentMon.exe` ever runs: if it can't be found, every capture fails with "PresentMon is missing" (no search of PATH). F10 presses are handed to a worker thread, never handled on the UI thread.
 
 - [ ] **Step 1: Write the failing tests** — add to `app/src-tauri/Cargo.toml` `[dependencies]`:
 ```toml
@@ -3824,7 +3867,8 @@ impl Platform for TauriPlatform {
 /// The benchmark controller, with saved results in the app's own folder.
 pub fn controller(app: &AppHandle) -> tauri::Result<Controller> {
     let data = app.path().app_data_dir()?;
-    let work = data.join("benchmarks").join("work");
+    // Beside the benchmarks folder, not inside it, so no benchmark id (bench_delete("work"), say) can reach it.
+    let work = data.join("bench-work");
     let capture = capture_engine(app);
     // A crash during a capture leaves the marker behind: end that capture session first.
     if work.join(ACTIVE_MARKER).exists() {
@@ -3838,11 +3882,12 @@ pub fn controller(app: &AppHandle) -> tauri::Result<Controller> {
 
 #[cfg(windows)]
 fn capture_engine(app: &AppHandle) -> Arc<dyn Capture> {
-    // If the resource can't be found, PresentMon fails to start and the session says so.
+    // Only the bundled copy, never a PresentMon.exe found on PATH. If the resource can't be resolved, the empty path
+    // makes every capture fail with "PresentMon is missing" (capture::MISSING), and the session shows that error.
     let exe = app
         .path()
         .resolve("presentmon/PresentMon.exe", tauri::path::BaseDirectory::Resource)
-        .unwrap_or_else(|_| PathBuf::from("PresentMon.exe"));
+        .unwrap_or_default();
     Arc::new(super::capture::PresentMon::new(exe))
 }
 
@@ -3858,7 +3903,7 @@ pub fn context_from(report: &Report) -> Context {
     let gpu = kestrel_core::gpu::main_gpu(&s.gpus);
     Context {
         power_plan: s.windows.power_plan.as_ref().map(|p| p.name.clone()),
-        ram_mts: s.memory.modules.iter().filter_map(|m| m.configured_mts).min(),
+        ram_mts: kestrel_core::ram::configured_mts(&s.memory.modules),
         gpu: gpu.map(|g| g.name.clone()),
         gpu_driver: gpu.map(kestrel_core::gpu::display_driver_version),
         windows_build: s.os.build,
@@ -4076,7 +4121,10 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed && *shortcut == commands::start_key() {
-                        app.state::<Controller>().start_pressed();
+                        // The plugin holds its shortcut lock while this runs on the UI thread, and the controller
+                        // may release the key (which needs both): hand the press to a worker thread.
+                        let controller = app.state::<Controller>().inner().clone();
+                        std::thread::spawn(move || controller.start_pressed());
                     }
                 })
                 .build(),
@@ -4143,7 +4191,7 @@ git commit -m "feat(app): benchmark commands, F10 through the global-shortcut pl
 
 **Interfaces:**
 - Consumes: the commands and `bench-state` event of Task 13 (JSON shapes from Tasks 1, 8, 12, 13).
-- Produces: TS types `Bottleneck, RunMetrics, Flag, RunRecord, BenchResult, ValorantSettings, BenchContext, Benchmark, BenchmarkSummary, MetricId, Verdict, MetricDelta, Comparison, BenchDetail, GameProfile, SessionPhase, BenchState`; client functions `benchProfiles, benchState, benchStart(profile), benchStartRun, benchCancel, benchRedo, benchKeep, benchDismiss, benchList, benchGet(id), benchRename(id, name), benchDelete(id), benchSetBaseline(id), benchCopyResults(id), onBenchState(handler) -> Promise<() => void>` (browser mode: a sample list and a fake session that runs in seconds); helpers in `bench.ts`: `metricValue(m, id)`, `metricText(id, value)`, `pct(n)`, `spreadText(ratio)`, `verdictTone(v)`, `verdictText(v)`, `flagText(f)`, `passLabel(pass)`, `sessionHeadline(state)`, `graphShape(graph) -> {points, maxMs, medianMs}`, `dateText(iso)`, `METRIC_ORDER`.
+- Produces: TS types `Bottleneck, RunMetrics, Flag, RunRecord, BenchResult, ValorantSettings, BenchContext, Benchmark, BenchmarkSummary, MetricId, Verdict, MetricDelta, Comparison, BenchDetail, GameProfile, SessionPhase, BenchState`; client functions `benchProfiles, benchState, benchStart(profile), benchStartRun, benchCancel, benchRedo, benchKeep, benchDismiss, benchList, benchGet(id), benchRename(id, name), benchDelete(id), benchSetBaseline(id), benchCopyResults(id), onBenchState(handler) -> Promise<() => void>` (browser mode: a sample list and a fake session that runs in seconds); helpers in `bench.ts`: `metricValue(m, id)`, `metricText(id, value)`, `pct(n)`, `spreadText(ratio)`, `verdictTone(v)`, `verdictText(v)`, `flagText(f)`, `passLabel(pass)`, `sessionHeadline(state)`, `graphShape(graph) -> {points, maxMs, medianMs}`, `dateText(iso)`, `settingsText(settings)` (VALORANT's recorded settings in one line), `METRIC_ORDER`.
 
 - [ ] **Step 1: Types** — append to `app/src/api/types.ts`:
 
@@ -4326,8 +4374,8 @@ export type BenchState = SessionPhase & {
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { flagText, graphShape, metricText, passLabel, pct, sessionHeadline, spreadText, verdictTone } from './bench';
-import type { BenchState } from './types';
+import { flagText, graphShape, metricText, passLabel, pct, sessionHeadline, settingsText, spreadText, verdictTone } from './bench';
+import type { BenchState, ValorantSettings } from './types';
 
 const base: BenchState = {
   phase: 'waiting', profileId: 'valorant', pass: 0, gameRunning: true, runs: [null, null, null], resultId: null,
@@ -4335,13 +4383,21 @@ const base: BenchState = {
 };
 
 describe('bench helpers', () => {
-  it('formats metrics with their units', () => {
+  it('formats metrics with their units, and the recorded settings', () => {
     expect(metricText('avg-fps', 412.4)).toBe('412');
     expect(metricText('low01-fps', 201.6)).toBe('202');
     expect(metricText('pc-latency-ms', 9.84)).toBe('9.8 ms');
     expect(metricText('pc-latency-ms', null)).toBe('Not reported');
     expect(metricText('stutters-per-min', 0.44)).toBe('0.4/min');
     expect(spreadText(0.0317)).toBe('3.2%');
+    const settings: ValorantSettings = {
+      resolution: [1920, 1080], fullscreenMode: 0, vsync: false, frameRateLimit: 0, reflex: 2, multithreadedRendering: true,
+      quality: { TextureQuality: '0' }, limits: {},
+    };
+    expect(settingsText(null)).toBe('Settings not found');
+    expect(settingsText(settings)).toBe('1920×1080 · V-Sync off · No FPS limit');
+    const unknown = { ...settings, resolution: null, fullscreenMode: null, vsync: null, frameRateLimit: null, reflex: null, multithreadedRendering: null };
+    expect(settingsText(unknown)).toBe('—');
   });
 
   it('signs percentages and colours verdicts', () => {
@@ -4397,7 +4453,7 @@ Expected: FAIL — `./bench` can't be resolved.
 
 ```ts
 import { strings } from '../strings';
-import type { BenchState, Flag, MetricId, RunMetrics, Verdict } from './types';
+import type { BenchState, Flag, MetricId, RunMetrics, ValorantSettings, Verdict } from './types';
 
 /** The order metrics appear in tiles and comparisons. */
 export const METRIC_ORDER: MetricId[] = ['avg-fps', 'low1-fps', 'low01-fps', 'stutters-per-min', 'pc-latency-ms'];
@@ -4478,6 +4534,17 @@ export function dateText(iso: string): string {
   const two = (n: number) => n.toString().padStart(2, '0');
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
 }
+
+/** VALORANT's recorded settings in one line: "1920×1080 · V-Sync off · No FPS limit". */
+export function settingsText(s: ValorantSettings | null): string {
+  const g = strings.bench.gameSettings;
+  if (!s) return g.notFound;
+  const parts: string[] = [];
+  if (s.resolution) parts.push(`${s.resolution[0]}×${s.resolution[1]}`);
+  if (s.vsync !== null) parts.push(g.vsync(s.vsync));
+  if (s.frameRateLimit !== null) parts.push(g.limit(s.frameRateLimit));
+  return parts.length > 0 ? parts.join(' · ') : '—';
+}
 ```
 
 Run: `cd app && npm test; cd ..`
@@ -4537,13 +4604,14 @@ export function sampleDetail(id: string): BenchDetail {
   if (!benchmark) throw new Error('That benchmark doesn’t exist.');
   const baseline = benchmarks.find((b) => b.id === baselineId && b.id !== id) ?? null;
   const delta = (a: number, b: number) => ((b - a) / a) * 100;
+  // Fixed verdicts for the sample, except that a ~0% change (the fake session saves a copy of the starting point) is noise.
   const comparison = baseline && {
     baselineId: baseline.id, currentId: id, settingsDiffer: [], routeMismatch: false,
     metrics: [
       { metric: 'avg-fps' as const, baseline: baseline.result.metrics.avgFps, current: benchmark.result.metrics.avgFps, deltaPct: delta(baseline.result.metrics.avgFps, benchmark.result.metrics.avgFps), verdict: 'real-gain' as const },
       { metric: 'low1-fps' as const, baseline: baseline.result.metrics.low1Fps, current: benchmark.result.metrics.low1Fps, deltaPct: delta(baseline.result.metrics.low1Fps, benchmark.result.metrics.low1Fps), verdict: 'real-gain' as const },
       { metric: 'low01-fps' as const, baseline: baseline.result.metrics.low01Fps, current: benchmark.result.metrics.low01Fps, deltaPct: delta(baseline.result.metrics.low01Fps, benchmark.result.metrics.low01Fps), verdict: 'noise' as const },
-    ],
+    ].map((d) => (Math.abs(d.deltaPct) < 0.05 ? { ...d, verdict: 'noise' as const } : d)),
   };
   return { benchmark, graph, comparison, baselineName: baseline?.name ?? null };
 }
@@ -4822,7 +4890,7 @@ import { strings } from '../../strings';
 export function FrameGraph({ graph }: { graph: number[] }) {
   const { points, maxMs, medianMs } = graphShape(graph);
   if (!points) return null;
-  const medianY = 100 - (medianMs / maxMs) * 100;
+  const medianY = maxMs > 0 ? 100 - (medianMs / maxMs) * 100 : 100;
   return (
     <figure className="frame-graph">
       <figcaption className="label">{strings.bench.graph}</figcaption>
@@ -4844,7 +4912,7 @@ export function FrameGraph({ graph }: { graph: number[] }) {
 ```tsx
 import { useEffect, useState } from 'react';
 import { benchCopyResults, benchDelete, benchGet, benchRename, benchSetBaseline } from '../../api/client';
-import { dateText, flagText, METRIC_ORDER, metricText, metricValue, pct, spreadText, verdictText, verdictTone } from '../../api/bench';
+import { dateText, flagText, METRIC_ORDER, metricText, metricValue, pct, settingsText, spreadText, verdictText, verdictTone } from '../../api/bench';
 import type { BenchDetail } from '../../api/types';
 import { strings } from '../../strings';
 import { FrameGraph } from './FrameGraph';
@@ -4890,6 +4958,7 @@ export function ResultDetail({ id, onChanged }: { id: string; onChanged: () => v
     [b.contextRows.gpu, ctx.gpu ? `${ctx.gpu}${ctx.gpuDriver ? ` · ${ctx.gpuDriver}` : ''}` : '—'],
     [b.contextRows.windows, ctx.windowsBuild ? String(ctx.windowsBuild) : '—'],
     [b.contextRows.display, ctx.displayHz ? `${ctx.displayHz} Hz` : '—'],
+    [b.contextRows.game, settingsText(ctx.gameSettings)],
   ];
 
   return (
@@ -4913,11 +4982,12 @@ export function ResultDetail({ id, onChanged }: { id: string; onChanged: () => v
             <div className="num tile-value">{metricText(id, metricValue(m, id))}</div>
             {id === 'avg-fps' && <div className="muted small">{b.spread(spreadText(bench.result.spread.avgFps))}</div>}
             {id === 'low1-fps' && <div className="muted small">{b.spread(spreadText(bench.result.spread.low1Fps))}</div>}
+            {id === 'low01-fps' && <div className="muted small">{b.spread(spreadText(bench.result.spread.low01Fps))}</div>}
           </div>
         ))}
         <div className="tile cut-s">
           <div className="label">{b.bottleneckLabel}</div>
-          <div className="tile-value">{b.bottleneck[m.bottleneck]}</div>
+          <div className="tile-value tile-word">{b.bottleneck[m.bottleneck]}</div>
         </div>
       </div>
 
@@ -5083,6 +5153,7 @@ export function Benchmark() {
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
 .tile { background: var(--panel-2); padding: 10px 12px; display: grid; gap: 2px; }
 .tile-value { font-size: 22px; }
+.tile-word { font-size: 15px; }
 .comparison ul { list-style: none; padding: 0; margin: 6px 0 0; display: grid; }
 .comparison li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 14px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
 .verdict-good { color: var(--accent); }
@@ -5159,7 +5230,7 @@ git commit -m "feat(app): Benchmark page with route, live session, results and c
 ```tsx
 import { useEffect, useState } from 'react';
 import { benchGet, benchList } from '../api/client';
-import { metricText, pct, verdictTone } from '../api/bench';
+import { metricText, metricValue, pct, verdictTone } from '../api/bench';
 import type { BenchDetail } from '../api/types';
 import { strings } from '../strings';
 import type { Tab } from './TitleBar';
@@ -5202,7 +5273,7 @@ export function LastBenchmark({ onTab }: { onTab: (tab: Tab) => void }) {
           const d = delta(id);
           return (
             <span key={id} className="num">
-              {metricText(id, id === 'avg-fps' ? m.avgFps : m.low1Fps)} <span className="muted small">{strings.bench.metrics[id]}</span>
+              {metricText(id, metricValue(m, id))} <span className="muted small">{strings.bench.metrics[id]}</span>
               {d && <span className={`small verdict-${verdictTone(d.verdict)}`}> {pct(d.deltaPct)}</span>}
             </span>
           );
@@ -5272,7 +5343,7 @@ git commit -m "feat(app): last benchmark on Home, starting-point step in the fir
 
 **Interfaces:**
 - Consumes: everything above; `npm run fetch:presentmon` (Task 11).
-- Produces: green `core`, `ui` and `windows` checks on the `stage-2` pull request; the Windows job proves the pinned PresentMon downloads, runs a 3-second capture with a valid CSV header, and lands at `target/release/presentmon/PresentMon.exe` next to `Kestrel.exe`; the release workflow fetches PresentMon before `tauri-action`.
+- Produces: green `core`, `ui` and `windows` checks on the `stage-2` pull request; the Windows job proves the pinned PresentMon downloads, runs a 3-second capture with the app's own flags (exit code 0 and a valid CSV header), and lands at `target/release/presentmon/PresentMon.exe` next to `Kestrel.exe`, and it lints and tests the app crate on Windows; the release workflow fetches PresentMon before `tauri-action`.
 
 - [ ] **Step 1: `ci.yml`** — apply these changes (the rest stays as it is):
   - `core` job: `cargo clippy -p kestrel-core -p kestrel-probe -p kestrel-bench --locked -- -D warnings` and `cargo test -p kestrel-core -p kestrel-probe -p kestrel-bench --locked`.
@@ -5283,12 +5354,26 @@ git commit -m "feat(app): last benchmark on Home, starting-point step in the fir
       - name: PresentMon smoke capture
         shell: pwsh
         run: |
-          $pm = "app/src-tauri/binaries/PresentMon-2.6.0-x64.exe"
-          & $pm --process_name dwm.exe --output_file pm-smoke.csv --timed 3 --terminate_after_timed --session_name KestrelCI --stop_existing_session --no_console_stats
+          # The flags the app passes (presentmon_args), on dwm.exe for 3 seconds under a session name of its own.
+          $pm = Resolve-Path "app/src-tauri/binaries/PresentMon-2.6.0-x64.exe"
+          $capture = Start-Process -FilePath $pm -NoNewWindow -PassThru -ArgumentList '--process_name dwm.exe --output_file pm-smoke.csv --timed 3 --terminate_after_timed --session_name KestrelCI --stop_existing_session --no_console_stats --set_circular_buffer_size 8192 --track_pc_latency'
+          $null = $capture.Handle
+          # Keep the desktop changing so DWM presents frames while PresentMon records.
+          Add-Type -AssemblyName System.Windows.Forms
+          $form = New-Object System.Windows.Forms.Form
+          $form.Show()
+          for ($i = 0; $i -lt 60; $i++) { $form.Left = 100 + ($i % 20) * 10; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+          $form.Close()
+          if (-not $capture.WaitForExit(30000)) { $capture.Kill(); throw "PresentMon didn't finish" }
+          if ($capture.ExitCode -ne 0) { throw "PresentMon exited with code $($capture.ExitCode)" }
           if (-not (Test-Path pm-smoke.csv)) { throw "PresentMon wrote no CSV" }
           $header = Get-Content pm-smoke.csv -TotalCount 1
           if (-not $header.Contains("MsBetweenPresents")) { throw "Unexpected PresentMon header: $header" }
           Write-Host "PresentMon header OK; frames captured: $((Get-Content pm-smoke.csv).Count - 1)"
+    ```
+  - Right after the `npx tauri build` step, add the app crate's own lint, which is the only check of its Windows-only code. It needs `app/dist` (which `npx tauri build` produces and the app embeds) and the fetched PresentMon (which Windows builds bundle), and like the other cargo steps it runs from the repo root, so it takes no `working-directory`. The app's tests run on the Mac (they use fakes, not Windows code); a Windows test binary can fail to load without the app's common-controls manifest, so CI doesn't run them:
+    ```yaml
+      - run: cargo clippy -p kestrel --locked --all-targets -- -D warnings
     ```
   - Replace the "Check the installer was built" step with:
     ```yaml
@@ -5353,7 +5438,7 @@ gh pr create --base main --head stage-2 --title "Stage 2: benchmark" --body "Sta
 🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 ```
 
-- [ ] **Step 6: Wait for CI** through the app's PR monitor (don't poll). Expected: `core`, `ui` and `windows` pass, including the PresentMon smoke capture and the bundle check.
+- [ ] **Step 6: Wait for CI** through the app's PR monitor (don't poll). Expected: `core`, `ui` and `windows` pass, including the PresentMon smoke capture, the app crate's clippy on Windows, and the bundle check.
 
 ---
 
