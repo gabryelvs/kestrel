@@ -1,6 +1,7 @@
 //! Kestrel bench: turns PresentMon's output into benchmark results and keeps them. Pure Rust: the app runs the
 //! capture; this crate only reads what PresentMon wrote, so it never touches a game.
 pub mod csv;
+pub mod flags;
 pub mod metrics;
 pub mod model;
 pub mod profile;
