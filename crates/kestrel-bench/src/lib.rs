@@ -4,6 +4,7 @@ pub mod csv;
 pub mod metrics;
 pub mod model;
 pub mod profile;
+pub mod settings;
 
 pub use model::*;
 pub use profile::{profile, GameProfile, Route, PROFILES, VALORANT};
