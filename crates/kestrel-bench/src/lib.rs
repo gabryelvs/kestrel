@@ -5,6 +5,7 @@ pub mod flags;
 pub mod metrics;
 pub mod model;
 pub mod profile;
+pub mod result;
 pub mod settings;
 
 pub use model::*;
