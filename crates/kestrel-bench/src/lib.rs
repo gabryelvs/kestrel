@@ -6,6 +6,7 @@ pub mod metrics;
 pub mod model;
 pub mod profile;
 pub mod result;
+pub mod session;
 pub mod settings;
 pub mod store;
 
