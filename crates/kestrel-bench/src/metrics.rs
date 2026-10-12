@@ -21,9 +21,14 @@ pub fn measure(frames: &[Frame]) -> (RunMetrics, Vec<f32>) {
     let duration_s = total_ms / 1000.0;
 
     let latencies: Vec<f64> = frames.iter().filter_map(|f| f.pc_latency_ms).collect();
+    // A zero reading means PresentMon had no GPU data for that frame, so it doesn't count.
     let busy_shares: Vec<f64> = frames
         .iter()
-        .filter_map(|f| f.gpu_busy_ms.map(|busy| (busy / f.ms).clamp(0.0, 1.0)))
+        .filter_map(|f| {
+            f.gpu_busy_ms
+                .filter(|&busy| busy > 0.0)
+                .map(|busy| (busy / f.ms).clamp(0.0, 1.0))
+        })
         .collect();
     let gpu_busy_ratio = (!busy_shares.is_empty()).then(|| percentile(&busy_shares, 0.5));
     let bottleneck = match gpu_busy_ratio {
@@ -147,6 +152,9 @@ mod tests {
             measure(&with_gpu(1.3)).0.gpu_busy_ratio.unwrap(),
             1.0
         ));
+        // Zero GPU-busy time on every frame means PresentMon sent no GPU numbers: unknown.
+        assert_eq!(measure(&with_gpu(0.0)).0.gpu_busy_ratio, None);
+        assert_eq!(measure(&with_gpu(0.0)).0.bottleneck, Bottleneck::Unknown);
     }
 
     #[test]
