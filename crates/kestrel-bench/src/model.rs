@@ -160,8 +160,9 @@ pub struct MetricDelta {
     pub metric: MetricId,
     pub baseline: f64,
     pub current: f64,
+    /// The change in %, or None when the baseline is 0 (no percentage exists).
     /// (current − baseline) / baseline × 100.
-    pub delta_pct: f64,
+    pub delta_pct: Option<f64>,
     pub verdict: Verdict,
 }
 

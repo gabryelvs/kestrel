@@ -64,6 +64,8 @@ fn pc_latency(m: &RunMetrics) -> Option<f64> {
     m.pc_latency_ms
 }
 
+/// Each metric both benchmarks have, with its change and whether that change is real. A different game or route
+/// version gives no metrics and sets `route_mismatch`.
 pub fn compare(baseline: &Benchmark, current: &Benchmark) -> Comparison {
     let mut comparison = Comparison {
         baseline_id: baseline.id.clone(),
@@ -94,11 +96,7 @@ pub fn compare(baseline: &Benchmark, current: &Benchmark) -> Comparison {
             metric,
             baseline: base,
             current: now,
-            delta_pct: if base != 0.0 {
-                (now - base) / base * 100.0
-            } else {
-                0.0
-            },
+            delta_pct: (base != 0.0).then(|| (now - base) / base * 100.0),
             verdict: verdict(&base_runs, &now_runs, higher_is_better),
         });
     }
@@ -283,7 +281,10 @@ mod tests {
         let c = compare(&base, &better);
         let get = |id: MetricId| c.metrics.iter().find(|m| m.metric == id).unwrap().clone();
         assert_eq!(get(MetricId::AvgFps).verdict, Verdict::RealGain);
-        assert!((get(MetricId::AvgFps).delta_pct - (425.0 - 405.0) / 405.0 * 100.0).abs() < 1e-9);
+        assert!(
+            (get(MetricId::AvgFps).delta_pct.unwrap() - (425.0 - 405.0) / 405.0 * 100.0).abs()
+                < 1e-9
+        );
         assert_eq!(
             get(MetricId::Low1Fps).verdict,
             Verdict::Noise,
@@ -306,6 +307,21 @@ mod tests {
                 c.route_mismatch
             ),
             ("a", "b", false)
+        );
+        // Zero stutters before, four after: a real change with no percentage to show.
+        let zero = bench("c", vec![run(400.0, 280.0, 0.0, None, Bottleneck::Gpu); 3]);
+        let worse = bench("d", vec![run(400.0, 280.0, 4.0, None, Bottleneck::Gpu); 3]);
+        let from_zero = compare(&zero, &worse);
+        let row = from_zero
+            .metrics
+            .iter()
+            .find(|m| m.metric == MetricId::StuttersPerMin)
+            .unwrap();
+        assert_eq!(row.delta_pct, None, "a zero baseline has no percentage");
+        assert_eq!(
+            row.verdict,
+            Verdict::RealLoss,
+            "the change is real from a zero baseline"
         );
     }
 
