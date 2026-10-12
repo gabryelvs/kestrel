@@ -7,9 +7,11 @@ pub mod model;
 pub mod profile;
 pub mod result;
 pub mod settings;
+pub mod store;
 
 pub use model::*;
 pub use profile::{profile, GameProfile, Route, PROFILES, VALORANT};
+pub use store::Store;
 
 /// The PresentMon release Kestrel bundles (spec "PresentMon").
 pub const PRESENTMON_VERSION: &str = "2.6.0";
