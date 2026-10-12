@@ -9,7 +9,7 @@
 //! Each file is written under a temporary name and then renamed, so a crash never leaves half a file.
 use crate::model::{Benchmark, BenchmarkSummary, STARTING_POINT};
 use serde::{Deserialize, Serialize};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -39,11 +39,11 @@ impl Store {
         &self.dir
     }
 
-    /// Saves a new benchmark and its runs' frame times; returns (and sets) its id. With no baseline yet, it is
-    /// named "Starting point" and becomes the baseline (decision 41).
+    /// Saves a new benchmark and its runs' frame times; returns its id, which is also set on `bench`. With no baseline
+    /// yet, it is named "Starting point" and becomes the baseline (decision 41). A benchmark that can't be read back is
+    /// refused before anything is written, and a write that fails leaves no folder behind.
     pub fn save(&self, bench: &mut Benchmark, frame_times: &[Vec<f32>]) -> io::Result<String> {
         let _changing = self.change();
-        std::fs::create_dir_all(&self.dir)?;
         let mut index = self.index();
         let base = id_from(&bench.created_at);
         let mut id = base.clone();
@@ -52,23 +52,33 @@ impl Store {
             id = format!("{base}-{n}");
             n += 1;
         }
-        bench.id = id.clone();
-        if self.baseline_in(&index).is_none() {
-            bench.name = STARTING_POINT.into();
+        // Everything is prepared on a copy, so the caller's benchmark changes only once every write has succeeded.
+        let mut saved = bench.clone();
+        saved.id = id.clone();
+        let is_baseline = self.baseline_in(&index).is_none();
+        if is_baseline {
+            saved.name = STARTING_POINT.into();
+        }
+        let json = serde_json::to_vec_pretty(&saved)?;
+        // serde_json writes NaN and infinity as null, which won't load back, so refuse before anything is written.
+        if serde_json::from_slice::<Benchmark>(&json).is_err() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "The benchmark couldn't be saved: some of its numbers are invalid.",
+            ));
+        }
+        index.ids.push(id.clone());
+        if is_baseline {
             index.baseline = Some(id.clone());
         }
         let folder = self.dir.join(&id);
-        std::fs::create_dir_all(&folder)?;
-        for (i, times) in frame_times.iter().enumerate() {
-            let bytes: Vec<u8> = times.iter().flat_map(|t| t.to_le_bytes()).collect();
-            write_atomic(&folder.join(format!("run-{}.bin", i + 1)), &bytes)?;
+        if let Err(e) = self.write_benchmark(&folder, frame_times, &json, &index) {
+            // Nothing in the index names the folder yet, so it can go. The write's own error is the one returned.
+            let _ = std::fs::remove_dir_all(&folder);
+            return Err(e);
         }
-        write_atomic(
-            &folder.join("summary.json"),
-            &serde_json::to_vec_pretty(bench)?,
-        )?;
-        index.ids.push(id.clone());
-        self.write_index(&index)?;
+        bench.id = id.clone();
+        bench.name = saved.name;
         Ok(id)
     }
 
@@ -113,7 +123,9 @@ impl Store {
         }
         let _changing = self.change();
         let mut bench = self.get(id).ok_or_else(not_found)?;
-        bench.name = name.chars().take(60).collect();
+        // Cut to 60 characters, then trim again so a cut name never ends in a space.
+        let cut: String = name.chars().take(60).collect();
+        bench.name = cut.trim().to_string();
         write_atomic(
             &self.dir.join(id).join("summary.json"),
             &serde_json::to_vec_pretty(&bench)?,
@@ -156,12 +168,33 @@ impl Store {
         index.baseline.clone().filter(|id| self.get(id).is_some())
     }
 
-    /// A missing or damaged index reads as empty.
+    /// The saved index. A missing or damaged one is rebuilt from the folders (see `rebuild_index`); the next writer
+    /// saves the rebuilt index.
     fn index(&self) -> Index {
         std::fs::read(self.dir.join("index.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+            .unwrap_or_else(|| self.rebuild_index())
+    }
+
+    /// Every folder whose name is a safe id and whose summary.json loads, oldest first (by created_at, then id), with
+    /// the oldest as the baseline. Only reads, so readers can use it without the lock. A store with no folders gives
+    /// an empty index.
+    fn rebuild_index(&self) -> Index {
+        let mut found: Vec<(String, String)> = std::fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|id| safe_id(id))
+            .filter_map(|id| self.get(&id).map(|bench| (bench.created_at, id)))
+            .collect();
+        found.sort();
+        Index {
+            baseline: found.first().map(|(_, id)| id.clone()),
+            ids: found.into_iter().map(|(_, id)| id).collect(),
+        }
     }
 
     fn write_index(&self, index: &Index) -> io::Result<()> {
@@ -170,6 +203,23 @@ impl Store {
             &self.dir.join("index.json"),
             &serde_json::to_vec_pretty(index)?,
         )
+    }
+
+    /// The runs, then the summary, then the index: the index comes last, so a benchmark is listed only once it's whole.
+    fn write_benchmark(
+        &self,
+        folder: &Path,
+        frame_times: &[Vec<f32>],
+        json: &[u8],
+        index: &Index,
+    ) -> io::Result<()> {
+        std::fs::create_dir_all(folder)?;
+        for (i, times) in frame_times.iter().enumerate() {
+            let bytes: Vec<u8> = times.iter().flat_map(|t| t.to_le_bytes()).collect();
+            write_atomic(&folder.join(format!("run-{}.bin", i + 1)), &bytes)?;
+        }
+        write_atomic(&folder.join("summary.json"), json)?;
+        self.write_index(index)
     }
 
     /// One change at a time. Every write is atomic, so a panic mid-change leaves nothing half-written and a poisoned
@@ -218,7 +268,12 @@ fn not_found() -> io::Error {
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
+    {
+        // Flushed before the rename: a power cut must not leave an empty file under the real name.
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
     std::fs::rename(&tmp, path)
 }
 
@@ -275,6 +330,29 @@ mod tests {
         assert_eq!(store.frame_times(&first_id, 3), Some(vec![4.1]));
         assert_eq!(store.frame_times(&first_id, 4), None);
         assert_eq!(store.baseline(), Some(first_id.clone()));
+        // A benchmark that can't be read back is refused before anything is written.
+        let before: Vec<String> = store.list().into_iter().map(|s| s.id).collect();
+        let entries = std::fs::read_dir(store.dir()).unwrap().count();
+        let mut broken = bench("2026-10-14T08:00:00Z", f64::NAN);
+        let err = store.save(&mut broken, &[]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read_dir(store.dir()).unwrap().count(),
+            entries,
+            "no folder appears"
+        );
+        assert_eq!(
+            store
+                .list()
+                .into_iter()
+                .map(|s| s.id)
+                .collect::<Vec<String>>(),
+            before
+        );
+        assert!(
+            broken.id.is_empty(),
+            "the caller's benchmark is left as it was"
+        );
         let leftovers: Vec<_> = walk(store.dir())
             .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
@@ -320,6 +398,12 @@ mod tests {
         );
         store.rename(&b, &"x".repeat(80)).unwrap();
         assert_eq!(store.get(&b).unwrap().name.chars().count(), 60);
+        store.rename(&b, &format!("{} x", "a".repeat(59))).unwrap();
+        assert_eq!(
+            store.get(&b).unwrap().name,
+            "a".repeat(59),
+            "a cut name never ends in a space"
+        );
         store.set_baseline(&b).unwrap();
         assert_eq!(store.baseline(), Some(b.clone()));
         assert_eq!(
@@ -364,6 +448,60 @@ mod tests {
             std::io::ErrorKind::NotFound
         );
         assert!(store.get(&c).is_some());
+
+        // A lost or damaged index is rebuilt from the folders, oldest first, and the oldest is the baseline. The
+        // rebuilt index is saved with the next benchmark, which keeps its own name.
+        for lose_index in [false, true] {
+            let rebuilt_dir = tempfile::tempdir().unwrap();
+            let rebuilt = Store::new(rebuilt_dir.path());
+            let first = rebuilt
+                .save(&mut bench("2026-10-12T21:30:05Z", 1.0), &[])
+                .unwrap();
+            let second = rebuilt
+                .save(&mut bench("2026-10-13T08:00:00Z", 2.0), &[])
+                .unwrap();
+            let third = rebuilt
+                .save(&mut bench("2026-10-14T08:00:00Z", 3.0), &[])
+                .unwrap();
+            assert_eq!(rebuilt.get(&first).unwrap().name, STARTING_POINT);
+            let index = rebuilt_dir.path().join("index.json");
+            if lose_index {
+                std::fs::remove_file(&index).unwrap();
+            } else {
+                std::fs::write(&index, "garbage").unwrap();
+            }
+            let ids = |s: &Store| -> Vec<String> { s.list().into_iter().map(|b| b.id).collect() };
+            assert_eq!(
+                ids(&rebuilt),
+                vec![third.clone(), second.clone(), first.clone()]
+            );
+            assert_eq!(rebuilt.baseline(), Some(first.clone()));
+            assert!(rebuilt.list()[2].is_baseline);
+            let fourth = rebuilt
+                .save(&mut bench("2026-10-15T08:00:00Z", 4.0), &[])
+                .unwrap();
+            assert_eq!(
+                rebuilt.get(&fourth).unwrap().name,
+                "Benchmark 2026-10-15T08:00:00Z",
+                "a later benchmark keeps its own name"
+            );
+            assert_eq!(ids(&rebuilt), vec![fourth, third, second, first.clone()]);
+            assert_eq!(rebuilt.baseline(), Some(first));
+        }
+
+        // A write that fails leaves no folder behind, and the caller's benchmark keeps its empty id.
+        let blocked_dir = tempfile::tempdir().unwrap();
+        let blocked = Store::new(blocked_dir.path());
+        blocked
+            .save(&mut bench("2026-10-12T21:30:05Z", 1.0), &[])
+            .unwrap();
+        std::fs::remove_file(blocked_dir.path().join("index.json")).unwrap();
+        std::fs::create_dir(blocked_dir.path().join("index.json")).unwrap();
+        let mut doomed = bench("2026-10-13T08:00:00Z", 2.0);
+        assert!(blocked.save(&mut doomed, &[vec![1.0]]).is_err());
+        assert!(!blocked_dir.path().join("20261013-080000").exists());
+        assert!(doomed.id.is_empty());
+        assert_eq!(blocked.list().len(), 1);
     }
 
     fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
