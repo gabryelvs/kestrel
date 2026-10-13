@@ -29,6 +29,8 @@ describe('bench helpers', () => {
     expect(pct(4.94)).toBe('+4.9%');
     expect(pct(-1.04)).toBe('-1.0%');
     expect(pct(0)).toBe('0.0%');
+    expect(pct(0.04)).toBe('0.0%');
+    expect(pct(-0.04)).toBe('0.0%');
     expect(verdictTone('real-gain')).toBe('good');
     expect(verdictTone('real-loss')).toBe('bad');
     expect(verdictTone('noise')).toBe('neutral');
@@ -54,6 +56,7 @@ describe('bench helpers', () => {
     expect(sessionHeadline({ ...base, countdown: 4 })).toBe('Starting in 4…');
     expect(sessionHeadline({ ...base, phase: 'capturing', pass: 1, secondsLeft: 75 })).toBe('Run 1 of 3: walk the main path to the bots.');
     expect(sessionHeadline({ ...base, phase: 'capturing', pass: 1, secondsLeft: 50 })).toBe('Run 1 of 3: shoot the strafing bots.');
+    expect(sessionHeadline({ ...base, phase: 'capturing', pass: 1, secondsLeft: null })).toBe('Reading the results…');
     expect(sessionHeadline({ ...base, phase: 'review', pass: 1, flags: [{ kind: 'too-short' }] })).toBe('Run 1 of 3 can’t be trusted.');
     expect(sessionHeadline({ ...base, phase: 'done', pass: 3 })).toBe('Benchmark saved.');
     expect(sessionHeadline({ ...base, phase: 'failed', message: 'x' })).toBe('The benchmark stopped.');

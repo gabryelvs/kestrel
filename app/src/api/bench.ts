@@ -21,8 +21,12 @@ export function metricText(id: MetricId, value: number | null): string {
   return Math.round(value).toString();
 }
 
-/** +4.9% / -1.0% / 0.0% */
-export const pct = (n: number): string => `${n > 0 ? '+' : ''}${n.toFixed(1)}%`;
+/** +4.9% / -1.0% / 0.0%. The sign follows the rounded digits, so a value that rounds to zero shows no sign. */
+export const pct = (n: number): string => {
+  const text = n.toFixed(1);
+  if (Number(text) === 0) return '0.0%';
+  return `${text.startsWith('-') ? '' : '+'}${text}%`;
+};
 
 /** A spread ratio (0.0317) as a percentage: "3.2%". */
 export const spreadText = (ratio: number): string => `${(ratio * 100).toFixed(1)}%`;
@@ -45,7 +49,9 @@ export function sessionHeadline(s: BenchState): string {
       if (!s.gameRunning) return b.waitingForGame;
       return s.startMode === 'hotkey' ? b.pressKey(s.startKey, b.begins(s.pass)) : b.pressButton;
     case 'capturing': {
-      const elapsed = s.captureSeconds - (s.secondsLeft ?? s.captureSeconds);
+      // The controller clears secondsLeft when PresentMon stops, before the results are read.
+      if (s.secondsLeft === null) return b.reading;
+      const elapsed = s.captureSeconds - s.secondsLeft;
       return elapsed < s.switchAtSeconds ? b.walk(passLabel(s.pass)) : b.shoot(passLabel(s.pass));
     }
     case 'review':

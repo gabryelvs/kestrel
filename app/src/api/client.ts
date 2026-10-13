@@ -51,7 +51,7 @@ export const benchRename = (id: string, name: string): Promise<void> => (inTauri
 export const benchDelete = (id: string): Promise<void> => (inTauri() ? call('bench_delete', { id }) : Promise.resolve(sampleDelete(id)));
 export const benchSetBaseline = (id: string): Promise<void> => (inTauri() ? call('bench_set_baseline', { id }) : Promise.resolve(sampleSetBaseline(id)));
 export const benchCopyResults = (id: string): Promise<string> =>
-  inTauri() ? call('bench_copy_results', { id }) : Promise.resolve(`Kestrel benchmark (sample): ${sampleDetail(id).benchmark.name}`);
+  inTauri() ? call('bench_copy_results', { id }) : Promise.resolve().then(() => `Kestrel benchmark (sample): ${sampleDetail(id).benchmark.name}`);
 
 /** Calls `handler` whenever the benchmark session changes; resolves to an unsubscribe function. */
 export async function onBenchState(handler: (state: BenchState | null) => void): Promise<() => void> {

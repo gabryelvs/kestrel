@@ -35,6 +35,11 @@ const benchmarks: Benchmark[] = [
 ];
 let baselineId = 'sample-1';
 
+// Every fake save copies this snapshot of the first sample, taken at load, so deleting samples never changes the copy.
+const template: Benchmark = structuredClone(benchmarks[0]);
+// Fake saves count up from the highest sample number, so an id is never reused, even after a delete.
+let lastSampleNumber = Math.max(...benchmarks.map((b) => Number(b.id.replace('sample-', ''))));
+
 const graph = Array.from({ length: 600 }, (_, i) => (i % 97 === 0 ? 6.5 : 2.3 + ((i * 37) % 11) / 30));
 
 export function sampleList(): BenchmarkSummary[] {
@@ -113,8 +118,9 @@ export const fakeSession = {
         if (pass < 3) {
           state = { ...state, phase: 'waiting', pass: pass + 1, runs, secondsLeft: null };
         } else {
-          const id = `sample-${benchmarks.length + 1}`;
-          benchmarks.push({ ...benchmarks[0], id, name: `Benchmark ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, createdAt: new Date().toISOString() });
+          lastSampleNumber += 1;
+          const id = `sample-${lastSampleNumber}`;
+          benchmarks.push({ ...structuredClone(template), id, name: `Benchmark ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, createdAt: new Date().toISOString() });
           state = { ...state, phase: 'done', runs, secondsLeft: null, resultId: id };
         }
       }

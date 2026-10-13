@@ -78,6 +78,7 @@ export const strings = {
     countdown: (n: number) => `Starting in ${n}…`,
     walk: (pass: string) => `${pass}: walk the main path to the bots.`,
     shoot: (pass: string) => `${pass}: shoot the strafing bots.`,
+    reading: 'Reading the results…',
     secondsLeft: (n: number) => `${n} s`,
     review: (pass: string) => `${pass} can’t be trusted.`,
     done: 'Benchmark saved.',
