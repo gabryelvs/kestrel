@@ -1,8 +1,8 @@
 //! Running a capture. On Windows: the bundled PresentMon, hidden, limited to the game's process, for a fixed
 //! time (spec "PresentMon"). Off Windows (development on a Mac): a simulated capture with made-up frames.
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,8 @@ pub struct CaptureOutput {
 
 pub trait Capture: Send + Sync {
     /// Captures `process_name` for `seconds`, using `csv_path` for PresentMon's output. Returns
-    /// `Err(CANCELLED)` soon after `cancel` is set.
+    /// `Err(CANCELLED)` soon after `cancel` is set. An empty `csv` in the output means PresentMon ran to the end but
+    /// saw no frames (the game minimised, say): the caller turns that into a run that is too short.
     fn run(
         &self,
         process_name: &str,
@@ -85,6 +86,16 @@ impl PresentMon {
         command
     }
 
+    /// Ends a capture that must stop now (cancelled, timed out, or no longer trackable): kills and reaps PresentMon,
+    /// deletes its partial CSV (never read; spec: temporary CSVs are deleted), then ends the session it left open.
+    fn abort(&self, child: &mut Child, csv_path: &Path) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(csv_path);
+        self.clean_up_stale_session();
+    }
+
+    /// One PresentMon capture. `Done` with an empty `csv` means PresentMon ran to the end but saw no frames.
     fn attempt(
         &self,
         process_name: &str,
@@ -110,33 +121,31 @@ impl PresentMon {
         };
         let mut pipe = child.stderr.take();
         let reader = std::thread::spawn(move || {
-            let mut text = String::new();
+            let mut bytes = Vec::new();
             if let Some(pipe) = pipe.as_mut() {
-                let _ = pipe.read_to_string(&mut text);
+                let _ = pipe.read_to_end(&mut bytes);
             }
-            text
+            // Lossy on purpose: one stray non-UTF-8 byte must not cost the "lost" or "overflow" warning around it.
+            String::from_utf8_lossy(&bytes).into_owned()
         });
         let deadline = Instant::now() + Duration::from_secs(u64::from(seconds) + 30);
         let status = loop {
             if cancel.load(Ordering::SeqCst) {
-                let _ = child.kill();
-                let _ = child.wait();
-                self.clean_up_stale_session();
-                // A stopped capture's partial CSV is never read: delete it now (spec: temporary CSVs are deleted).
-                let _ = std::fs::remove_file(csv_path);
+                self.abort(&mut child, csv_path);
                 return Attempt::Failed(CANCELLED.into());
             }
             match child.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) if Instant::now() > deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    self.clean_up_stale_session();
-                    let _ = std::fs::remove_file(csv_path);
+                    self.abort(&mut child, csv_path);
                     return Attempt::Failed("PresentMon didn't finish in time.".into());
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(200)),
-                Err(e) => return Attempt::Failed(format!("Lost track of PresentMon: {e}")),
+                Err(e) => {
+                    // Can't tell what PresentMon is doing any more, so stop it like any other abandoned capture.
+                    self.abort(&mut child, csv_path);
+                    return Attempt::Failed(format!("Lost track of PresentMon: {e}"));
+                }
             }
         };
         let stderr = reader.join().unwrap_or_default();
@@ -147,6 +156,14 @@ impl PresentMon {
             Ok(csv) => {
                 let _ = std::fs::remove_file(csv_path);
                 Attempt::Done(CaptureOutput { csv, stderr })
+            }
+            // PresentMon finished cleanly and left no file: it saw no frames (the game minimised, say). The caller
+            // turns the empty text into a run that is too short, not into a failed session.
+            Err(e) if status.success() && e.kind() == ErrorKind::NotFound => {
+                Attempt::Done(CaptureOutput {
+                    csv: String::new(),
+                    stderr,
+                })
             }
             Err(_) => Attempt::Failed(format!(
                 "PresentMon saved no frames ({status}). {}",
@@ -318,5 +335,116 @@ mod tests {
         assert!(done
             .csv
             .starts_with("Application,PresentMode,MsBetweenPresents"));
+    }
+
+    /// The fakes are shell scripts, so this runs on Unix only (the real PresentMon is Windows-only anyway).
+    #[cfg(unix)]
+    #[test]
+    fn the_runner_only_runs_its_own_presentmon_and_reports_what_it_saw() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        // A scratch folder, and the PATH to put back, that clean up after themselves even when an assertion fails.
+        struct Scratch {
+            dir: PathBuf,
+            path: OsString,
+        }
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                std::env::set_var("PATH", &self.path);
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+        let scratch = Scratch {
+            dir: std::env::temp_dir().join(format!("kestrel-capture-test-{}", std::process::id())),
+            path: std::env::var_os("PATH").unwrap_or_default(),
+        };
+        let dir = scratch.dir.as_path();
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).unwrap();
+
+        // A fake PresentMon: a shell script that finds its --output_file argument in $out, then runs `body`.
+        let script = |path: &Path, body: &str| {
+            let text = format!(
+                "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --output_file ]; then out=\"$2\"; fi\n  shift\ndone\n{body}\n"
+            );
+            std::fs::write(path, text).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let csv_path = dir.join("run.csv");
+        let capture = |exe: &Path| {
+            PresentMon::new(exe.to_path_buf()).run("x.exe", 1, &csv_path, &AtomicBool::new(false))
+        };
+
+        // 1. Only Kestrel's own copy runs: not a missing file, not the empty path, and not a PresentMon.exe on PATH.
+        let on_path = dir.join("on-path");
+        std::fs::create_dir_all(&on_path).unwrap();
+        let marker = on_path.join("ran");
+        script(
+            &on_path.join("PresentMon.exe"),
+            &format!("touch '{}'", marker.display()),
+        );
+        let mut search = vec![on_path];
+        search.extend(std::env::split_paths(&scratch.path));
+        std::env::set_var("PATH", std::env::join_paths(search).unwrap());
+        // The control: a search of PATH does find the planted file here, so the checks below can't pass for nothing.
+        assert!(std::process::Command::new("PresentMon.exe")
+            .status()
+            .unwrap()
+            .success());
+        assert!(
+            marker.exists(),
+            "the planted PresentMon.exe is what a search of PATH finds"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        assert_eq!(
+            capture(&dir.join("nowhere").join("PresentMon.exe")).unwrap_err(),
+            MISSING
+        );
+        assert_eq!(capture(Path::new("")).unwrap_err(), MISSING);
+        assert_eq!(capture(Path::new("PresentMon.exe")).unwrap_err(), MISSING);
+        PresentMon::new(PathBuf::from("PresentMon.exe")).clean_up_stale_session();
+        assert!(
+            !marker.exists(),
+            "a PresentMon.exe found on PATH must never run"
+        );
+        std::env::set_var("PATH", &scratch.path);
+
+        // 2. A capture that saved frames: the CSV comes back, and what PresentMon said on stderr (it stays a pipe).
+        let good = dir.join("good");
+        script(
+            &good,
+            "printf 'Application,MsBetweenPresents\\nx.exe,2.5\\n' > \"$out\"\necho 'warning: 3 ETW events were lost.' >&2",
+        );
+        let got = capture(&good).unwrap();
+        assert_eq!(got.csv, "Application,MsBetweenPresents\nx.exe,2.5\n");
+        assert!(got.stderr.contains("lost"), "{:?}", got.stderr);
+        assert!(!csv_path.exists(), "the CSV is deleted once it is read");
+
+        // 3. Exit 0 and no file: PresentMon saw no frames (the game minimised, say). That's a capture with no frames.
+        let quiet = dir.join("quiet");
+        script(&quiet, "exit 0");
+        let got = capture(&quiet).unwrap();
+        assert_eq!(got.csv, "");
+
+        // 4. Exit 1 and no file: PresentMon failed, and the error says what it said.
+        let failing = dir.join("failing");
+        script(&failing, "echo 'no such process' >&2\nexit 1");
+        let error = capture(&failing).unwrap_err();
+        assert!(error.starts_with("PresentMon saved no frames ("), "{error}");
+        assert!(error.contains("no such process"), "{error}");
+
+        // 5. One stray non-UTF-8 byte on stderr doesn't cost the warning that comes with it.
+        let stray = dir.join("stray");
+        script(
+            &stray,
+            "printf 'Application,MsBetweenPresents\\nx.exe,2.5\\n' > \"$out\"\nprintf 'warning: 3 ETW events were lost.\\377\\n' >&2",
+        );
+        let got = capture(&stray).unwrap();
+        assert!(
+            got.stderr.contains("3 ETW events were lost."),
+            "{:?}",
+            got.stderr
+        );
     }
 }
