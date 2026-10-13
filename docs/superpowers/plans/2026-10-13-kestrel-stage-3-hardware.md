@@ -15,9 +15,9 @@
 - Never read or write a game's memory, never inject, never load a kernel driver, never start, stop or change Vanguard or any anti-cheat.
 - No network calls at runtime except opening links; no telemetry.
 - Kestrel writes only inside its own app-data folder. Stage 3 adds no writes; the only new stored data is `context.gpuPnpDeviceId` and `context.gpuLink` inside the existing benchmark files.
-- Kestrel's own code never opens a handle to a game. During benchmark passes it reads only the graphics card's device properties.
+- Kestrel's own code never opens a handle to a game. During benchmark passes it reads only device properties of the graphics card and the PCI bridges above it.
 - Every new Windows read is user-mode: the `CPUID` instruction and `XGETBV`, `GetLogicalProcessorInformationEx`, PDH through `PdhAddEnglishCounterW`, Configuration Manager (`CM_*`) device properties and allocated resources, `QueryDisplayConfig` / `DisplayConfigGetDeviceInfo`, `GetFirmwareType`, `IsProcessorFeaturePresent`, WMI.
-- A value Windows doesn't report is `None` / empty and shows **Not reported**; nothing is guessed.
+- A value Windows doesn't report is `None` / empty and shows **Not reported**; nothing is guessed. Drive and volume sizes use 0 for unknown, like `ValorantInstall`, and the UI shows 0 as Not reported.
 - A failing probe adds a `ProbeError` (names below), never fails the scan.
 - The snapshot is schema version 2. Every new field is `Option`, an empty `Vec` or a `Default` enum, so a schema-1 JSON still loads.
 - UI copy is English and lives in `app/src/strings.ts`; labels follow the spec and the brief.
@@ -251,7 +251,7 @@ pub fn drives(disks: &[DiskRecord], partitions: &[(u32, char)], space: &[(char, 
 
 `BiosTopic` gains `PcieSlot` (`"pcie-slot"`) and `Virtualization` (`"virtualization"`). Each new check's rows are evaluated top-down; the first that applies wins. `pub const TWEAKS_STAGE: u8 = 5;` and `pub const COMPETITIVE_STAGE: u8 = 6;`. `run_health_check` returns 31 findings in this order: ram-speed, ram-channels, bios-age, **pcie-lanes, pcie-speed, resizable-bar**, display-refresh, virtual-display, gpu-driver-age, valorant-gpu, on-battery, power-plan, game-mode, background-recording, pending-restart, windows-build, valorant-drive, drive-space, background-cpu, startup-apps, tpm, secure-boot, memory-integrity, **virtualization**, iommu, vanguard, on-demand, wired, link-speed, adapter-power, delivery-optimization.
 
-The new findings, exactly (`{…}` is filled in; dates `YYYY-MM-DD` from the first 10 characters of `measured_at`; generations through `gen_label`):
+The new findings, exactly (`{…}` is filled in; generations through `gen_label`; the details carry no date — the Hardware tab shows it in local time):
 
 | id · category | state | status · severity | title | detail | fix |
 | --- | --- | --- | --- | --- | --- |
@@ -262,8 +262,8 @@ The new findings, exactly (`{…}` is filled in; dates `YYYY-MM-DD` from the fir
 | `pcie-speed` · Hardware | no separate card (as above) | Info · Info | No separate graphics card to check | (empty) | Nothing |
 | | `link_under_load` None | Info · Info | Run a benchmark to check the PCIe link under load | Graphics cards slow their link when idle, so Kestrel checks it during a benchmark. | Nothing |
 | | card_max or slot_max None | Unknown · Low | Couldn't read the slot's PCIe speed | Windows didn't report what the slot supports. | Nothing |
-| | got.gen ≥ min(card_max.gen, slot_max.gen) | Pass · Low | PCIe link runs at full speed under load | PCIe {gen} during your benchmark on {date}. | Nothing |
-| | got.gen < expected | Problem · Low (High when got.gen ≤ 2) | PCIe link runs at {got} under load instead of {expected} | Measured during your benchmark on {date}. Set the slot's PCIe speed to Auto in the BIOS, and check the card sits in the top slot. | BiosGuide `pcie-slot` |
+| | got.gen ≥ min(card_max.gen, slot_max.gen) | Pass · Low | PCIe link runs at full speed under load | PCIe {gen} during your latest benchmark. | Nothing |
+| | got.gen < expected | Problem · Low (High when got.gen ≤ 2) | PCIe link runs at {got} under load instead of {expected} | Measured during your latest benchmark. Set the slot's PCIe speed to Auto in the BIOS, and check the card sits in the top slot. | BiosGuide `pcie-slot` |
 | `resizable-bar` · Hardware | no separate card | Info · Info | No separate graphics card to check | (empty) | Nothing |
 | | `resizable_bar` None | Unknown · Low | Windows doesn't report Resizable BAR for this card | (empty) | Nothing |
 | | Some(true) | Pass · Low | Resizable BAR is on | (empty) | Nothing |
@@ -313,7 +313,7 @@ impl ClockSampler {
 
 On a laptop (`machine.form_factor == Laptop`) the probe leaves `cpu.socket` None: the table gives desktop sockets, and laptop chips can share a desktop signature.
 
-`ProbeError.probe` names and the Hardware panel each one belongs to: Processor — `cpu`, `cpu-id`, `topology`; Graphics — `gpus`, `pcie`; Memory — `memory`; Motherboard and BIOS — `board`, `chipset`, `firmware`; Displays — `displays`; Storage — `storage`, `drives`; Network — `network`; every panel — `wmi`, `probe`. (`mock` shows only the existing banner.)
+`ProbeError.probe` names and the Hardware panel each one belongs to: Processor — `cpu`, `cpu-id`, `topology`; Graphics — `gpus`, `pcie`; Memory — `memory`; Motherboard and BIOS — `board`, `chipset`, `firmware`, `tpm`, `device-guard`; Displays — `displays`; Storage — `storage`, `drives`; Network — `network`; every panel — `wmi`, `probe`. (`mock` shows only the existing banner.)
 
 ### `kestrel-bench` (Task 13)
 

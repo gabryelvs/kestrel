@@ -143,7 +143,7 @@ Everything is a user-mode read: no driver, no handle to any game, nothing writte
 | Value | Source |
 | --- | --- |
 | CPU vendor, family, model, stepping, brand, instruction sets, hypervisor present; Intel base and max clock | The `CPUID` instruction (leaves 0, 1, 7 with sub-leaves 0 and 1, 0x16, 0x80000002–4). AVX, AVX-512 and AMX count only when the OS saves their registers (`XGETBV`) |
-| Codename and socket | A table in `kestrel-core` keyed by vendor, family and model: Intel Core 6th gen to Core Ultra 200, AMD Zen to Zen 5, desktop and mobile, each entry citing its source. Unknown models: Not reported |
+| Codename and socket | A table in `kestrel-core` keyed by vendor, family and model: Intel Core 6th gen to Core Ultra 200, AMD Zen to Zen 5, desktop and mobile, its sources cited above it and each entry pinned by a test with a real chip's signature. Unknown models: Not reported |
 | Cores, threads, P/E split, caches | `GetLogicalProcessorInformationEx` (cores with their efficiency class; caches with level, type, size) |
 | Base clock (when CPUID has none), live per-core clocks | PDH `\Processor Information(*)\Processor Frequency` × `% Processor Performance` / 100 per logical processor, through `PdhAddEnglishCounterW` (works in any Windows language), mapped to physical cores |
 | Virtualization | On when a hypervisor is present (CPUID) or VBS runs; otherwise `IsProcessorFeaturePresent(PF_VIRT_FIRMWARE_ENABLED)` |
@@ -169,7 +169,7 @@ version-1 snapshot still loads. In short:
   load (generation, lanes, when, which benchmark — filled by the app from the latest benchmark, not
   by the probe), largest memory range and Resizable BAR.
 - `displays[]`: monitor name, connection.
-- `storage.drives[]`: model, type, bus, size, volumes (letter, free, total), game tags.
+- `storage.drives[]`: model, type, bus, size, volumes (letter, free, total). The UI tags a volume with the games Kestrel knows are installed there (VALORANT's drive in stage 3).
 
 The TypeScript snapshot type gains these fields plus the `security` and `network` parts the Hardware
 tab shows. Benchmarks gain `context.gpuLink`. Copy diagnostics carries all of it unchanged.
