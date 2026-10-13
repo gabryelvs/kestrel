@@ -13,6 +13,7 @@ export function Benchmark() {
   const [items, setItems] = useState<BenchmarkSummary[]>([]);
   const [session, setSession] = useState<BenchState | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [revealId, setRevealId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,11 +52,18 @@ export function Benchmark() {
     }
   };
 
+  // "See the result" brings the new result into view; a plain list click leaves the scroll position alone.
   const close = (resultId: string | null) => {
     void benchDismiss().then(() => {
       setSession(null);
+      setRevealId(resultId);
       void refresh(resultId);
     });
+  };
+
+  const choose = (id: string) => {
+    setRevealId(null);
+    setSelected(id);
   };
 
   return (
@@ -66,8 +74,8 @@ export function Benchmark() {
       </header>
       {error && <p className="notice cut-s">{error}</p>}
       {session ? <SessionPanel state={session} onClose={close} /> : profile && <RouteCard profile={profile} starting={starting} onStart={() => void start()} />}
-      <ResultsList items={items} selected={selected} onSelect={setSelected} />
-      {selected && <ResultDetail key={selected} id={selected} onChanged={() => void refresh()} />}
+      <ResultsList items={items} selected={selected} onSelect={choose} />
+      {selected && <ResultDetail key={selected} id={selected} onChanged={() => void refresh()} revealWhenLoaded={revealId === selected} />}
     </div>
   );
 }

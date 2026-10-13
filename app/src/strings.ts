@@ -125,6 +125,7 @@ export const strings = {
     copy: 'Copy results',
     copied: 'Copied. Paste it in chat.',
     copyFailed: 'Couldn’t copy. Try again.',
+    flagLine: (pass: string, reason: string) => `${pass} — ${reason}`,
     flags: {
       'too-short': 'Too short: fewer than 85 seconds or 1,000 frames were captured.',
       'not-in-front': 'The game wasn’t in front for part of the run (alt-tab, an overlay or windowed mode).',

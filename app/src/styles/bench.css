@@ -14,7 +14,7 @@
 .result-row:hover { background: var(--panel-2); }
 .result-row.selected { box-shadow: inset 3px 0 0 var(--accent); }
 .result-name { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
-.detail { display: grid; gap: 16px; }
+.detail { display: grid; gap: 16px; scroll-margin-top: 14px; }
 .detail-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .rename { display: flex; gap: 8px; }
 .rename input { background: var(--panel-2); border: 1px solid var(--line-strong); color: var(--text); font: inherit; padding: 6px 10px; }
