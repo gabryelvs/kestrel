@@ -75,6 +75,8 @@ Games, Ubisoft or Activision.
 | 69 | Multi-game copy | The redesign's copy is game-neutral ("FPS optimiser for your games", "While your game runs"); animations pause when any supported game (VALORANT, FiveM, Rainbow Six Siege, Warzone) is in the foreground, found from the foreground window's process id in a Toolhelp32 snapshot (no handle to the game) |
 | 70 | Design data | Real data in the redesign stage: points per finding from `kestrel-core` ("What if you fix"), Kestrel's own CPU and RAM in the status bar, and status, note and menu path per BIOS-guide topic (menu paths only for boards Kestrel knows, ASUS first; hidden otherwise) |
 | 71 | Handoff in the repo | When the redesign stage starts, the handoff is copied to `docs/design/redesign-v4/` (public in the repo) |
+| 72 | Build cadence | Stages run as a queue: the next stage is built while the owner tests the last one. Each stage still ships as its own test build, and its fixes land before the owner merges it. Stages 6–8 start only after stage 5 passes the owner's test on the real PC |
+| 73 | Test builds | Each stage's test build (a GitHub pre-release) is published as soon as it is ready and CI is green, without asking first. Merging stays the owner's call |
 
 ## Stages
 
