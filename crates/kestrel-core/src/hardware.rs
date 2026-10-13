@@ -31,7 +31,7 @@ const INTEL_CHIPSETS: &[&str] = &[
     "H110", "B150", "Q150", "H170", "Q170", "Z170", "B250", "Q250", "H270", "Q270", "Z270", "H310",
     "B360", "B365", "H370", "Q370", "Z370", "Z390", "H410", "B460", "H470", "Q470", "Z490", "W480",
     "H510", "B560", "H570", "Q570", "Z590", "W580", "H610", "B660", "H670", "Q670", "Z690", "W680",
-    "B760", "H770", "Z790", "W790", "B860", "Z890", "W880", "X299",
+    "B760", "H770", "Z790", "W790", "H810", "B860", "Z890", "W880", "X299",
 ];
 
 /// AMD's chipsets: AM4 (300 to 500 series), AM5 (600 and 800 series), Threadripper and Threadripper PRO.
@@ -43,20 +43,19 @@ const AMD_CHIPSETS: &[&str] = &[
 /// AMD's 300 and 400 series, which Gigabyte's boards may name with an extra leading "A": AB350M, AX370.
 const AMD_300_400: &[&str] = &["A320", "B350", "X370", "X399", "B450", "X470"];
 
-/// What a board name may put right after a chipset: "M" for micro-ATX ("B550M") and "S" for the fanless "X570S".
-/// Any other letter means the word is something else: an ASUS laptop called "X570ZD" has no X570 in it.
-const AFTER_NAME: [char; 2] = ['M', 'S'];
+/// The one letter a board name may put right after a chipset: "M" for micro-ATX ("B550M"), "I" for mini-ITX ("B550I"),
+/// "S" for the fanless "X570S", "X" as in Gigabyte's "Z170X" and "E" as in ASUS's "WRX80E". Any other letter means the
+/// word is something else: an ASUS laptop called "X570ZD" has no X570 in it.
+const AFTER_NAME: [char; 5] = ['M', 'S', 'I', 'X', 'E'];
 
 /// `name` as it is written on `list`, if it is on it.
 fn listed(list: &'static [&'static str], name: &str) -> Option<&'static str> {
     list.iter().copied().find(|candidate| *candidate == name)
 }
 
-/// The chipset one word of a board name spells, as (maker, name): a listed name in any case, with at most one "M" or
-/// "S" after it, or, for AMD's 300 and 400 series, with Gigabyte's extra "A" before it.
-fn chipset_word(word: &str) -> Option<(&'static str, &'static str)> {
-    let word = word.to_ascii_uppercase();
-    let name = word.strip_suffix(AFTER_NAME).unwrap_or(&word);
+/// The chipset `name` is, as (maker, name): a name on one of the lists, or, for AMD's 300 and 400 series, one with
+/// Gigabyte's extra "A" before it.
+fn named(name: &str) -> Option<(&'static str, &'static str)> {
     if let Some(found) = listed(INTEL_CHIPSETS, name) {
         return Some(("Intel", found));
     }
@@ -65,6 +64,13 @@ fn chipset_word(word: &str) -> Option<(&'static str, &'static str)> {
     }
     let found = listed(AMD_300_400, name.strip_prefix('A')?)?;
     Some(("AMD", found))
+}
+
+/// The chipset one word of a board name spells, as (maker, name): a listed name in any case, with at most one letter
+/// of `AFTER_NAME` after it. The word is tried whole first, so "B650E" is B650E and not B650 with an "E".
+fn chipset_word(word: &str) -> Option<(&'static str, &'static str)> {
+    let word = word.to_ascii_uppercase();
+    named(&word).or_else(|| named(word.strip_suffix(AFTER_NAME)?))
 }
 
 /// The chipsets `text` spells, in order, as (maker, name): "PRO B760M-A WIFI" → ("Intel", "B760"). Each run of
@@ -77,11 +83,11 @@ fn chipsets(text: &str) -> impl Iterator<Item = (&'static str, &'static str)> + 
 /// The chipset the board's name spells ("ROG STRIX X670E-E GAMING WIFI" → "AMD X670E"), else the one the Intel
 /// LPC/eSPI controller's description names ("Intel(R) Z590 LPC/eSPI Controller - 4385" → "Intel Z590").
 ///
-/// A word of the board name is a chipset when it is on the lists above, in any case, with at most one "M"
-/// (micro-ATX: "B550M") or "S" ("X570S") after it; AMD's 300 and 400 series also with Gigabyte's extra leading "A"
-/// ("GA-AB350M-Gaming 3" → "AMD B350"). Anything else is not one, which keeps laptop model codes ("X540LA",
-/// "X570ZD", "Q524UQ"), numbers no chipset has ("Z999") and two-digit chipsets ("H61", "Z97") out. The description
-/// is read only when it mentions Intel, and only for an Intel chipset.
+/// A word of the board name is a chipset when it is on the lists above, in any case, with at most one letter of M, S,
+/// I, X or E after it ("B550M", "B550I", "GA-Z170X-Gaming 7", "WRX80E-SAGE"); AMD's 300 and 400 series also with
+/// Gigabyte's extra leading "A" ("GA-AB350M-Gaming 3" → "AMD B350"). Anything else is not one, which keeps laptop
+/// model codes ("X540LA", "X570ZD", "Q524UQ"), numbers no chipset has ("Z999") and two-digit chipsets ("H61", "Z97")
+/// out. The description is read only when it mentions Intel, and only for an Intel chipset.
 pub fn chipset(board_product: &str, lpc_description: Option<&str>) -> Option<String> {
     if let Some((maker, name)) = chipsets(board_product).next() {
         return Some(format!("{maker} {name}"));
@@ -254,6 +260,12 @@ mod tests {
             ("GA-AB350M-Gaming 3", "AMD B350"),
             ("GA-AX370-Gaming K7", "AMD X370"),
             ("GA-AB450M-DS3H", "AMD B450"),
+            // One more letter after the name: mini-ITX "I", Gigabyte's "X", ASUS's "E".
+            ("B550I AORUS PRO AX", "AMD B550"),
+            ("GA-Z170X-Gaming 7", "Intel Z170"),
+            ("Pro WS WRX80E-SAGE SE", "AMD WRX80"),
+            // Behind a hyphen the letter is a word of its own, and the name is read as before.
+            ("ROG STRIX Z790-I GAMING WIFI", "Intel Z790"),
         ] {
             assert_eq!(chipset(board, None).as_deref(), Some(expected), "{board}");
         }
@@ -320,11 +332,12 @@ mod tests {
 
     /// Every chipset a board name can carry, written out a second time so a slip in the module's lists shows:
     /// Intel's by generation, then AMD's.
-    const EXPECTED_INTEL: [&str; 44] = [
+    const EXPECTED_INTEL: [&str; 45] = [
         "H110", "B150", "Q150", "H170", "Q170", "Z170", "B250", "Q250", "H270", "Q270", "Z270",
         "H310", "B360", "B365", "H370", "Q370", "Z370", "Z390", "H410", "B460", "H470", "Q470",
         "Z490", "W480", "H510", "B560", "H570", "Q570", "Z590", "W580", "H610", "B660", "H670",
-        "Q670", "Z690", "W680", "B760", "H770", "Z790", "W790", "B860", "Z890", "W880", "X299",
+        "Q670", "Z690", "W680", "B760", "H770", "Z790", "W790", "H810", "B860", "Z890", "W880",
+        "X299",
     ];
     const EXPECTED_AMD: [&str; 22] = [
         "A320", "B350", "X370", "B450", "X470", "A520", "B550", "X570", "A620", "B650", "B650E",
@@ -349,17 +362,20 @@ mod tests {
     }
 
     #[test]
-    fn only_one_m_or_s_may_follow_a_chipset_name() {
-        for board in [
-            "B550M GAMING",
-            "b550m gaming",
-            "X570S EDGE",
-            "Z590M GAMING X",
+    fn only_one_of_m_s_i_x_e_may_follow_a_chipset_name() {
+        for (board, expected) in [
+            ("B550M GAMING", "AMD B550"),
+            ("b550m gaming", "AMD B550"),
+            ("X570S EDGE", "AMD X570"),
+            ("B550I AORUS PRO AX", "AMD B550"),
+            ("Z170X GAMING", "Intel Z170"),
+            ("WRX80E SAGE", "AMD WRX80"),
+            ("Z590M GAMING X", "Intel Z590"),
         ] {
-            assert!(chipset(board, None).is_some(), "{board}");
+            assert_eq!(chipset(board, None).as_deref(), Some(expected), "{board}");
         }
-        // Any other letter, or a second one, makes it another product: a mini-ITX "B550I" is left unread, not guessed.
-        for letter in ('A'..='Z').filter(|letter| !matches!(letter, 'M' | 'S')) {
+        // Any other letter, or a second one, makes it another product: an ASUS laptop called "X570ZD" has no X570 in it.
+        for letter in ('A'..='Z').filter(|letter| !matches!(letter, 'M' | 'S' | 'I' | 'X' | 'E')) {
             let board = format!("B550{letter} GAMING");
             assert_eq!(chipset(&board, None), None, "{board}");
         }
@@ -367,7 +383,8 @@ mod tests {
             "B550MM GAMING",
             "X570SM EDGE",
             "Z590MS GAMING X",
-            "B550I AORUS PRO AX",
+            "B550IX AORUS",
+            "Z170XE GAMING",
         ] {
             assert_eq!(chipset(board, None), None, "{board}");
         }
