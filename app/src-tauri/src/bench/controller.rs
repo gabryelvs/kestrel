@@ -28,6 +28,8 @@ const BUSY: &str = "A benchmark is already running.";
 pub trait Platform: Send + Sync + 'static {
     /// Claims the start key; false when another app already holds it.
     fn register_start_key(&self) -> bool;
+    /// Gives the start key back. Called whenever a session is over or dismissed and before each new claim, so it must
+    /// do nothing when the key isn't held.
     fn unregister_start_key(&self);
     fn game_running(&self, process_name: &str) -> bool;
     fn beep(&self, cue: Cue);
@@ -76,6 +78,27 @@ struct Live {
     /// Frame times of a flagged run waiting for redo or keep.
     pending_frames: Option<Vec<f32>>,
     context: Context,
+}
+
+impl Live {
+    /// Runs one step of the session and says which run slot it filled, if any: the first slot that was empty before
+    /// and isn't now. A run's frame times go to the slot the session put the run in, not to one a copy of the
+    /// session's rules picks.
+    fn accepting(
+        &mut self,
+        step: impl FnOnce(&mut Session) -> Vec<Action>,
+    ) -> (Vec<Action>, Option<usize>) {
+        let before = self.session.view().runs;
+        let actions = step(&mut self.session);
+        let filled = self
+            .session
+            .view()
+            .runs
+            .iter()
+            .zip(&before)
+            .position(|(now, was)| now.is_some() && was.is_none());
+        (actions, filled)
+    }
 }
 
 #[derive(Clone)]
@@ -227,8 +250,12 @@ impl Controller {
     pub fn redo(&self) {
         let actions = match self.lock().as_mut() {
             Some(live) => {
-                live.pending_frames = None;
-                live.session.redo()
+                let actions = live.session.redo();
+                // A flagged run's frame times only matter while the owner decides about it.
+                if !matches!(live.session.phase(), Phase::Review { .. }) {
+                    live.pending_frames = None;
+                }
+                actions
             }
             None => Vec::new(),
         };
@@ -238,12 +265,16 @@ impl Controller {
     /// Keeps a flagged run.
     pub fn keep(&self) {
         let actions = match self.lock().as_mut() {
-            Some(live) if matches!(live.session.phase(), Phase::Review { .. }) => {
-                let slot = usize::from(live.session.pass()) - 1;
-                live.frames[slot] = live.pending_frames.take();
-                live.session.keep()
+            Some(live) => {
+                let (actions, accepted) = live.accepting(Session::keep);
+                // The flagged run's frame times go with the run, if the session took it.
+                let pending = live.pending_frames.take();
+                if let Some(slot) = accepted {
+                    live.frames[slot] = pending;
+                }
+                actions
             }
-            _ => Vec::new(),
+            None => Vec::new(),
         };
         self.perform(actions);
     }
@@ -274,6 +305,9 @@ impl Controller {
             }
         };
         if cleared {
+            // F10 must never outlive its session. `perform` gives the key back for whichever session is live when it
+            // looks, so a dismiss that lands between a session ending and that look would leave the key claimed.
+            self.platform.unregister_start_key();
             self.emit();
         }
     }
@@ -294,8 +328,13 @@ impl Controller {
         self.platform.emit(state.as_ref());
     }
 
-    /// Carries out the session's actions, then gives the key back if the session is over, and updates the UI.
+    /// Gives the key back if the session is over, carries out the session's actions, and updates the UI. The key goes
+    /// first: `Finish` blocks while it saves, and F10 must not stay claimed through that.
     fn perform(&self, actions: Vec<Action>) {
+        let over = self.lock().as_ref().is_some_and(|l| l.session.is_over());
+        if over {
+            self.platform.unregister_start_key();
+        }
         for action in actions {
             match action {
                 Action::BeepStart => self.platform.beep(Cue::Start),
@@ -305,10 +344,6 @@ impl Controller {
                 Action::StopCapture => {} // cancel() already raised the flag the capture watches
                 Action::Finish => self.finish(),
             }
-        }
-        let over = self.lock().as_ref().is_some_and(|l| l.session.is_over());
-        if over {
-            self.platform.unregister_start_key();
         }
         self.emit();
     }
@@ -346,7 +381,7 @@ impl Controller {
                 me.platform.beep(Cue::End);
             }
             let outcome = outcome.and_then(|output| me.analyse(&output));
-            me.capture_finished(&cancel, pass, outcome);
+            me.capture_finished(&cancel, outcome);
         });
     }
 
@@ -407,7 +442,6 @@ impl Controller {
     fn capture_finished(
         &self,
         cancel: &Arc<AtomicBool>,
-        pass: u8,
         outcome: Result<(RunRecord, Vec<f32>), String>,
     ) {
         let actions = {
@@ -419,15 +453,16 @@ impl Controller {
                 Err(message) if message == CANCELLED => Vec::new(),
                 Err(message) => live.session.capture_finished(Err(message)),
                 Ok((run, times)) => {
-                    if pass > 0 {
-                        let slot = usize::from(pass) - 1;
-                        if run.flags.is_empty() {
-                            live.frames[slot] = Some(times);
-                        } else {
-                            live.pending_frames = Some(times);
-                        }
+                    let (actions, accepted) =
+                        live.accepting(|session| session.capture_finished(Ok(run)));
+                    // The frame times go where the session put the run: held while the owner decides about a flagged
+                    // run, stored with the run the session accepted, or dropped (the warm-up's).
+                    if matches!(live.session.phase(), Phase::Review { .. }) {
+                        live.pending_frames = Some(times);
+                    } else if let Some(slot) = accepted {
+                        live.frames[slot] = Some(times);
                     }
-                    live.session.capture_finished(Ok(run))
+                    actions
                 }
             }
         };
@@ -460,18 +495,28 @@ impl Controller {
                     context: live.context.clone(),
                     ..Default::default()
                 };
-                let frames: Vec<Vec<f32>> = live
+                // Every accepted run has its frame times. One without would be saved as an empty file that passes
+                // for a real run, so it fails the session instead.
+                let frames: Result<Vec<Vec<f32>>, String> = live
                     .frames
                     .iter()
-                    .map(|f| f.clone().unwrap_or_default())
+                    .enumerate()
+                    .map(|(i, f)| {
+                        f.clone()
+                            .ok_or_else(|| format!("run {} has no frame times.", i + 1))
+                    })
                     .collect();
                 (bench, frames, live.cancel.clone())
             });
         let Some((mut bench, frames, cancel)) = prepared else {
             return;
         };
-        bench.context.game_settings = self.platform.game_settings();
-        let saved = self.store.save(&mut bench, &frames);
+        let saved = frames.and_then(|frames| {
+            bench.context.game_settings = self.platform.game_settings();
+            self.store
+                .save(&mut bench, &frames)
+                .map_err(|e| e.to_string())
+        });
         if let Some(live) = self
             .lock()
             .as_mut()
@@ -555,6 +600,12 @@ mod tests {
         beeps: Mutex<Vec<Cue>>,
         busy: Mutex<Vec<(String, f32)>>,
         emitted: AtomicUsize,
+        /// Counts the reads of the game's settings. The read numbered `hold_read` (from 1; 0 holds none) waits until
+        /// `release_read` is raised, so a test can act while a finished session is being saved.
+        reads: AtomicUsize,
+        hold_read: AtomicUsize,
+        read_held: AtomicBool,
+        release_read: AtomicBool,
     }
 
     impl Platform for Fake {
@@ -578,6 +629,13 @@ mod tests {
             self.busy.lock().unwrap().clone()
         }
         fn game_settings(&self) -> Option<ValorantSettings> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if read == self.hold_read.load(Ordering::SeqCst) {
+                self.read_held.store(true, Ordering::SeqCst);
+                while !self.release_read.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
             Some(ValorantSettings {
                 resolution: Some([1920, 1080]),
                 ..Default::default()
@@ -607,6 +665,22 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(CANCELLED.into())
+        }
+        fn clean_up_stale_session(&self) {}
+    }
+
+    /// Fails the way a broken PresentMon does: an error that isn't a cancel.
+    struct Failing;
+
+    impl Capture for Failing {
+        fn run(
+            &self,
+            _p: &str,
+            _s: u32,
+            _c: &Path,
+            _cancel: &AtomicBool,
+        ) -> Result<CaptureOutput, String> {
+            Err("PresentMon failed".into())
         }
         fn clean_up_stale_session(&self) {}
     }
@@ -814,6 +888,7 @@ mod tests {
         wait_for(&c, "the game to be seen", |s| s.session.game_running);
         c.start_pressed();
         wait_for(&c, "run 1", waiting_at(1));
+        c.cancel(); // the session is still armed: stop its game check
     }
 
     #[test]
@@ -836,6 +911,7 @@ mod tests {
             10
         );
         assert!(c.state().unwrap().countdown.is_none());
+        c.cancel(); // the session is still armed: stop its game check
     }
 
     #[test]
@@ -859,6 +935,7 @@ mod tests {
             c.start("valorant", Context::default()).is_ok(),
             "a cancelled session can be replaced"
         );
+        c.cancel(); // the replacement is still armed: stop its game check
     }
 
     #[test]
@@ -883,5 +960,81 @@ mod tests {
             c.analyse(&no_frame_times).is_err(),
             "a CSV without frame times is an error"
         );
+    }
+
+    #[test]
+    fn a_failed_capture_ends_the_session() {
+        let (c, fake, dir) = setup(Arc::new(Failing));
+        c.start("valorant", Context::default()).unwrap();
+        c.start_pressed();
+        let failed = wait_for(&c, "the failure", |s| {
+            matches!(s.session.phase, Phase::Failed { .. })
+        });
+        assert_eq!(
+            failed.session.phase,
+            Phase::Failed {
+                message: "PresentMon failed".into()
+            }
+        );
+        eventually("the start key to be given back", || {
+            !fake.key_held.load(Ordering::SeqCst)
+        });
+        assert!(
+            !dir.path().join("work").join(ACTIVE_MARKER).exists(),
+            "the marker goes when the capture ends"
+        );
+        std::thread::sleep(Duration::from_millis(50)); // a second end beep would have sounded by now
+        assert_eq!(
+            fake.beeps
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|&&b| b == Cue::End)
+                .count(),
+            1
+        );
+        assert!(c.store().list().is_empty(), "nothing is saved");
+    }
+
+    #[test]
+    fn dismissing_while_the_result_saves_leaves_nothing_claimed() {
+        let (c, fake, _dir) = setup(fast());
+        // The warm-up and the three runs each read the game's settings once while analysing: the fifth read is the
+        // save's, and it waits until the test lets it go.
+        fake.hold_read.store(5, Ordering::SeqCst);
+        c.start("valorant", Context::default()).unwrap();
+        for pass in 0..4u8 {
+            wait_for(&c, "the next pass", waiting_at(pass));
+            c.start_pressed();
+        }
+        eventually("the save to start", || {
+            fake.read_held.load(Ordering::SeqCst)
+        });
+        let saving = c.state().unwrap();
+        assert_eq!(
+            (saving.session.phase, saving.session.result_id),
+            (Phase::Done, None)
+        );
+        assert!(
+            !fake.key_held.load(Ordering::SeqCst),
+            "the key is given back before the save, not after it"
+        );
+        // A dismiss can land before the capture thread has given the key back: it gives the key back itself.
+        fake.key_held.store(true, Ordering::SeqCst);
+        c.dismiss();
+        assert!(c.state().is_none());
+        assert!(
+            !fake.key_held.load(Ordering::SeqCst),
+            "nothing is armed, so F10 is free"
+        );
+        // The save goes on without a session: it brings neither the session nor the key back.
+        let emitted = fake.emitted.load(Ordering::SeqCst);
+        fake.release_read.store(true, Ordering::SeqCst);
+        eventually("the save to land", || c.store().list().len() == 1);
+        eventually("the capture thread to finish", || {
+            fake.emitted.load(Ordering::SeqCst) > emitted
+        });
+        assert!(c.state().is_none());
+        assert!(!fake.key_held.load(Ordering::SeqCst));
     }
 }
