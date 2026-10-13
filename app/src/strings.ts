@@ -51,7 +51,6 @@ export const strings = {
     arrives: (n: number) => `Arrives in stage ${n}`,
     tweaks: { stage: 3, title: 'Tweaks', body: 'Reversible tweaks picked for your hardware, with Preview and one-click undo.' },
     lockIn: { stage: 5, title: 'Lock In', body: 'A tiny helper that boosts your PC while VALORANT runs and undoes everything when you quit.' },
-    benchmark: { stage: 2, title: 'Benchmark', body: 'A 90-second run in the Range that measures average FPS and 1% lows, before and after.' },
   },
   diagnostics: { copy: 'Copy diagnostics', copied: 'Copied. Paste it in chat.', failed: 'Couldn’t copy. Try again.' },
   bench: {

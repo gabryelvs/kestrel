@@ -5,6 +5,7 @@ import { Banner } from './components/Banner';
 import { TitleBar, type Tab } from './components/TitleBar';
 import { FirstRun } from './first-run/FirstRun';
 import { firstRunDone, markFirstRunDone } from './first-run/flag';
+import { Benchmark } from './pages/Benchmark';
 import { ComingSoon } from './pages/ComingSoon';
 import { Health } from './pages/Health';
 import { Home } from './pages/Home';
@@ -77,7 +78,7 @@ export function App() {
           {report && tab === 'toolbox' && <Toolbox guide={report.guide} focus={guideTopic} />}
           {report && tab === 'tweaks' && <ComingSoon {...strings.comingSoon.tweaks} />}
           {report && tab === 'lockIn' && <ComingSoon {...strings.comingSoon.lockIn} />}
-          {report && tab === 'benchmark' && <ComingSoon {...strings.comingSoon.benchmark} />}
+          {report && tab === 'benchmark' && <Benchmark />}
         </main>
       )}
     </div>
