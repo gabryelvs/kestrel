@@ -52,7 +52,8 @@ fn get_load(state: State<'_, AppState>) -> Result<LoadSample, String> {
     Ok(sampler.sample())
 }
 
-/// Pretty JSON for the "Copy diagnostics" button: the last scan, the saved benchmarks, and VALORANT's settings.
+/// Pretty JSON for the "Copy diagnostics" button: the last scan, the saved benchmarks, VALORANT's settings, and the
+/// benchmark session as it is now (a failed one carries PresentMon's error), or null when there is none.
 #[tauri::command(async)]
 fn get_diagnostics(
     state: State<'_, AppState>,
@@ -68,6 +69,8 @@ fn get_diagnostics(
         "report": report,
         "benchmarks": bench.store().list(),
         "valorantSettings": bench.game_settings(),
+        // An owned snapshot: no platform call, and the controller's lock is released before this is serialised.
+        "benchSession": bench.state(),
     });
     serde_json::to_string_pretty(&diagnostics).map_err(|e| e.to_string())
 }

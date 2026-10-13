@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { flagText, graphShape, metricText, passLabel, pct, sessionHeadline, settingsText, spreadText, verdictTone } from './bench';
+import { canStartRun, flagText, graphShape, metricText, passLabel, pct, sessionHeadline, settingsText, spreadText, verdictTone } from './bench';
 import type { BenchState, ValorantSettings } from './types';
 
 const base: BenchState = {
@@ -50,8 +50,9 @@ describe('bench helpers', () => {
 
   it('tells the player what to do next', () => {
     expect(sessionHeadline({ ...base, gameRunning: false })).toBe('Start VALORANT and open the Range. Kestrel waits for the game.');
-    expect(sessionHeadline(base)).toBe('Stand at the start and press F10 to begin the warm-up.');
-    expect(sessionHeadline({ ...base, pass: 2 })).toBe('Stand at the start and press F10 to begin run 2 of 3.');
+    // F10 is the way to start, with the button named as the way out for a game that swallows F10.
+    expect(sessionHeadline(base)).toBe('Stand at the start and press F10 to begin the warm-up. If F10 does nothing in game, click Start run here: you get 10 seconds to switch back.');
+    expect(sessionHeadline({ ...base, pass: 2 })).toBe('Stand at the start and press F10 to begin run 2 of 3. If F10 does nothing in game, click Start run here: you get 10 seconds to switch back.');
     expect(sessionHeadline({ ...base, startMode: 'countdown' })).toContain('click Start run');
     expect(sessionHeadline({ ...base, countdown: 4 })).toBe('Starting in 4…');
     expect(sessionHeadline({ ...base, phase: 'capturing', pass: 1, secondsLeft: 75 })).toBe('Run 1 of 3: walk the main path to the bots.');
@@ -61,6 +62,22 @@ describe('bench helpers', () => {
     expect(sessionHeadline({ ...base, phase: 'done', pass: 3 })).toBe('Benchmark saved.');
     expect(sessionHeadline({ ...base, phase: 'failed', message: 'x' })).toBe('The benchmark stopped.');
     expect(sessionHeadline({ ...base, phase: 'cancelled' })).toBe('Benchmark cancelled.');
+  });
+
+  it('offers Start run while a pass waits with the game running, in both start modes', () => {
+    // A game can swallow F10 even though Kestrel holds it, so the button isn't only for the countdown mode.
+    expect(canStartRun(base)).toBe(true);
+    expect(canStartRun({ ...base, startMode: 'countdown' })).toBe(true);
+    expect(canStartRun({ ...base, pass: 3 })).toBe(true);
+    expect(canStartRun({ ...base, gameRunning: false })).toBe(false);
+    for (const startMode of ['hotkey', 'countdown'] as const) {
+      expect(canStartRun({ ...base, startMode, countdown: 7 })).toBe(false);
+      expect(canStartRun({ ...base, startMode, phase: 'capturing', pass: 1, secondsLeft: 60 })).toBe(false);
+      expect(canStartRun({ ...base, startMode, phase: 'review', pass: 1, flags: [{ kind: 'too-short' }] })).toBe(false);
+      expect(canStartRun({ ...base, startMode, phase: 'done', pass: 3 })).toBe(false);
+      expect(canStartRun({ ...base, startMode, phase: 'failed', message: 'x' })).toBe(false);
+      expect(canStartRun({ ...base, startMode, phase: 'cancelled' })).toBe(false);
+    }
   });
 
   it('scales the frame-time graph to its slowest frame', () => {

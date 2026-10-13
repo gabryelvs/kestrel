@@ -1,5 +1,5 @@
 import { benchCancel, benchKeep, benchRedo, benchStartRun } from '../../api/client';
-import { flagText, sessionHeadline } from '../../api/bench';
+import { canStartRun, flagText, sessionHeadline } from '../../api/bench';
 import type { BenchState } from '../../api/types';
 import { strings } from '../../strings';
 import { CopyDiagnostics } from '../CopyDiagnostics';
@@ -37,8 +37,8 @@ export function SessionPanel({ state, onClose }: { state: BenchState; onClose: (
       {state.phase === 'failed' && <p className="caution">{state.message}</p>}
       {state.phase === 'failed' && <CopyDiagnostics />}
       <div className="actions">
-        {state.phase === 'waiting' && state.startMode === 'countdown' && state.countdown === null && state.gameRunning && (
-          <button className="btn btn-primary cut-s" onClick={() => void benchStartRun()}>{b.startRun}</button>
+        {canStartRun(state) && (
+          <button className={`btn ${state.startMode === 'countdown' ? 'btn-primary' : 'btn-ghost'} cut-s`} onClick={() => void benchStartRun()}>{b.startRun}</button>
         )}
         {state.phase === 'review' && (
           <>

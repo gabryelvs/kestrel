@@ -221,7 +221,8 @@ impl Controller {
         self.perform(actions);
     }
 
-    /// Fallback when another app holds the start key: beeps for 10 seconds, then starts the pass.
+    /// The fallback start, offered in either start mode (another app may hold the start key, or a game may swallow it):
+    /// beeps for 10 seconds, then starts the pass. The start key is ignored while it counts down (`start_pressed`).
     pub fn start_countdown(&self) -> Result<(), String> {
         let cancel = {
             let mut guard = self.lock();
@@ -1041,6 +1042,10 @@ mod tests {
             1
         );
         assert!(c.store().list().is_empty(), "nothing is saved");
+        // "Copy diagnostics" embeds this state as `benchSession` (lib.rs, get_diagnostics): the failure has to be in it.
+        let diagnostics = serde_json::json!({ "benchSession": c.state() });
+        assert_eq!(diagnostics["benchSession"]["phase"], "failed");
+        assert_eq!(diagnostics["benchSession"]["message"], "PresentMon failed");
     }
 
     #[test]

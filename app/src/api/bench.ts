@@ -40,6 +40,12 @@ export function flagText(flag: Flag): string {
 
 export const passLabel = (pass: number): string => strings.bench.passLabel(pass);
 
+/**
+ * Whether the Start run button is offered: a pass is waiting, the game runs and no countdown is under way. It's offered
+ * in both start modes, not only when F10 couldn't be claimed, because a game can swallow F10 even though Kestrel holds it.
+ */
+export const canStartRun = (s: BenchState): boolean => s.phase === 'waiting' && s.countdown === null && s.gameRunning;
+
 /** One sentence telling the player what happens now or what to do next. */
 export function sessionHeadline(s: BenchState): string {
   const b = strings.bench;

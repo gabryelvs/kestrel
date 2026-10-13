@@ -75,7 +75,8 @@ export const strings = {
     passChip: (pass: number) => (pass === 0 ? 'Warm-up' : `Run ${pass}`),
     begins: (pass: number) => (pass === 0 ? 'the warm-up' : `run ${pass} of 3`),
     waitingForGame: 'Start VALORANT and open the Range. Kestrel waits for the game.',
-    pressKey: (key: string, what: string) => `Stand at the start and press ${key} to begin ${what}.`,
+    pressKey: (key: string, what: string) =>
+      `Stand at the start and press ${key} to begin ${what}. If ${key} does nothing in game, click Start run here: you get 10 seconds to switch back.`,
     pressButton: 'Stand at the start, then click Start run: you get 10 seconds to switch to the game. (Another app is using F10.)',
     countdown: (n: number) => `Starting in ${n}…`,
     walk: (pass: string) => `${pass}: walk the main path to the bots.`,
