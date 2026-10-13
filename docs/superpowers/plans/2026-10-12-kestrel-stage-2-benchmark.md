@@ -3733,7 +3733,7 @@ impl Controller {
 - [ ] **Step 3: Run the tests**
 
 Run: `cargo test -p kestrel bench:: && cargo clippy -p kestrel --all-targets -- -D warnings && cargo fmt -p kestrel`
-Expected: `12 passed` (5 from Task 11 + 7); clippy clean. If a timing test is slow on CI it has 20 s of headroom; it should finish in well under a second.
+Expected: `12 passed` (5 from Task 11 + 7); clippy clean. (Task 12's review later added three controller tests, so the app crate ends this task at 15.) If a timing test is slow on CI it has 20 s of headroom; it should finish in well under a second.
 
 - [ ] **Step 4: Commit**
 
@@ -4191,7 +4191,7 @@ pub fn run() {
 - [ ] **Step 4: Run the tests and a Mac smoke run**
 
 Run: `cargo test -p kestrel && cargo clippy -p kestrel --all-targets -- -D warnings && cargo fmt -p kestrel && cargo build -p kestrel`
-Expected: `14 passed`; clippy clean; build succeeds.
+Expected: `17 passed` (15 from Tasks 11–12 + 2); clippy clean; build succeeds.
 
 Run (optional manual check on the Mac): `cd app && KESTREL_FAKE_GAME=1 npm run tauri dev`, then in the window's devtools console:
 `await window.__TAURI_INTERNALS__.invoke('bench_start', { profile: 'valorant' })` → a state with `"phase": "waiting"`, `"gameRunning": true`. Close the window afterwards.
