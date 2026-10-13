@@ -8,7 +8,7 @@ import { strings } from '../strings';
 type Phase = { name: 'welcome'; error?: string } | { name: 'scanning' } | { name: 'result'; report: Report };
 
 /** Spec decision 22, stage-1 version: welcome → scan → what Kestrel found → home. */
-export function FirstRun({ onDone }: { onDone: (report: Report) => void }) {
+export function FirstRun({ onDone }: { onDone: (report: Report, next: 'home' | 'benchmark') => void }) {
   const [phase, setPhase] = useState<Phase>({ name: 'welcome' });
   const [step, setStep] = useState(0);
 
@@ -61,8 +61,9 @@ export function FirstRun({ onDone }: { onDone: (report: Report) => void }) {
               ))}
             </ul>
             <p className="muted small">{strings.firstRun.later}</p>
-            <div>
-              <button className="btn btn-primary cut-s" onClick={() => onDone(phase.report)}>{strings.firstRun.toHome}</button>
+            <div className="actions">
+              <button className="btn btn-primary cut-s" onClick={() => onDone(phase.report, 'benchmark')}>{strings.firstRun.benchmarkNow}</button>
+              <button className="btn btn-ghost cut-s" onClick={() => onDone(phase.report, 'home')}>{strings.firstRun.notNow}</button>
             </div>
           </>
         )}

@@ -47,10 +47,11 @@ export function App() {
     setTab(next);
   };
 
-  const finishFirstRun = (report: Report) => {
+  const finishFirstRun = (report: Report, next: 'home' | 'benchmark') => {
     markFirstRunDone();
     setScan({ state: 'ready', report });
     setFirstRun(false);
+    setTab(next);
   };
 
   const report = scan.state === 'ready' ? scan.report : null;
@@ -75,7 +76,7 @@ export function App() {
           )}
           {report && tab === 'home' && <Home report={report} onTab={chooseTab} onGuide={openGuide} onRescan={() => void run(true)} />}
           {report && tab === 'health' && <Health report={report} onGuide={openGuide} />}
-          {report && tab === 'toolbox' && <Toolbox guide={report.guide} focus={guideTopic} />}
+          {report && tab === 'toolbox' && <Toolbox guide={report.guide} focus={guideTopic} appVersion={report.appVersion} />}
           {report && tab === 'tweaks' && <ComingSoon {...strings.comingSoon.tweaks} />}
           {report && tab === 'lockIn' && <ComingSoon {...strings.comingSoon.lockIn} />}
           {report && tab === 'benchmark' && <Benchmark />}

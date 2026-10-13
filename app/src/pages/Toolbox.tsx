@@ -3,7 +3,7 @@ import { openLink } from '../api/client';
 import type { BiosGuide, BiosTopic } from '../api/types';
 import { strings } from '../strings';
 
-export function Toolbox({ guide, focus }: { guide: BiosGuide; focus: BiosTopic | null }) {
+export function Toolbox({ guide, focus, appVersion }: { guide: BiosGuide; focus: BiosTopic | null; appVersion: string }) {
   const sections = useRef(new Map<BiosTopic, HTMLElement>());
 
   useEffect(() => {
@@ -47,6 +47,12 @@ export function Toolbox({ guide, focus }: { guide: BiosGuide; focus: BiosTopic |
         </section>
       ))}
       <p className="muted small">{strings.toolbox.later}</p>
+      <section className="panel guide">
+        <h2>{strings.aboutKestrel.title}</h2>
+        <p className="muted">{strings.aboutKestrel.version(appVersion)}</p>
+        <p className="muted">{strings.aboutKestrel.presentmon}</p>
+        <button className="link" onClick={() => void openLink(strings.aboutKestrel.licenceUrl)}>{strings.aboutKestrel.licence}</button>
+      </section>
     </div>
   );
 }
