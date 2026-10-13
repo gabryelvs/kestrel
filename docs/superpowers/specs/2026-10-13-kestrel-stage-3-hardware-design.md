@@ -41,7 +41,7 @@ doesn't report shows **Not reported**; nothing is guessed.
   **Copy specs**.
 - **Processor:** name, codename, socket; cores and threads (`8 P-cores + 16 E-cores · 32 threads` on
   hybrid CPUs); base and max boost clock; L1 data, L1 instruction, L2 and L3 (count × size);
-  instruction chips SSE4.2, AVX, AVX2, AVX-512 (missing ones dimmed).
+  instruction chips SSE4.2, AVX, AVX2, AVX-512, AVX-VNNI and AMX (missing ones dimmed).
 - **Live clocks:** one cell per physical core with its clock in GHz (two decimals), P or E on hybrid
   CPUs, plus Average and Highest. The page asks for new clocks once a second only while the Hardware
   tab is shown and Kestrel's window is visible and focused; otherwise the cells dim and say
@@ -142,7 +142,7 @@ Everything is a user-mode read: no driver, no handle to any game, nothing writte
 
 | Value | Source |
 | --- | --- |
-| CPU vendor, family, model, stepping, brand, instruction sets, hypervisor present; Intel base and max clock | The `CPUID` instruction (leaves 0, 1, 7, 0x16, 0x80000002–4). AVX and AVX-512 count only when the OS saves their registers (`XGETBV`) |
+| CPU vendor, family, model, stepping, brand, instruction sets, hypervisor present; Intel base and max clock | The `CPUID` instruction (leaves 0, 1, 7 with sub-leaves 0 and 1, 0x16, 0x80000002–4). AVX, AVX-512 and AMX count only when the OS saves their registers (`XGETBV`) |
 | Codename and socket | A table in `kestrel-core` keyed by vendor, family and model: Intel Core 6th gen to Core Ultra 200, AMD Zen to Zen 5, desktop and mobile, each entry citing its source. Unknown models: Not reported |
 | Cores, threads, P/E split, caches | `GetLogicalProcessorInformationEx` (cores with their efficiency class; caches with level, type, size) |
 | Base clock (when CPUID has none), live per-core clocks | PDH `\Processor Information(*)\Processor Frequency` × `% Processor Performance` / 100 per logical processor, through `PdhAddEnglishCounterW` (works in any Windows language), mapped to physical cores |
