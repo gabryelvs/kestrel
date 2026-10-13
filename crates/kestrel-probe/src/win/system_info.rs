@@ -39,7 +39,7 @@ pub fn fill(s: &mut SystemSnapshot, errors: &mut Vec<ProbeError>) {
 }
 
 /// Which apps keep the CPU busy, measured over about a second and a half. None if Windows can't give the counters.
-fn busy_processes() -> Option<Vec<BusyProcess>> {
+pub(crate) fn busy_processes() -> Option<Vec<BusyProcess>> {
     let query = pdh::Query::open(r"\Process(*)\% Processor Time")?;
     // The counter is a rate: its value is the average between two samples.
     if !query.collect() {

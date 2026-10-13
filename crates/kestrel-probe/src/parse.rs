@@ -197,6 +197,15 @@ pub fn busy_processes(samples: Vec<(String, f32)>, logical_cpus: u32) -> Vec<Bus
     busy
 }
 
+/// A NUL-terminated UTF-16 buffer (like a Toolhelp32 entry's exe name) → text up to the first NUL.
+pub fn exe_name(buffer: &[u16]) -> String {
+    let end = buffer
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +444,17 @@ mod tests {
             let busy = busy_processes(vec![(name.to_string(), 800.0)], 16);
             assert!(busy.is_empty(), "{name}");
         }
+    }
+
+    #[test]
+    fn exe_names_stop_at_the_first_nul() {
+        let mut buffer = [0u16; 260];
+        for (i, unit) in "VALORANT-Win64-Shipping.exe".encode_utf16().enumerate() {
+            buffer[i] = unit;
+        }
+        assert_eq!(exe_name(&buffer), "VALORANT-Win64-Shipping.exe");
+        let full: Vec<u16> = "abc".encode_utf16().collect();
+        assert_eq!(exe_name(&full), "abc", "no NUL: the whole buffer");
+        assert_eq!(exe_name(&[0, 65, 66]), "");
     }
 }
