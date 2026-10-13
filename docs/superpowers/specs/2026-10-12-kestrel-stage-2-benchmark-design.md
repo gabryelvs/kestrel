@@ -182,8 +182,9 @@ state change and once a second while capturing. `get_diagnostics` adds benchmark
   cancel; game not running; capture failure.
 - UI unit tests for the comparison and formatting helpers; the browser preview shows sample
   benchmarks so the page can be checked on the Mac.
-- CI (Windows job): fetch PresentMon with the hash check, run a 3-second capture of `dwm.exe` and
-  assert the CSV has PresentMon's header, and check that the build output has
+- CI (Windows job): fetch PresentMon with the hash check, run a 3-second capture of `dwm.exe` that
+  must start and stop its trace session and exit 0, with the CSV checked for PresentMon's header
+  when the runner shows frames (a warning when it doesn't), and check that the build output has
   `target/release/presentmon/PresentMon.exe` beside `Kestrel.exe`.
 
 ## Rules for stage 2 (changes from stage 1 in bold)
