@@ -9,6 +9,7 @@ pub mod result;
 pub mod session;
 pub mod settings;
 pub mod store;
+pub mod text;
 
 pub use model::*;
 pub use profile::{profile, GameProfile, Route, PROFILES, VALORANT};
