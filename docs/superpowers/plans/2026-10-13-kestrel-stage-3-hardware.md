@@ -54,9 +54,9 @@
 | `crates/kestrel-probe/src/clocks.rs` (new), `src/win/mod.rs` | `ClockSampler` (PDH per core) | 12 |
 | `crates/kestrel-bench/src/{model,text}.rs`, `app/src-tauri/src/bench/commands.rs` | `Context.gpu_pnp_device_id`, `Context.gpu_link`, Copy results line | 13 |
 | `app/src-tauri/src/{lib.rs,hardware.rs (new)}`, `bench/{controller,commands}.rs` | `get_cpu_clocks`, link sampling, reports with the latest link | 14 |
-| `app/src/api/{types,client,hardware (new),specs (new)}.ts` + tests | Types, clocks call, formatting helpers, Copy specs text | 15 |
+| `app/src/api/{types,client,hardware (new),specs (new)}.ts` + tests, `api/mock-report.json` | Sample regenerated as schema 2, types, clocks call, formatting helpers, Copy specs text | 15 |
 | `app/src/pages/Hardware.tsx`, `app/src/components/hardware/*` (new), `TitleBar.tsx`, `App.tsx`, `pages/Home.tsx`, `HardwarePanel.tsx`, `strings.ts`, CSS | The Hardware page, tab, See all, silent report refresh | 16 |
-| `app/src/components/bench/*`, `strings.ts`, `api/mock-report.json`, `README.md`, specs, `bench/controller.rs` docs | Benchmark PCIe line, stage-number sweep, docs | 17 |
+| `app/src/components/bench/*`, `strings.ts`, `api/sample-report.test.ts`, `README.md`, specs, `bench/controller.rs` docs | Benchmark PCIe line, stage-number sweep, a test of the sample, docs | 17 |
 | `.github/workflows/ci.yml`, versions | macOS app-test job, version 0.3.0 | 18 |
 | tracker doc, GitHub | v0.3.0 pre-release, PR, owner checklist | 19 |
 
@@ -97,7 +97,11 @@ pub struct BoardInfo {
     pub manufacturer: String, pub product: String, pub bios_version: String, pub bios_date: Option<String>,
     pub bios_vendor: String, pub chipset: Option<String>, pub boot_mode: BootMode,
 }
-pub struct MemoryInfo { pub total_mb: u64, pub ddr_generation: Option<u8>, pub modules: Vec<MemoryModule>, pub slots_total: Option<u32> }
+pub struct MemoryInfo {
+    pub total_mb: u64, pub ddr_generation: Option<u8>, pub modules: Vec<MemoryModule>, pub slots_total: Option<u32>,
+    /// The kit's rating from the part numbers (`kestrel_core::ram::rated_mts(&modules)`); the probe sets it (Task 11).
+    pub rated_mts: Option<u32>,
+}
 // MemoryModule gains: pub rank: Option<u32>,
 pub struct GpuInfo {
     pub name: String, pub vendor: GpuVendor, pub driver_version: String, pub driver_date: Option<String>,
@@ -283,6 +287,8 @@ The new findings, exactly (`{…}` is filled in; dates `YYYY-MM-DD` from the fir
 pub fn normalize_configured(modules: &mut [MemoryModule], ddr_generation: Option<u8>);
 ```
 
+Beside that call the probe sets `memory.rated_mts = ram::rated_mts(&modules)` (the existing function, unchanged), so the UI reads the kit's rating from the snapshot and never from a finding's wording.
+
 ### `kestrel-core::bios_guide` (Task 7)
 
 Topic order: xmp, memory-gear (11th-gen Intel only), update-bios, **pcie-slot**, resizable-bar, **virtualization**, iommu.
@@ -339,6 +345,7 @@ Copy results gains the line `PCIe link under load: 4.0 x16` (or `PCIe link under
   - `Displays: {w}×{h} at {currentHz} Hz` per real display, joined with ` · `.
   - `Storage: {model} ({NVMe|SSD|HDD})` per drive, joined with ` · ` (no parentheses when the media is unknown).
   - `OS: {caption without "Microsoft "} {displayVersion} (build {build})`.
+- The kit's rating (the Memory panel's "Kit rating", the XMP row's "RAM runs at its rated 3600 MT/s") is `snapshot.memory.ratedMts`; null shows "Rating unknown" (and no XMP note). No helper parses a finding's wording.
 - Tabs: `home, health, hardware, tweaks, lockIn, benchmark, toolbox`; label "Hardware".
 - Live clocks poll `getCpuClocks` once a second only while the Hardware tab is shown and `document.visibilityState === 'visible' && document.hasFocus()`; otherwise the cells dim and say "Paused".
 - On every tab change after the first run, `App` refreshes the report from `getReport()` without the loading screen.
@@ -356,7 +363,7 @@ Copy results gains the line `PCIe link under load: 4.0 x16` (or `PCIe link under
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces (re-exported from `kestrel_core` by the existing `pub use snapshot::*`): `SCHEMA_VERSION = 2`; `CpuInfo` gains `family`, `model`, `stepping: Option<u32>`, `codename`, `socket: Option<String>`, `base_mhz`, `max_mhz`, `p_cores`, `e_cores: Option<u32>`, `caches: Vec<CacheInfo>`, `instructions: Vec<String>`, `virtualization: Option<bool>`; `CacheInfo { level: u8, kind: CacheKind, size_kb: u32, count: u32 }`; `GpuInfo` gains `pnp_device_id: String`, `pcie: Option<PcieInfo>`, `link_under_load: Option<LinkUnderLoad>`, `largest_bar_mb: Option<u64>`, `resizable_bar: Option<bool>`; `PcieLink { gen: u8, width: u8 }`; `PcieInfo { card_max, slot_max, now: Option<PcieLink> }`; `LinkUnderLoad { link: PcieLink, measured_at: String, benchmark_id: String }`; `MemoryInfo.slots_total: Option<u32>`; `MemoryModule.rank: Option<u32>`; `DisplayInfo` gains `monitor_name`, `connection: Option<String>`; `BoardInfo` gains `bios_vendor: String`, `chipset: Option<String>`, `boot_mode: BootMode`; `StorageInfo.drives: Vec<DriveInfo>`; `DriveInfo { model: String, media: DriveMedia, bus: DriveBus, size_gb: f64, volumes: Vec<VolumeInfo> }`; `VolumeInfo { letter: String, free_gb: f64, total_gb: f64 }`; `CacheKind { Data, Instruction, Unified, Unknown (default) }`, `BootMode { Uefi, Legacy, Unknown (default) }`, `DriveBus { Nvme, Sata, Usb, Sas, Raid, Virtual, Other (default) }`. All structs are `Clone`, not `Copy` (they live in `model!`). `owner_pc_fixture()` carries every new field: RTX 3060 Ti `pnp_device_id` `PCI\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\4&2B0D3A0E&0&0008` with PCIe card 4.0 x16, slot 4.0 x16, now 1.0 x16, `largest_bar_mb` 8192, `resizable_bar` true, `link_under_load` None; Parsec `ROOT\DISPLAY\0000` without PCIe; chipset "Intel Z590", UEFI; two displays; two drives.
+- Produces (re-exported from `kestrel_core` by the existing `pub use snapshot::*`): `SCHEMA_VERSION = 2`; `CpuInfo` gains `family`, `model`, `stepping: Option<u32>`, `codename`, `socket: Option<String>`, `base_mhz`, `max_mhz`, `p_cores`, `e_cores: Option<u32>`, `caches: Vec<CacheInfo>`, `instructions: Vec<String>`, `virtualization: Option<bool>`; `CacheInfo { level: u8, kind: CacheKind, size_kb: u32, count: u32 }`; `GpuInfo` gains `pnp_device_id: String`, `pcie: Option<PcieInfo>`, `link_under_load: Option<LinkUnderLoad>`, `largest_bar_mb: Option<u64>`, `resizable_bar: Option<bool>`; `PcieLink { gen: u8, width: u8 }`; `PcieInfo { card_max, slot_max, now: Option<PcieLink> }`; `LinkUnderLoad { link: PcieLink, measured_at: String, benchmark_id: String }`; `MemoryInfo.slots_total: Option<u32>`; `MemoryInfo.rated_mts: Option<u32>` (the kit's rating from the part numbers, `ram::rated_mts`; Task 11 fills it); `MemoryModule.rank: Option<u32>`; `DisplayInfo` gains `monitor_name`, `connection: Option<String>`; `BoardInfo` gains `bios_vendor: String`, `chipset: Option<String>`, `boot_mode: BootMode`; `StorageInfo.drives: Vec<DriveInfo>`; `DriveInfo { model: String, media: DriveMedia, bus: DriveBus, size_gb: f64, volumes: Vec<VolumeInfo> }`; `VolumeInfo { letter: String, free_gb: f64, total_gb: f64 }`; `CacheKind { Data, Instruction, Unified, Unknown (default) }`, `BootMode { Uefi, Legacy, Unknown (default) }`, `DriveBus { Nvme, Sata, Usb, Sas, Raid, Virtual, Other (default) }`. All structs are `Clone`, not `Copy` (they live in `model!`). `owner_pc_fixture()` carries every new field: RTX 3060 Ti `pnp_device_id` `PCI\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\4&2B0D3A0E&0&0008` with PCIe card 4.0 x16, slot 4.0 x16, now 1.0 x16, `largest_bar_mb` 8192, `resizable_bar` true, `link_under_load` None; Parsec `ROOT\DISPLAY\0000` without PCIe; chipset "Intel Z590", UEFI; `rated_mts` 3600; two displays; two drives.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -437,6 +444,7 @@ mod tests {
         assert_eq!(board.chipset.as_deref(), Some("Intel Z590"));
         assert_eq!(board.boot_mode, BootMode::Uefi);
         assert_eq!(s.memory.slots_total, Some(4));
+        assert_eq!(s.memory.rated_mts, Some(3600));
         assert!(s.memory.modules.iter().all(|m| m.rank == Some(2)));
 
         let parsec = &s.gpus[0];
@@ -551,6 +559,7 @@ mod tests {
             }
         );
         assert_eq!(s.memory.slots_total, None);
+        assert_eq!(s.memory.rated_mts, None);
         assert_eq!(
             s.memory.modules[0],
             MemoryModule {
@@ -713,7 +722,15 @@ model! {
     pub struct PcieInfo { pub card_max: Option<PcieLink>, pub slot_max: Option<PcieLink>, pub now: Option<PcieLink> }
     /// The fastest link seen during a benchmark on this card. `measured_at` is RFC 3339.
     pub struct LinkUnderLoad { pub link: PcieLink, pub measured_at: String, pub benchmark_id: String }
-    pub struct MemoryInfo { pub total_mb: u64, pub ddr_generation: Option<u8>, pub modules: Vec<MemoryModule>, pub slots_total: Option<u32> }
+    pub struct MemoryInfo {
+        pub total_mb: u64,
+        pub ddr_generation: Option<u8>,
+        pub modules: Vec<MemoryModule>,
+        pub slots_total: Option<u32>,
+        /// The kit's rated speed in MT/s from the modules' part numbers (`ram::rated_mts`); None when Kestrel doesn't
+        /// recognise them. The probe fills it, so the UI never reads it out of a finding's wording.
+        pub rated_mts: Option<u32>,
+    }
     pub struct MemoryModule {
         pub capacity_mb: u64,
         /// The speed the module runs at now, in MT/s (`Win32_PhysicalMemory.ConfiguredClockSpeed`).
@@ -783,7 +800,7 @@ choice! {
 
 - [ ] **Step 4: Update the owner fixture**
 
-Replace `crates/kestrel-core/fixtures/owner-pc.json` with the owner's PC in schema 2: i9-11900K (family 6, model 0xA7, stepping 1, Rocket Lake-S, LGA1200, 3.5/5.3 GHz, its four cache lines, AVX-512, virtualization on); the Z590 board's AMI BIOS in UEFI mode; four slots holding two dual-rank modules; the RTX 3060 Ti in a PCIe 4.0 x16 slot, idling at 1.0, with Resizable BAR on (an 8 GB BAR); the XL2566K at 360 Hz plus a 24G4 at 180 Hz, both on DisplayPort; the 980 PRO (NVMe, C:) and the WD Blue HDD (SATA, D:). Sizes in GiB keep a decimal point (`1863.0`): `fixture_loses_nothing_when_parsed` compares the file with what serde writes, and serde writes an f64 that way.
+Replace `crates/kestrel-core/fixtures/owner-pc.json` with the owner's PC in schema 2: i9-11900K (family 6, model 0xA7, stepping 1, Rocket Lake-S, LGA1200, 3.5/5.3 GHz, its four cache lines, AVX-512, virtualization on); the Z590 board's AMI BIOS in UEFI mode; four slots holding two dual-rank modules of a kit rated 3600 MT/s; the RTX 3060 Ti in a PCIe 4.0 x16 slot, idling at 1.0, with Resizable BAR on (an 8 GB BAR); the XL2566K at 360 Hz plus a 24G4 at 180 Hz, both on DisplayPort; the 980 PRO (NVMe, C:) and the WD Blue HDD (SATA, D:). Sizes in GiB keep a decimal point (`1863.0`): `fixture_loses_nothing_when_parsed` compares the file with what serde writes, and serde writes an f64 that way.
 
 ```json
 {
@@ -812,7 +829,7 @@ Replace `crates/kestrel-core/fixtures/owner-pc.json` with the owner's PC in sche
       "pcie": { "cardMax": { "gen": 4, "width": 16 }, "slotMax": { "gen": 4, "width": 16 }, "now": { "gen": 1, "width": 16 } },
       "linkUnderLoad": null, "largestBarMb": 8192, "resizableBar": true }
   ],
-  "memory": { "totalMb": 32768, "ddrGeneration": 4, "slotsTotal": 4, "modules": [
+  "memory": { "totalMb": 32768, "ddrGeneration": 4, "slotsTotal": 4, "ratedMts": 3600, "modules": [
     { "capacityMb": 16384, "configuredMts": 3600, "maxMts": 2133, "partNumber": "CMG32GX4M2D3600C18", "manufacturer": "Corsair", "bankLabel": "BANK 1", "deviceLocator": "ChannelA-DIMM2", "rank": 2 },
     { "capacityMb": 16384, "configuredMts": 3600, "maxMts": 2133, "partNumber": "CMG32GX4M2D3600C18", "manufacturer": "Corsair", "bankLabel": "BANK 3", "deviceLocator": "ChannelB-DIMM2", "rank": 2 }
   ] },
@@ -839,7 +856,7 @@ Replace `crates/kestrel-core/fixtures/owner-pc.json` with the owner's PC in sche
 - [ ] **Step 5: Fill in the struct literals the new fields break**
 
 Run: `grep -rnE "\b(GpuInfo|MemoryModule|DisplayInfo|CpuInfo|BoardInfo|MemoryInfo|StorageInfo) \{" crates app/src-tauri/src --include='*.rs' | grep -v "pub struct"`
-Expected: hits only in `crates/kestrel-core/src/{gpu,health,ram}.rs` (test helpers, with their `-> GpuInfo {` style signature lines) and `crates/kestrel-probe/src/win/{display,wmi_probe}.rs`. `health.rs`'s `sodimm` and `gpu.rs`'s `GpuInfo { driver_version: …, ..g }` already end in `..` and need nothing; kestrel-bench and the app build none of these structs.
+Expected: besides Step 1's own tests in `snapshot.rs`, hits only in `crates/kestrel-core/src/{gpu,health,ram}.rs` (test helpers, with their `-> GpuInfo {` style signature lines) and `crates/kestrel-probe/src/win/{display,wmi_probe}.rs`. `health.rs`'s `sodimm` and `gpu.rs`'s `GpuInfo { driver_version: …, ..g }` already end in `..` and need nothing; kestrel-bench and the app build none of these structs.
 
 Add `..Default::default()` as the last field of each literal that lists every field:
 
@@ -910,7 +927,7 @@ and in `memory` (Task 11 reads the rank):
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cargo test -p kestrel-core`
-Expected: PASS — `test result: ok. 94 passed` (the 91 tests from before plus the three new ones). No existing test changes. The second monitor has one visible effect: the owner's `display-refresh` title becomes "All monitors run at their top refresh rate". No Rust test pins the one-monitor title, and `app/src/api/mock-report.json` keeps it until Task 17 regenerates the sample.
+Expected: PASS — `test result: ok. 94 passed` (the 91 tests from before plus the three new ones). No existing test changes. The second monitor has one visible effect: the owner's `display-refresh` title becomes "All monitors run at their top refresh rate". No Rust test pins the one-monitor title, and `app/src/api/mock-report.json` keeps it until Task 15 regenerates the sample.
 
 Run: `cargo test -p kestrel-probe -p kestrel-bench`
 Expected: PASS — kestrel-probe 22 unit tests and 2 smoke tests (still 27 checks; the mock reads the new fixture), kestrel-bench 42.
@@ -2725,7 +2742,7 @@ Expected: FAIL to compile — `cannot find function 'link_from_codes' in this sc
 
 - [ ] **Step 3: Implement**
 
-Insert this in `crates/kestrel-core/src/pcie.rs` between the module comment and `#[cfg(test)]`. The walk climbs a switch only when both its ports carry the card's own PCI vendor id: an AMD Radeon's or Intel Arc's internal switch is climbed, while an AMD chipset (X570, B550, X670, B650 are PCIe switches) or a Thunderbolt controller is not, so a card in a chipset slot or an eGPU enclosure reads its own x4 link instead of the switch's uplink (see Contract notes). The loop is bounded by the list's length, so a malformed list can't hang the scan. The Resizable BAR rule looks at the rounded MB it returns, so the size shown and On/Off always agree. `measured_at` compares as text: Kestrel writes it in UTC with whole seconds, the same order the benchmark store uses.
+Insert this in `crates/kestrel-core/src/pcie.rs` between the module comment and `#[cfg(test)]`. The walk climbs a switch only when both its ports carry the card's own PCI vendor id: an AMD Radeon's or Intel Arc's internal switch is climbed, while an AMD chipset (X570, B550, X670, B650 are PCIe switches) or a Thunderbolt controller is not, so a card in a chipset slot or an eGPU enclosure reads its own x4 link instead of the switch's uplink (the doc comment on `slot_device` below says the same). The loop is bounded by the list's length, so a malformed list can't hang the scan. The Resizable BAR rule looks at the rounded MB it returns, so the size shown and On/Off always agree. `measured_at` compares as text: Kestrel writes it in UTC with whole seconds, the same order the benchmark store uses.
 
 ```rust
 use crate::gpu;
@@ -5274,7 +5291,7 @@ git commit -m "feat(core): PCIe slot and virtualization guide topics, new topic 
 What the stage-1 backlog items turned out to be (checked against the stage-2 code):
 - **RAM channels.** `CPU1 DIMM A1` + `CPU1 DIMM B1` and `P0_ChannelA` + `P0_ChannelB` already read Dual. The bugs were elsewhere. The socket was lost: `CPU<N>` was never read, and `\bp(\d+)\b` misses `P0_` because `_` is a word character. So channel A on two sockets read as one channel (Single). Underscore-joined words (`CPU1_DIMM_A1`, `P0_ChannelA_DIMM0`, `P0_CHANNEL_A`) matched nothing at all (Unknown). The fix reads `_` as a space and adds `CPU<N>` as a socket token; `Controller<N>`, `P<N>`, `ChannelA-DIMM2` and `DIMM_A2` read as before.
 - **XMP alarm.** Some boards report `ConfiguredClockSpeed` in MHz (1800 for DDR4-3600). `ram::normalize_configured` doubles a module's speed only when two things hold. It is below its generation's JEDEC floor, so it can't be MT/s (DDR4 under 2133, DDR5 under 4800). And, doubled, it is within 50 MT/s of the kit's rating. A DDR4-4266 kit really running at 2133 (XMP off), a DDR5-9600 kit at 4800 and a 3600 kit at 2133 keep their speeds and stay flagged. Because the probe normalises the snapshot (Task 11), the ram-speed check itself doesn't change.
-- **Virtual displays.** The probe marked a monitor virtual when its adapter's name matched `vendor_from`'s virtual hints, and those included "displaylink" and "basic display". Monitors on a DisplayLink dock (real monitors over USB) or on the Microsoft Basic Display Adapter (a card without its driver) were therefore "a virtual display is active", and the refresh check skipped them. Displays now use `is_virtual_display`, which leaves those two out. In the GPU list both adapters stay `GpuVendor::Virtual`, so neither becomes the card `main_gpu`, `is_hybrid` and the PCIe checks look at (see Contract notes).
+- **Virtual displays.** The probe marked a monitor virtual when its adapter's name matched `vendor_from`'s virtual hints, and those included "displaylink" and "basic display". Monitors on a DisplayLink dock (real monitors over USB) or on the Microsoft Basic Display Adapter (a card without its driver) were therefore "a virtual display is active", and the refresh check skipped them. Displays now use `is_virtual_display`, which leaves those two out. In the GPU list both adapters stay `GpuVendor::Virtual`, so neither becomes the card `main_gpu`, `is_hybrid` and the PCIe checks look at (`vendors_from_pci_ids_and_names` and the new test pin both sides).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5930,7 +5947,7 @@ git commit -m "fix(core): stage numbers 5 and 6, dual-socket and underscore RAM 
   - Existing: `SecurityInfo.vbs_running` (WMI `device-guard`), `MachineInfo.form_factor` (WMI `machine`), `win::pdh::Query`, `win::problem`.
 - Produces:
   - `parse::cpuid_text(registers: &[u32]) -> String`
-  - `parse::logical_processors(buffer: &[u8]) -> (Vec<kestrel_core::topology::PhysicalCore>, Vec<(u8, kestrel_core::CacheKind, u32)>)` — cache sizes in KB (see Contract note 1)
+  - `parse::logical_processors(buffer: &[u8]) -> (Vec<kestrel_core::topology::PhysicalCore>, Vec<(u8, kestrel_core::CacheKind, u32)>)` — cache sizes in KB (Windows reports bytes; the parser divides by 1024)
   - `parse::boot_mode(firmware_type: i32) -> BootMode`
   - `parse::virtualization(hypervisor: bool, vbs_running: Option<bool>, firmware_enabled: Option<bool>) -> Option<bool>`
   - `parse::cpu_socket(form_factor: FormFactor, table_socket: Option<&str>) -> Option<String>`
@@ -7218,15 +7235,15 @@ git commit -m "feat(probe): PCIe link, Resizable BAR and chipset from Configurat
 
 **Interfaces:**
 - Consumes:
-  - Task 1: `BoardInfo.bios_vendor`, `MemoryInfo.slots_total`, `MemoryModule.rank`, `DisplayInfo.{monitor_name, connection}`, `StorageInfo.drives`, `kestrel_core::{DriveBus, DisplayInfo, DriveInfo}`.
+  - Task 1: `BoardInfo.bios_vendor`, `MemoryInfo.slots_total`, `MemoryInfo.rated_mts`, `MemoryModule.rank`, `DisplayInfo.{monitor_name, connection}`, `StorageInfo.drives`, `kestrel_core::{DriveBus, DisplayInfo, DriveInfo}`.
   - Task 5: `kestrel_core::hardware::is_placeholder(text: &str) -> bool`, `hardware::connection_name(output_technology: u32) -> Option<&'static str>`, `hardware::DiskRecord { number: u32, model: String, media: DriveMedia, bus: DriveBus, size_gb: f64 }`, `hardware::drives(disks: &[DiskRecord], partitions: &[(u32, char)], space: &[(char, f64, f64)]) -> Vec<DriveInfo>`.
-  - Task 8: `kestrel_core::ram::normalize_configured(modules: &mut [MemoryModule], ddr_generation: Option<u8>)`.
+  - Task 8: `kestrel_core::ram::normalize_configured(modules: &mut [MemoryModule], ddr_generation: Option<u8>)`; the existing `ram::rated_mts(modules: &[MemoryModule]) -> Option<u32>`.
   - Task 9: the windows-sys `Win32_Devices_Display` feature.
   - Existing: `parse::{drive_media, exe_name}`; `wmi_probe`'s `text`, `num`, `first`, `rows_in`, `drive_letter_of`.
 - Produces:
   - `parse::drive_bus(bus_type: Option<u64>) -> DriveBus`, `parse::memory_rank(attributes: u64) -> Option<u32>`, `parse::memory_slots(arrays: &[(Option<u64>, Option<u64>)]) -> Option<u32>`, `parse::volume_letter(mount_point: &str) -> Option<char>`, `parse::MonitorPath { gdi_name: String, monitor_name: String, output_technology: u32 }`, `parse::name_monitors(displays: &mut [DisplayInfo], paths: &[MonitorPath])`
   - `pub(crate) win::system_info::GIB` and `pub(crate) fn win::system_info::volume_space() -> Vec<(char, f64, f64)>` (letter, free GiB, total GiB)
-  - Filled: `board.bios_vendor`; `board.manufacturer`, `board.product`, `board.bios_vendor`, `machine.manufacturer`, `machine.model` blanked when they are BIOS filler; `memory.slots_total`; each module's `rank`; `storage.drives`; each display's `monitor_name` and `connection`
+  - Filled: `board.bios_vendor`; `board.manufacturer`, `board.product`, `board.bios_vendor`, `machine.manufacturer`, `machine.model` blanked when they are BIOS filler; `memory.slots_total`; `memory.rated_mts`; each module's `rank`; `storage.drives`; each display's `monitor_name` and `connection`
   - Probe errors `drives` and `displays`; `memory` now also when `Win32_PhysicalMemoryArray` fails (the modules are kept); `storage` when VALORANT's letter is on none of the listed drives
 
 - [ ] **Step 1: Write the failing tests**
@@ -7342,7 +7359,7 @@ Append to the `tests` module at the end of `crates/kestrel-probe/src/parse.rs`:
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `cargo test -p kestrel-probe`
-Expected: FAIL to compile — cannot find function `drive_bus`, `memory_rank`, `memory_slots`, `volume_letter`, `name_monitors`; cannot find struct `MonitorPath`, `DisplayInfo`; use of undeclared type `DriveBus`.
+Expected: FAIL to compile — cannot find function `drive_bus`, `memory_rank`, `memory_slots`, `volume_letter`, `name_monitors`; cannot find struct `MonitorPath`, `DisplayInfo`; cannot find type `DriveBus` in this scope.
 
 - [ ] **Step 3: Implement**
 
@@ -7500,6 +7517,8 @@ with
             .and_then(parse::ddr_generation);
         // Some boards report the clock in MHz (half the MT/s); this puts every module in MT/s.
         ram::normalize_configured(&mut s.memory.modules, s.memory.ddr_generation);
+        // The kit's rating from its part numbers, which the Hardware tab shows (the speeds don't change it).
+        s.memory.rated_mts = ram::rated_mts(&s.memory.modules);
         // The slot count can fail on its own: the modules above are kept, and the error is reported after them.
         let arrays = self
             .rows("SELECT Use, MemoryDevices FROM Win32_PhysicalMemoryArray")
@@ -7622,7 +7641,7 @@ fn drive_letter_of(row: &Row) -> Option<char> {
 ```
 
 What changed and why:
-- `memory` lists every `MemoryModule` field (no `..Default::default()`: clippy's `needless_update` rejects it once nothing is left to default). `ram::normalize_configured` (Task 8) runs right after the modules, total and DDR generation are filled, and before the slot query, which can return early with its own error after the modules are kept (the same pattern as the battery query in `machine`).
+- `memory` lists every `MemoryModule` field (no `..Default::default()`: clippy's `needless_update` rejects it once nothing is left to default). `ram::normalize_configured` (Task 8) runs right after the modules, total and DDR generation are filled, with `memory.rated_mts` set beside it from the part numbers (`ram::rated_mts`), and both before the slot query, which can return early with its own error after the modules are kept (the same pattern as the battery query in `machine`).
 - Placeholders: `real_name` blanks BIOS filler with `hardware::is_placeholder`, so "To be filled by O.E.M." is never shown or matched; `bios_version` and `bios_date` are not names and stay as read.
 - Drives: both storage tables are read once. `MSFT_PhysicalDisk.DeviceId` is a string such as "0" and `Size` a uint64, which WMI hands over as a string; `num` parses both. `drive_letter_of` now drops partitions without a letter (WMI gives "\0"), which used to come back as `Some('\0')`.
 - VALORANT's drive type now comes from the drive list instead of a second pair of queries. `valorant_media` reports `storage` only when drives were listed but none holds VALORANT's letter; a failed drive list already has its `drives` error.
@@ -9511,6 +9530,7 @@ git commit -m "feat(app): read the PCIe link during benchmark passes, give every
 ### Task 15: UI data layer — schema-2 types, the clocks call, hardware helpers and Copy specs text
 
 **Files:**
+- Regenerate: `app/src/api/mock-report.json` (`npm run mock`, Step 1: the browser preview's sample becomes schema 2)
 - Modify: `app/src/api/types.ts` (schema-2 snapshot fields, the `security` and `network` parts, `CoreClock`, `PcieLink`, `PcieInfo`, `LinkUnderLoad`, two `BiosTopic` values, the benchmark context's `gpuPnpDeviceId` / `gpuLink`)
 - Modify: `app/src/api/client.ts` (`getCpuClocks`)
 - Modify: `app/src/api/sample-bench.ts` (the sample benchmarks' context gets the two new fields, which `BenchContext` now requires)
@@ -9523,26 +9543,36 @@ git commit -m "feat(app): read the PCIe link during benchmark passes, give every
 
 **Interfaces:**
 - Consumes:
-  - Task 1's schema-2 snapshot as the app serialises it (camelCase fields, kebab-case enums): `CpuInfo { …, family, model, stepping, codename, socket, baseMhz, maxMhz, pCores, eCores, caches: CacheInfo[], instructions: string[], virtualization }`, `CacheInfo { level, kind: "data"|"instruction"|"unified"|"unknown", sizeKb, count }`, `BoardInfo { …, biosVendor, chipset, bootMode: "uefi"|"legacy"|"unknown" }`, `MemoryInfo.slotsTotal`, `MemoryModule.rank`, `GpuInfo { …, pnpDeviceId, pcie: PcieInfo|null, linkUnderLoad: LinkUnderLoad|null, largestBarMb, resizableBar }`, `PcieLink { gen, width }`, `PcieInfo { cardMax, slotMax, now }`, `LinkUnderLoad { link, measuredAt, benchmarkId }`, `DisplayInfo.monitorName` / `.connection`, `StorageInfo.drives: DriveInfo[]`, `DriveInfo { model, media, bus: "nvme"|"sata"|"usb"|"sas"|"raid"|"virtual"|"other", sizeGb, volumes }`, `VolumeInfo { letter, freeGb, totalGb }` (sizes in GiB).
+  - Task 1's schema-2 snapshot as the app serialises it (camelCase fields, kebab-case enums): `CpuInfo { …, family, model, stepping, codename, socket, baseMhz, maxMhz, pCores, eCores, caches: CacheInfo[], instructions: string[], virtualization }`, `CacheInfo { level, kind: "data"|"instruction"|"unified"|"unknown", sizeKb, count }`, `BoardInfo { …, biosVendor, chipset, bootMode: "uefi"|"legacy"|"unknown" }`, `MemoryInfo.slotsTotal`, `MemoryInfo.ratedMts` (Task 11 fills it on Windows; the fixture has 3600), `MemoryModule.rank`, `GpuInfo { …, pnpDeviceId, pcie: PcieInfo|null, linkUnderLoad: LinkUnderLoad|null, largestBarMb, resizableBar }`, `PcieLink { gen, width }`, `PcieInfo { cardMax, slotMax, now }`, `LinkUnderLoad { link, measuredAt, benchmarkId }`, `DisplayInfo.monitorName` / `.connection`, `StorageInfo.drives: DriveInfo[]`, `DriveInfo { model, media, bus: "nvme"|"sata"|"usb"|"sas"|"raid"|"virtual"|"other", sizeGb, volumes }`, `VolumeInfo { letter, freeGb, totalGb }` (sizes in GiB).
   - Task 3: `CoreClock { core: u32, kind: Option<CoreKind>, mhz: Option<u32> }` → `{ core, kind: "performance"|"efficiency"|null, mhz }`.
-  - Task 6: `BiosTopic::PcieSlot` → `"pcie-slot"`, `BiosTopic::Virtualization` → `"virtualization"`; finding ids `pcie-lanes`, `pcie-speed`, `resizable-bar`, `virtualization`; the existing `ram-speed` / `ram-channels` texts ("…, its rated speed" / "The kit is rated 3600 MT/s." / "…, but the kit is rated 3600").
+  - Task 6: `BiosTopic::PcieSlot` → `"pcie-slot"`, `BiosTopic::Virtualization` → `"virtualization"`; finding ids `pcie-lanes`, `pcie-speed`, `resizable-bar`, `virtualization`; the existing `ram-speed` and `ram-channels` statuses (and `ram-speed`'s title, "RAM runs at 2133 MT/s, but the kit is rated 3600", which the XMP row shows as its note when it is a Problem; nothing parses it).
+  - Tasks 1–14's mock probe: `npm run mock` prints the owner fixture as a schema-2 report with the 31 checks.
   - Task 13: `Context { …, gpu_pnp_device_id: Option<String>, gpu_link: Option<GpuLink> }`, `GpuLink { gen: u8, width: u8 }` → `gpuPnpDeviceId`, `gpuLink`.
   - Task 14: the Tauri command `get_cpu_clocks` → `Vec<CoreClock>`.
 - Produces (Tasks 16 and 17 rely on these exact names):
   - `types.ts`: `BiosTopic` (+ `'pcie-slot' | 'virtualization'`), `PcieLink`, `PcieInfo`, `LinkUnderLoad`, `GpuInfo`, `MemoryModule`, `DisplayInfo`, `CacheKind`, `CacheInfo`, `CpuInfo`, `BoardInfo`, `DriveMedia`, `DriveBus`, `VolumeInfo`, `DriveInfo`, `SecurityInfo`, `NetAdapter`, `ProbeError`, `CoreClock`; `SystemSnapshot` gains `security` and `network`; `BenchContext` gains `gpuPnpDeviceId: string | null` and `gpuLink: PcieLink | null`.
   - `client.ts`: `getCpuClocks(): Promise<CoreClock[]>`.
   - `findings.ts`: `cpuName(s: SystemSnapshot): string`.
-  - `hardware.ts`: `ghz(mhz: number): string`, `genLabel(gen: number): string`, `linkLabel(link: PcieLink): string`, `kbLabel(kb: number): string`, `cacheLabel(c: CacheInfo): string`, `cacheName(c: CacheInfo): string`, `cacheRows(caches: CacheInfo[]): [string, string][]`, `sizeLabel(gib: number): string`, `coresLabel(cpu: CpuInfo): string`, `ramSpeed(s: SystemSnapshot): number | null`, `memorySummary(s: SystemSnapshot): string | null`, `ramChannels(report: Report): 'dual' | 'single' | null`, `kitRating(report: Report): number | null`, `memoryProfile(report: Report): string`, `boardMaker(report: Report): string`, `gpuShortName(name: string): string`, `separateGpu(gpus: GpuInfo[]): GpuInfo | undefined`, `summaryLine(s: SystemSnapshot): string`, `windowsLine(s: SystemSnapshot): string`, `dayMonth(iso: string): string | null`, `dayMonthTime(iso: string): string | null`, `vramLabel(mb: number): string`, `linkSpeedLabel(mbps: number): string`, `mediaLabel(media: DriveMedia): string | null`, `busLabel(bus: DriveBus): string`, `displayName(d: DisplayInfo, n: number): string`, `slotLabel(m: MemoryModule): string | null`, `gamesOn(s: SystemSnapshot, letter: string): string[]`, `type PanelId`, `panelFailed(errors: ProbeError[], panel: PanelId): boolean`, `shouldPoll(tabShown: boolean, visible: boolean, focused: boolean): boolean`, `type SettingState`, `interface BiosSetting { label; value: string | null; state; problem; note; topic }`, `biosSettings(report: Report): BiosSetting[]`.
+  - `hardware.ts`: `ghz(mhz: number): string`, `genLabel(gen: number): string`, `linkLabel(link: PcieLink): string`, `kbLabel(kb: number): string`, `cacheLabel(c: CacheInfo): string`, `cacheName(c: CacheInfo): string`, `cacheRows(caches: CacheInfo[]): [string, string][]`, `sizeLabel(gib: number): string`, `coresLabel(cpu: CpuInfo): string`, `ramSpeed(s: SystemSnapshot): number | null`, `memorySummary(s: SystemSnapshot): string | null`, `ramChannels(report: Report): 'dual' | 'single' | null`, `memoryProfile(report: Report): string`, `boardMaker(report: Report): string`, `gpuShortName(name: string): string`, `separateGpu(gpus: GpuInfo[]): GpuInfo | undefined`, `summaryLine(s: SystemSnapshot): string`, `windowsLine(s: SystemSnapshot): string`, `dayMonth(iso: string): string | null`, `dayMonthTime(iso: string): string | null`, `vramLabel(mb: number): string`, `linkSpeedLabel(mbps: number): string`, `mediaLabel(media: DriveMedia): string | null`, `busLabel(bus: DriveBus): string`, `displayName(d: DisplayInfo, n: number): string`, `slotLabel(m: MemoryModule): string | null`, `gamesOn(s: SystemSnapshot, letter: string): string[]`, `type PanelId`, `panelFailed(errors: ProbeError[], panel: PanelId): boolean`, `shouldPoll(tabShown: boolean, visible: boolean, focused: boolean): boolean`, `type SettingState`, `interface BiosSetting { label; value: string | null; state; problem; note; topic }`, `biosSettings(report: Report): BiosSetting[]`.
   - `specs.ts`: `specsText(report: Report): string`.
   - `owner-report.ts`: `ownerReport(): Report` (a fresh copy per call).
   - `strings.ts`: `strings.hardwarePage.{notReported, months, build, cores, hybridCores, threads, cache, rank, media, bus, unnamedDisplay, games, makers, profiles, settings}`, `strings.specs.{labels, driver, pcie, channels, bios, display}`.
+  - A schema-2 `app/src/api/mock-report.json` (Tasks 16 and 17's preview and Task 17's `sample-report.test.ts`).
 
 Background for this task:
 - Every user-facing word lives in `app/src/strings.ts` (units such as `MT/s`, `GHz`, `GB` stay inline, as in `findings.ts`).
 - Vitest runs in node (`environment: 'node'` in `vite.config.ts`), with no DOM library, so everything worth testing is a pure function.
-- `app/src/api/mock-report.json` (the browser preview's sample) is still schema 1 until Task 17 regenerates it with `npm run mock`. So these tests never read it: they use `ownerReport()` from the new `owner-report.ts`, whose times carry no zone so they read the same local time on any machine. Vitest doesn't type-check, so the fixture and tests run before the types exist; `tsc` passes after Step 3.
+- `app/src/api/mock-report.json` (the browser preview's sample) is regenerated in Step 1, but these tests never read it: they use `ownerReport()` from the new `owner-report.ts`, so they pin exact text whatever the sample holds, and its times carry no zone so they read the same local time on any machine. Vitest doesn't type-check, so the fixture and tests run before the types exist; `tsc` passes after Step 4.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Regenerate the browser preview's sample**
+
+Run: `cd app && npm run mock`
+
+This runs `cargo run -q -p kestrel-probe --bin kestrel-probe -- --pretty > src/api/mock-report.json`; on the Mac the probe prints the owner fixture through Tasks 1–14's code, so the sample is schema 2 before any UI code reads the new fields. Check the new file: `"schemaVersion": 2`, 31 findings (`pcie-lanes` Pass "Graphics card uses all its PCIe lanes", `pcie-speed` Info "Run a benchmark to check the PCIe link under load", `resizable-bar` Pass, `virtualization` Pass), the power plan's fix with `"stage": 5` and adapter power saving's with `"stage": 6` (their texts name the same stages), the RTX 3060 Ti with `pcie` 4.0 x16 / 4.0 x16 / now 1.0 x16 and `"linkUnderLoad": null`, `"ratedMts": 3600`, two displays, two drives, the guide's seven topics in the order xmp, memory-gear, update-bios, pcie-slot, resizable-bar, virtualization, iommu. `collectedAt` is now and `appVersion` stays `0.2.0` until Task 18 bumps the workspace version.
+
+Then run `cd app && npm test`. Expected: PASS — `Test Files  5 passed (5)`, `Tests  18 passed (18)`. The tests that read the sample still hold: `findings.test.ts` keeps its three problems (power-plan, bios-age, adapter-power), because the four new checks are Pass or Info on the owner's PC, and its labels and categories are unchanged; `format.test.ts` reads only the OS label. If one of them fails, compare the sample with `fixtures/owner-pc.json`: the sample (that is, Tasks 1–14) is what's wrong, not the test.
+
+- [ ] **Step 2: Write the failing tests**
 
 Create `app/src/api/owner-report.ts` (test data; nothing in the app imports it, so it never reaches the bundle):
 
@@ -9591,7 +9621,7 @@ export function ownerReport(): Report {
         },
       ],
       memory: {
-        totalMb: 32768, ddrGeneration: 4, slotsTotal: 4,
+        totalMb: 32768, ddrGeneration: 4, slotsTotal: 4, ratedMts: 3600,
         modules: [
           { capacityMb: 16384, configuredMts: 3600, maxMts: 2133, partNumber: 'CMG32GX4M2D3600C18', manufacturer: 'Corsair', bankLabel: 'BANK 1', deviceLocator: 'ChannelA-DIMM2', rank: 2 },
           { capacityMb: 16384, configuredMts: 3600, maxMts: 2133, partNumber: 'CMG32GX4M2D3600C18', manufacturer: 'Corsair', bankLabel: 'BANK 3', deviceLocator: 'ChannelB-DIMM2', rank: 2 },
@@ -9644,8 +9674,8 @@ Create `app/src/api/hardware.test.ts`:
 import { describe, expect, it } from 'vitest';
 import {
   biosSettings, boardMaker, busLabel, cacheLabel, cacheName, cacheRows, coresLabel, dayMonth, dayMonthTime, displayName, gamesOn,
-  genLabel, ghz, gpuShortName, kbLabel, kitRating, linkLabel, linkSpeedLabel, mediaLabel, memoryProfile, memorySummary,
-  panelFailed, ramChannels, ramSpeed, separateGpu, shouldPoll, sizeLabel, slotLabel, summaryLine, vramLabel, windowsLine,
+  genLabel, ghz, gpuShortName, kbLabel, linkLabel, linkSpeedLabel, mediaLabel, memoryProfile, memorySummary, panelFailed,
+  ramChannels, ramSpeed, separateGpu, shouldPoll, sizeLabel, slotLabel, summaryLine, vramLabel, windowsLine,
 } from './hardware';
 import { ownerReport } from './owner-report';
 import type { CacheInfo, Finding, Report } from './types';
@@ -9719,15 +9749,11 @@ describe('hardware formatting', () => {
     expect(memorySummary({ ...s, memory: { ...s.memory, totalMb: 0 } })).toBeNull();
   });
 
-  it('reads the channels and the kit rating from the RAM checks', () => {
+  it('reads the channels from the RAM channel check', () => {
     const owner = ownerReport();
     expect(ramChannels(owner)).toBe('dual');
     expect(ramChannels(withFindings(owner, { 'ram-channels': { status: 'problem' } }))).toBe('single');
     expect(ramChannels(withFindings(owner, { 'ram-channels': { status: 'unknown' } }))).toBeNull();
-    expect(kitRating(owner)).toBe(3600);
-    const slow = { status: 'problem' as const, title: 'RAM runs at 2133 MT/s, but the kit is rated 3600', detail: 'XMP is probably off in the BIOS.' };
-    expect(kitRating(withFindings(owner, { 'ram-speed': slow }))).toBe(3600);
-    expect(kitRating(withFindings(owner, { 'ram-speed': { status: 'unknown', title: 'Couldn’t tell your RAM’s rated speed', detail: '' } }))).toBeNull();
   });
 
   it('names the memory profile and the board maker the way the BIOS does', () => {
@@ -9852,6 +9878,12 @@ describe('BIOS settings Kestrel can see', () => {
     ]);
   });
 
+  it('gives XMP its rated-speed note only when the part numbers name a rating', () => {
+    const owner = ownerReport();
+    const unrated: Report = { ...owner, snapshot: { ...owner.snapshot, memory: { ...owner.snapshot.memory, ratedMts: null } } };
+    expect(biosSettings(unrated)[0]).toEqual({ label: 'XMP', value: 'On', state: 'on', problem: false, note: null, topic: null });
+  });
+
   it('marks settings that are off, in amber when their check is a Problem', () => {
     const owner = ownerReport();
     const s = owner.snapshot;
@@ -9908,7 +9940,7 @@ describe('BIOS settings Kestrel can see', () => {
 });
 ```
 
-Create `app/src/api/specs.test.ts` (the first test is the spec's seven-line example; the HDD keeps the model Windows reports, see Contract notes):
+Create `app/src/api/specs.test.ts` (the first test is the spec's seven-line example, except that the HDD keeps the full model Windows reports, `WDC WD20EZBX-00AYRA0`, where the spec shortens it to `WDC WD20EZBX`):
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -10051,7 +10083,7 @@ with
     expect(cpuName(report.snapshot)).toBe('Intel Core i9-11900K');
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [ ] **Step 3: Run them to verify they fail**
 
 Run: `cd app && npx vitest run src/api/hardware.test.ts src/api/specs.test.ts src/api/client.test.ts src/api/findings.test.ts`
 
@@ -10061,9 +10093,9 @@ Expected: FAIL, 4 files:
 - `src/api/client.test.ts > the browser preview > makes up 8 cores around 4.8 GHz that move on every call` — `TypeError: getCpuClocks is not a function`
 - `src/api/findings.test.ts > findings helpers > formats hardware labels` — `TypeError: cpuName is not a function`
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 4: Implement**
 
-**3a.** Replace the whole of `app/src/api/types.ts` with:
+**4a.** Replace the whole of `app/src/api/types.ts` with:
 
 ```ts
 // Mirrors the Rust types in crates/kestrel-core (serde camelCase / kebab-case).
@@ -10173,7 +10205,8 @@ export interface SystemSnapshot {
   machine: { formFactor: 'desktop' | 'laptop' | 'unknown'; manufacturer: string; model: string; onBattery: boolean | null };
   cpu: CpuInfo;
   gpus: GpuInfo[];
-  memory: { totalMb: number; ddrGeneration: number | null; modules: MemoryModule[]; slotsTotal: number | null };
+  /** `ratedMts`: the kit's rating from the part numbers (kestrel-core's ram::rated_mts); null when Kestrel doesn't know the kit. */
+  memory: { totalMb: number; ddrGeneration: number | null; modules: MemoryModule[]; slotsTotal: number | null; ratedMts: number | null };
   displays: DisplayInfo[];
   board: BoardInfo;
   storage: {
@@ -10284,7 +10317,7 @@ export type BenchState = SessionPhase & {
 };
 ```
 
-**3b.** In `app/src/api/client.ts`, replace
+**4b.** In `app/src/api/client.ts`, replace
 
 ```ts
 import type { BenchDetail, BenchState, BenchmarkSummary, GameProfile, LoadSample, Report } from './types';
@@ -10319,7 +10352,7 @@ export const getCpuClocks = (): Promise<CoreClock[]> => {
 };
 ```
 
-**3c.** In `app/src/api/sample-bench.ts`, replace
+**4c.** In `app/src/api/sample-bench.ts`, replace
 
 ```ts
   windowsBuild: 26200, displayHz: 360, gameSettings: null,
@@ -10336,7 +10369,7 @@ with
 
 (The browser preview's sample benchmarks then show the PCIe line Task 17 adds.)
 
-**3d.** In `app/src/api/findings.ts`, replace
+**4d.** In `app/src/api/findings.ts`, replace
 
 ```ts
 export function cpuLabel(s: SystemSnapshot): string {
@@ -10373,7 +10406,7 @@ export function cpuLabel(s: SystemSnapshot): string {
 }
 ```
 
-**3e.** In `app/src/strings.ts`, replace
+**4e.** In `app/src/strings.ts`, replace
 
 ```ts
   hardware: { cpu: 'CPU', gpu: 'GPU', ram: 'RAM', display: 'Panel', os: 'OS', board: 'Board' },
@@ -10425,7 +10458,7 @@ with
   health: {
 ```
 
-**3f.** Create `app/src/api/hardware.ts`:
+**4f.** Create `app/src/api/hardware.ts`:
 
 ```ts
 // Formatting for the Hardware tab and Copy specs. Pure: every value comes from the report; nothing is guessed.
@@ -10512,17 +10545,6 @@ const finding = (report: Report, id: string): Finding | undefined => report.find
 export function ramChannels(report: Report): 'dual' | 'single' | null {
   const status = finding(report, 'ram-channels')?.status;
   return status === 'pass' ? 'dual' : status === 'problem' ? 'single' : null;
-}
-
-/**
- * The kit's rated speed in MT/s, as the RAM speed check read it from the part numbers; null when it couldn't. The
- * snapshot has no field for it, so it comes from the check's own words ("The kit is rated 3600 MT/s.").
- */
-export function kitRating(report: Report): number | null {
-  const ram = finding(report, 'ram-speed');
-  if (!ram || (ram.status !== 'pass' && ram.status !== 'problem')) return null;
-  const match = /rated (\d+)/.exec(`${ram.title} ${ram.detail}`);
-  return match ? Number(match[1]) : null;
 }
 
 /** What this board's BIOS calls the memory profile: the same rule as kestrel-core's bios_guide::memory_profile_name. */
@@ -10674,7 +10696,7 @@ export function biosSettings(report: Report): BiosSetting[] {
   };
   const ram = finding(report, 'ram-speed');
   const xmp = ram?.status === 'pass' ? true : ram?.status === 'problem' ? false : null;
-  const rated = kitRating(report);
+  const rated = s.memory.ratedMts;
   const xmpNote = xmp === true && rated !== null ? t.ratedSpeed(rated) : xmp === false ? (ram?.title ?? null) : null;
   const gpu = separateGpu(s.gpus);
   const boot = s.board.bootMode;
@@ -10698,12 +10720,12 @@ export function biosSettings(report: Report): BiosSetting[] {
 ```
 
 Notes on choices the tests pin:
-- `kitRating` reads the rated speed from the `ram-speed` finding's own words, because the snapshot has no field for it (see Contract notes). Task 17 pins it on the regenerated sample, so a wording change in Rust is caught.
+- The kit's rated speed is `snapshot.memory.ratedMts`, which the probe reads from the part numbers (Task 11); no helper parses a finding's wording. A kit Kestrel doesn't know (`null`) gives the XMP row no note, and the Memory panel says "Rating unknown" (Task 16).
 - `sizeLabel` cuts off rather than rounds, like Windows Explorer: the 2 TB WD drive (1863 GiB) reads "1.81 TB", as Explorer shows it.
 - `memoryProfile` mirrors `kestrel_core::bios_guide::memory_profile_name` the same way `mainGpu` mirrors `gpu::main_gpu`; the board maker comes from `report.guide.vendor`, which Rust already worked out.
 - `biosSettings` takes each row's BIOS-guide topic from its Health Check item's fix, so the checklist links exactly where the Health tab does (NVIDIA's Resizable BAR Info links the guide; a card that doesn't use Resizable BAR doesn't), and only while the setting is off. Without a separate graphics card there is no Resizable BAR row.
 
-**3g.** Create `app/src/api/specs.ts`:
+**4g.** Create `app/src/api/specs.ts`:
 
 ```ts
 import { strings } from '../strings';
@@ -10795,10 +10817,10 @@ function osLine(s: SystemSnapshot): string | null {
 }
 ```
 
-- [ ] **Step 4: Verify**
+- [ ] **Step 5: Verify**
 
 Run: `cd app && npm test`
-Expected: PASS — `Test Files  8 passed (8)`, `Tests  43 passed (43)`.
+Expected: PASS — `Test Files  8 passed (8)`, `Tests  44 passed (44)`.
 
 Run: `cd app && npx tsc --noEmit`
 Expected: no output, exit 0.
@@ -10808,10 +10830,10 @@ Expected: `✓ built in …`, no errors (`owner-report.ts` isn't imported by the
 
 Nothing visible changes yet: Task 16 adds the page.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add app/src/api/types.ts app/src/api/client.ts app/src/api/client.test.ts app/src/api/sample-bench.ts app/src/api/findings.ts app/src/api/findings.test.ts app/src/api/hardware.ts app/src/api/hardware.test.ts app/src/api/specs.ts app/src/api/specs.test.ts app/src/api/owner-report.ts app/src/strings.ts
+git add app/src/api/mock-report.json app/src/api/types.ts app/src/api/client.ts app/src/api/client.test.ts app/src/api/sample-bench.ts app/src/api/findings.ts app/src/api/findings.test.ts app/src/api/hardware.ts app/src/api/hardware.test.ts app/src/api/specs.ts app/src/api/specs.test.ts app/src/api/owner-report.ts app/src/strings.ts
 git commit -m "feat(app): hardware types, the CPU clocks call, formatting helpers and Copy specs text" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -10835,7 +10857,7 @@ git commit -m "feat(app): hardware types, the CPU clocks call, formatting helper
 - Test: `app/src/components/hardware/view.test.ts`, `app/src/components/TitleBar.test.ts` (new)
 
 **Interfaces:**
-- Consumes (Task 15): `getCpuClocks(): Promise<CoreClock[]>`; `cpuName`, `driverLabel`, `mainGpu` (`findings.ts`); from `hardware.ts`: `biosSettings`, `boardMaker`, `busLabel`, `cacheRows`, `coresLabel`, `dayMonth`, `dayMonthTime`, `displayName`, `gamesOn`, `ghz`, `gpuShortName`, `kitRating`, `linkLabel`, `linkSpeedLabel`, `mediaLabel`, `ramChannels`, `ramSpeed`, `sizeLabel`, `slotLabel`, `vramLabel`, `summaryLine`, `windowsLine`, `panelFailed`, `type PanelId`, `shouldPoll`; `specsText(report: Report): string`; `ownerReport(): Report`; the types `BiosTopic`, `CoreClock`, `GpuInfo`, `PcieLink`, `Report`, `SystemSnapshot`; `strings.hardwarePage.{notReported, rank, settings.on/off}`.
+- Consumes (Task 15): `getCpuClocks(): Promise<CoreClock[]>`; `cpuName`, `driverLabel`, `mainGpu` (`findings.ts`); from `hardware.ts`: `biosSettings`, `boardMaker`, `busLabel`, `cacheRows`, `coresLabel`, `dayMonth`, `dayMonthTime`, `displayName`, `gamesOn`, `ghz`, `gpuShortName`, `linkLabel`, `linkSpeedLabel`, `mediaLabel`, `ramChannels`, `ramSpeed`, `sizeLabel`, `slotLabel`, `vramLabel`, `summaryLine`, `windowsLine`, `panelFailed`, `type PanelId`, `shouldPoll`; `specsText(report: Report): string`; `ownerReport(): Report`; the types `BiosTopic`, `CoreClock`, `GpuInfo`, `PcieLink`, `Report`, `SystemSnapshot` (with `memory.ratedMts`); `strings.hardwarePage.{notReported, rank, settings.on/off}`; the schema-2 sample Task 15 regenerated, for the browser preview.
 - Produces:
   - `TitleBar.tsx`: `export type Tab = 'home' | 'health' | 'hardware' | 'tweaks' | 'lockIn' | 'benchmark' | 'toolbox'`, `export const TABS: Tab[]`.
   - `pages/Hardware.tsx`: `Hardware({ report, onGuide, onRescan }: { report: Report; onGuide: (topic: BiosTopic) => void; onRescan: () => void })`.
@@ -10954,7 +10976,7 @@ describe('Hardware panels', () => {
     expect(lines(view.cards[1].facts)).toEqual([['VRAM', '128 MB'], ['Driver', '31.0.101.2127 (2026-09-15)']]);
   });
 
-  it('shows memory per module, with the kit rating from the RAM check', () => {
+  it('shows memory per module, with the kit rating from the part numbers', () => {
     const view = memoryView(ownerReport());
     expect(view.name).toBe('32 GB DDR4');
     expect(lines(view.facts)).toEqual([['Channels', 'Dual channel'], ['Slots', '2 of 4'], ['Speed now', '3600 MT/s'], ['Kit rating', '3600 MT/s']]);
@@ -10970,9 +10992,9 @@ describe('Hardware panels', () => {
       'ram-speed': { status: 'problem', title: 'RAM runs at 2133 MT/s, but the kit is rated 3600', detail: '', fix: { kind: 'bios-guide', topic: 'xmp' } },
     });
     expect(lines(memoryView(slow).facts)[2]).toEqual(['Speed now', '3600 MT/s', 'warn', 'xmp']);
-    const unknown = withFindings(owner, { 'ram-speed': { status: 'unknown', title: 'Couldn’t tell your RAM’s rated speed', detail: '' } });
-    expect(lines(memoryView(unknown).facts)[3]).toEqual(['Kit rating', 'Rating unknown', 'muted']);
     const s = owner.snapshot;
+    const unknown: Report = { ...owner, snapshot: { ...s, memory: { ...s.memory, ratedMts: null } } };
+    expect(lines(memoryView(unknown).facts)[3]).toEqual(['Kit rating', 'Rating unknown', 'muted']);
     const bare = memoryView({ ...owner, snapshot: { ...s, memory: { ...s.memory, slotsTotal: null, modules: [{ ...s.memory.modules[0], rank: null, manufacturer: '' }] } } });
     expect(lines(bare.facts)[1]).toEqual(['Slots', '1 used']);
     expect([bare.modules[0].maker, bare.modules[0].rank]).toEqual([null, null]);
@@ -11150,8 +11172,8 @@ with
 // What each Hardware panel shows, as plain data: the components only lay it out. Pure, so it's tested in node.
 import { cpuName, driverLabel, mainGpu } from '../../api/findings';
 import {
-  biosSettings, boardMaker, busLabel, cacheRows, coresLabel, dayMonth, displayName, gamesOn, ghz, gpuShortName, kitRating,
-  linkLabel, linkSpeedLabel, mediaLabel, ramChannels, ramSpeed, sizeLabel, slotLabel, vramLabel,
+  biosSettings, boardMaker, busLabel, cacheRows, coresLabel, dayMonth, displayName, gamesOn, ghz, gpuShortName, linkLabel,
+  linkSpeedLabel, mediaLabel, ramChannels, ramSpeed, sizeLabel, slotLabel, vramLabel,
 } from '../../api/hardware';
 import type { BiosTopic, CoreClock, GpuInfo, PcieLink, Report, SystemSnapshot } from '../../api/types';
 import { strings } from '../../strings';
@@ -11276,10 +11298,9 @@ export interface ModuleRow { slot: string | null; size: string; maker: string | 
 export function memoryView(report: Report): Card & { modules: ModuleRow[] } {
   const s = report.snapshot;
   const m = h.memory;
-  const { totalMb, ddrGeneration, modules, slotsTotal } = s.memory;
+  const { totalMb, ddrGeneration, modules, slotsTotal, ratedMts: rated } = s.memory;
   const channels = ramChannels(report);
   const speed = ramSpeed(s);
-  const rated = kitRating(report);
   return {
     name: totalMb > 0 ? `${Math.round(totalMb / 1024)} GB${ddrGeneration ? ` DDR${ddrGeneration}` : ''}` : null,
     facts: [
@@ -12099,7 +12120,7 @@ with
 - [ ] **Step 4: Verify**
 
 Run: `cd app && npm test`
-Expected: PASS — `Test Files  10 passed (10)`, `Tests  57 passed (57)`.
+Expected: PASS — `Test Files  10 passed (10)`, `Tests  58 passed (58)`.
 
 Run: `cd app && npx tsc --noEmit`
 Expected: no output, exit 0.
@@ -12107,9 +12128,9 @@ Expected: no output, exit 0.
 Run: `cd app && npm run build`
 Expected: `✓ built in …`, no errors.
 
-Manual check in the browser preview. The preview's sample (`src/api/mock-report.json`) is still schema 1 until Task 17 commits the regenerated one, and the Hardware page needs schema-2 fields, so regenerate it for the check and put it back afterwards:
+Manual check in the browser preview, on the schema-2 sample (`src/api/mock-report.json`) Task 15 regenerated:
 
-1. `cd app && npm run mock` (Tasks 1–12 made the Rust mock probe print schema 2), then `npm run dev` and open http://localhost:1420.
+1. `cd app && npm run dev` and open http://localhost:1420.
 2. If the first-run screen shows, click **Scan my PC**, then **Later**. The tabs read Home · Health · Hardware · Tweaks · Lock In · Benchmark · Toolbox.
 3. Home: the Hardware panel has **See all** on its right; it opens the Hardware tab.
 4. With the window at least 1100 px wide: the head reads "Core i9-11900K · RTX 3060 Ti · 32 GB DDR4-3600 · ROG MAXIMUS XIII HERO", then "Windows 11 Pro 25H2 · build 26200", "Last scan" with the sample's date and time, **Scan again** and **Copy specs**. Panels in two columns: Processor | Live clocks, Graphics | Memory, Motherboard and BIOS | Displays (XL2566K, Primary), Displays (24G4) | Storage (Samsung SSD 980 PRO 1TB, `C:` with a VALORANT tag), Storage (WDC) | Network (Power saving On, amber).
@@ -12119,7 +12140,7 @@ Manual check in the browser preview. The preview's sample (`src/api/mock-report.
 8. Motherboard and BIOS: BIOS date 2024-05-20 in amber with **Open BIOS guide** (opens Toolbox at "Update the BIOS"); in "BIOS settings Kestrel can see", IOMMU (VT-d) Off with "Only for Vanguard On-Demand" and **Open BIOS guide** (Toolbox scrolls to the IOMMU topic); the other rows On / UEFI in lime.
 9. **Copy specs** shows "Copied to clipboard" for 3 s; pasted, it's the seven lines, the GPU line ending "PCIe x16" (the sample has no benchmark link).
 10. Narrow the window below 1100 px: one column. Switch tabs a few times: "Scanning your PC…" never flashes. The DevTools console shows no warnings.
-11. Stop the dev server and run `git checkout -- src/api/mock-report.json`: Task 17 regenerates and commits the sample.
+11. Stop the dev server.
 
 - [ ] **Step 5: Commit**
 
@@ -12130,23 +12151,22 @@ git commit -m "feat(app): Hardware tab with live clocks, BIOS settings and Copy 
 
 ---
 
-### Task 17: PCIe link in benchmark results, stage numbers from one constant, docs, and the regenerated sample
+### Task 17: PCIe link in benchmark results, stage numbers from one constant, docs, and a test of the sample
 
 **Files:**
 - Modify: `app/src/api/bench.ts` (`contextRows`, moved out of `ResultDetail` so the new line is unit-tested), `app/src/components/bench/ResultDetail.tsx`, `app/src/styles/bench.css` (wider label column)
 - Modify: `app/src/strings.ts` (`STAGE`; every stage mention uses it; the PCIe line's label)
-- Modify (comments only): `app/src/components/LockInCard.tsx`, `app/src/pages/Benchmark.tsx`, `app/src/api/client.ts`, `app/src/api/types.ts`, `app/src-tauri/src/lib.rs`, `app/src-tauri/src/bench/mod.rs`, `app/src-tauri/src/bench/controller.rs` (`StartMode`), `crates/kestrel-bench/src/profile.rs`
+- Modify (comments only): `app/src/components/LockInCard.tsx`, `app/src/pages/Benchmark.tsx`, `app/src/api/client.ts`, `app/src/api/types.ts`, `app/src-tauri/src/bench/mod.rs`, `app/src-tauri/src/bench/controller.rs` (`StartMode`), `crates/kestrel-bench/src/profile.rs`
 - Modify (docs): `README.md`, `docs/superpowers/specs/2026-10-09-kestrel-design.md`, `docs/superpowers/specs/2026-10-12-kestrel-stage-2-benchmark-design.md`
-- Regenerate: `app/src/api/mock-report.json` (`npm run mock`)
 - Test: `app/src/api/bench.test.ts` (one test), `app/src/strings.test.ts`, `app/src/api/sample-report.test.ts` (new)
 
 **Interfaces:**
-- Consumes: Task 15's `BenchContext.gpuLink: PcieLink | null` and `linkLabel(link: PcieLink): string`, `specsText(report: Report): string`, `summaryLine(s: SystemSnapshot): string`, `kitRating(report: Report): number | null`; Task 8's `TWEAKS_STAGE = 5` / `COMPETITIVE_STAGE = 6` in `health.rs` (they reach the sample through `Fix::LaterStage`); Tasks 1–12's mock probe, which prints the owner fixture as a schema-2 report with the 31 checks; Task 13/14's benchmark context (`gpuLink` in every saved benchmark, `null` in ones saved by v0.2.0).
-- Produces: `export const STAGE = { tweaks: 5, competitive: 6, lockIn: 7, fixes: 8 } as const` (`strings.ts`); `contextRows(ctx: BenchContext): [string, string][]` (`api/bench.ts`); `strings.bench.contextRows.pcieLink = 'PCIe link under load'`; a schema-2 `app/src/api/mock-report.json`.
+- Consumes: Task 15's `BenchContext.gpuLink: PcieLink | null` and `linkLabel(link: PcieLink): string`, `specsText(report: Report): string`, `summaryLine(s: SystemSnapshot): string`, `SystemSnapshot.memory.ratedMts`; Task 8's `TWEAKS_STAGE = 5` / `COMPETITIVE_STAGE = 6` in `health.rs` (they reach the sample through `Fix::LaterStage`); the schema-2 `app/src/api/mock-report.json` Task 15 regenerated (`npm run mock`: the owner fixture with the 31 checks); Task 13/14's benchmark context (`gpuLink` in every saved benchmark, `null` in ones saved by v0.2.0).
+- Produces: `export const STAGE = { tweaks: 5, competitive: 6, lockIn: 7, fixes: 8 } as const` (`strings.ts`); `contextRows(ctx: BenchContext): [string, string][]` (`api/bench.ts`); `strings.bench.contextRows.pcieLink = 'PCIe link under load'`; `app/src/api/sample-report.test.ts`, which pins what the sample says.
 
 Background for this task:
 - Decision 66 reordered the stages: tweak engine 5, Competitive tier 6, Lock In 7, fixes and the troubleshooter 8. Task 8 moved the Rust side to `TWEAKS_STAGE` / `COMPETITIVE_STAGE`; this task gives the UI its one constant. A comment that only labels code with the stage it was built in ("Stage 2: the benchmark") now names the feature instead, so no comment can go stale again.
-- The browser preview's sample is printed by the Rust mock probe from `crates/kestrel-core/fixtures/owner-pc.json`. The probe never fills `linkUnderLoad` (the app does, from benchmarks), so the sample's GPU line in Copy specs ends "PCIe x16".
+- The browser preview's sample is printed by the Rust mock probe from `crates/kestrel-core/fixtures/owner-pc.json`; Task 15 regenerated it, and this task only tests it. The probe never fills `linkUnderLoad` (the app does, from benchmarks), so the sample's GPU line in Copy specs ends "PCIe x16".
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -12212,12 +12232,12 @@ describe('stage numbers', () => {
 });
 ```
 
-Create `app/src/api/sample-report.test.ts` (it pins what the regenerated sample must say, end to end through the Task 15 helpers):
+Create `app/src/api/sample-report.test.ts` (it pins what the sample Task 15 regenerated must say, end to end through the Task 15 helpers):
 
 ```ts
 import { describe, expect, it } from 'vitest';
 import { STAGE } from '../strings';
-import { kitRating, summaryLine } from './hardware';
+import { summaryLine } from './hardware';
 import mock from './mock-report.json';
 import { specsText } from './specs';
 import type { Report } from './types';
@@ -12239,7 +12259,8 @@ describe('the sample report', () => {
 
   it('fills the Hardware tab and Copy specs from what the probe prints', () => {
     expect(summaryLine(sample.snapshot)).toBe('Core i9-11900K · RTX 3060 Ti · 32 GB DDR4-3600 · ROG MAXIMUS XIII HERO');
-    expect(kitRating(sample)).toBe(3600);
+    // The probe prints the kit's rating from the part numbers; the Memory panel reads it from there.
+    expect(sample.snapshot.memory.ratedMts).toBe(3600);
     // Only the app fills the link under load (from benchmarks), never the probe, so the GPU line gives the lanes in use.
     expect(specsText(sample)).toBe([
       'CPU: Intel Core i9-11900K (8 cores, 16 threads)',
@@ -12258,12 +12279,13 @@ describe('the sample report', () => {
 
 Run: `cd app && npx vitest run src/api/bench.test.ts src/strings.test.ts src/api/sample-report.test.ts`
 
-Expected: FAIL, 5 tests in 3 files:
+Expected: FAIL, 4 tests in 3 files:
 - `bench.test.ts > … with the PCIe link measured under load` — `TypeError: contextRows is not a function`
 - `strings.test.ts > stage numbers > follow the stage order of decision 66` — `AssertionError: expected undefined to deeply equal { tweaks: 5, competitive: 6, …(2) }`
 - `strings.test.ts > stage numbers > are only ever one of STAGE’s` — `TypeError: Cannot convert undefined or null to object`
-- `sample-report.test.ts > the sample report > is schema 2 …` — `AssertionError: expected 1 to be 2` (the committed sample is still schema 1)
-- `sample-report.test.ts > the sample report > fills the Hardware tab …` — `TypeError: Cannot read properties of undefined (reading 'filter')` (no `storage.drives` in schema 1)
+- `sample-report.test.ts > the sample report > is schema 2 …` — `TypeError: Cannot read properties of undefined (reading 'tweaks')` (`STAGE` isn't exported yet; the schema and the 31 checks already hold on the sample Task 15 regenerated)
+
+`sample-report.test.ts > the sample report > fills the Hardware tab …` already passes: it pins the sample Task 15 committed.
 
 - [ ] **Step 3: Implement**
 
@@ -12461,15 +12483,7 @@ The two ComingSoon pages (Tweaks, Lock In) take their stage from `strings.coming
 // The benchmark (Rust: crates/kestrel-bench and app/src-tauri/src/bench).
 ```
 
-`app/src-tauri/src/lib.rs`, line 1:
-
-```rust
-//! Kestrel's Tauri shell: the scan, live load and the benchmark (stage 2). It writes only inside its own folder.
-```
-→
-```rust
-//! Kestrel's Tauri shell: the scan, live load and clocks, and the benchmark. It writes only inside its own folder.
-```
+(`app/src-tauri/src/lib.rs` needs nothing: Task 14 rewrote its first line without a stage number.)
 
 `app/src-tauri/src/bench/mod.rs`, line 1:
 
@@ -12493,7 +12507,7 @@ The two ComingSoon pages (Tweaks, Lock In) take their stage from `strings.coming
 //! follow (decision 56).
 ```
 
-Leave the other hits as they are: `home.stage(n)`, `health.laterStage(n)` and `comingSoon.arrives(n)` in `strings.ts` (formatters for a number that comes from data); `FindingRow.tsx`, `Health.tsx` and `ComingSoon.tsx` (they render `fix.stage` or the `stage` prop); `types.ts`'s `{ kind: 'later-stage'; stage: number }`; `owner-report.ts`'s `stage: 6` (test data: the value Task 8 gives adapter power saving); `strings.test.ts`; and `crates/kestrel-core/src/health.rs` (Task 8 already moved its numbers to `TWEAKS_STAGE` / `COMPETITIVE_STAGE`). If an earlier stage-3 task added another comment that labels code with a stage number, give it the same treatment: name the feature instead.
+Leave the other hits as they are: `home.stage(n)`, `health.laterStage(n)` and `comingSoon.arrives(n)` in `strings.ts` (formatters for a number that comes from data); `FindingRow.tsx`, `Health.tsx` and `ComingSoon.tsx` (they render `fix.stage` or the `stage` prop); `types.ts`'s `{ kind: 'later-stage'; stage: number }`; `owner-report.ts`'s `stage: 6` (test data: the value Task 8 gives adapter power saving); `strings.test.ts` and `sample-report.test.ts`; and `crates/kestrel-core/src/health.rs` (Task 8 already moved its numbers to `TWEAKS_STAGE` / `COMPETITIVE_STAGE`). If an earlier stage-3 task added another comment that labels code with a stage number, give it the same treatment: name the feature instead.
 
 **3d. `StartMode` docs match the shipped behaviour.** `start_countdown` is offered in either mode and `canStartRun` (UI) shows Start run whenever a pass waits with the game running. In `app/src-tauri/src/bench/controller.rs`, replace
 
@@ -12580,16 +12594,10 @@ Next, in this order:
 - Stage 9: the redesign, as v1.0
 ```
 
-**3f. Regenerate the sample.** Run: `cd app && npm run mock`
-
-This runs `cargo run -q -p kestrel-probe --bin kestrel-probe -- --pretty > src/api/mock-report.json`; on the Mac the probe prints the owner fixture through Tasks 1–12's code. Check the new file: `"schemaVersion": 2`, 31 findings (`pcie-lanes` Pass "Graphics card uses all its PCIe lanes", `pcie-speed` Info "Run a benchmark to check the PCIe link under load", `resizable-bar` Pass, `virtualization` Pass), the power plan's fix with `"stage": 5` and adapter power saving's with `"stage": 6` (their texts name the same stages), the RTX 3060 Ti with `pcie` 4.0 x16 / 4.0 x16 / now 1.0 x16 and `"linkUnderLoad": null`, two displays, two drives, the guide's seven topics in the order xmp, memory-gear, update-bios, pcie-slot, resizable-bar, virtualization, iommu. `collectedAt` is now and `appVersion` stays `0.2.0` until Task 18 bumps the workspace version.
-
-Then run `cd app && npm test`. The tests that pinned the old sample still hold: `findings.test.ts` keeps its three problems (power-plan, bios-age, adapter-power), because the four new checks are Pass or Info on the owner's PC, and the labels and categories are unchanged. If one of them, or `sample-report.test.ts`, fails, compare the sample with `fixtures/owner-pc.json`: the sample (that is, Tasks 1–12) is what's wrong, not the test.
-
 - [ ] **Step 4: Verify**
 
 Run: `cd app && npm test`
-Expected: PASS — `Test Files  12 passed (12)`, `Tests  62 passed (62)`.
+Expected: PASS — `Test Files  12 passed (12)`, `Tests  63 passed (63)`.
 
 Run: `cd app && npx tsc --noEmit` and `cd app && npm run build`
 Expected: no errors; `✓ built in …`.
@@ -12605,13 +12613,13 @@ Manual check: `cd app && npm run dev`, open http://localhost:1420:
 2. Home: the Lock In card says "Arrives in stage 7"; the top fixes show "Stage 5" (power plan) and "Stage 6" (network power saving).
 3. Tweaks tab "Arrives in stage 5", Lock In tab "Arrives in stage 7", the Toolbox's last line "Fixes and the VALORANT troubleshooter arrive in stage 8."
 4. Health: the four new checks under Hardware and BIOS and Vanguard readiness; Toolbox: the two new topics.
-5. Hardware tab: the page from Task 16 on the committed sample.
+5. Hardware tab: the page from Task 16 on the sample Task 15 committed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/api/bench.ts app/src/api/bench.test.ts app/src/components/bench/ResultDetail.tsx app/src/styles/bench.css app/src/strings.ts app/src/strings.test.ts app/src/api/sample-report.test.ts app/src/api/mock-report.json app/src/components/LockInCard.tsx app/src/pages/Benchmark.tsx app/src/api/client.ts app/src/api/types.ts app/src-tauri/src/lib.rs app/src-tauri/src/bench/mod.rs app/src-tauri/src/bench/controller.rs crates/kestrel-bench/src/profile.rs README.md docs/superpowers/specs/2026-10-09-kestrel-design.md docs/superpowers/specs/2026-10-12-kestrel-stage-2-benchmark-design.md
-git commit -m "feat(app): PCIe link under load in results; stage numbers from one constant; sample report and docs follow" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add app/src/api/bench.ts app/src/api/bench.test.ts app/src/components/bench/ResultDetail.tsx app/src/styles/bench.css app/src/strings.ts app/src/strings.test.ts app/src/api/sample-report.test.ts app/src/components/LockInCard.tsx app/src/pages/Benchmark.tsx app/src/api/client.ts app/src/api/types.ts app/src-tauri/src/bench/mod.rs app/src-tauri/src/bench/controller.rs crates/kestrel-bench/src/profile.rs README.md docs/superpowers/specs/2026-10-09-kestrel-design.md docs/superpowers/specs/2026-10-12-kestrel-stage-2-benchmark-design.md
+git commit -m "feat(app): PCIe link under load in results; stage numbers from one constant; a test of the sample report; docs follow" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
