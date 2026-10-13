@@ -60,8 +60,9 @@ pub fn results_text(
                 .iter()
                 .map(|d| match d.delta_pct {
                     Some(pct) => format!(
-                        "{} {pct:+.1}% ({})",
+                        "{} {} ({})",
                         metric_text(d.metric),
+                        pct_text(pct),
                         verdict_text(d.verdict)
                     ),
                     // No percentage exists from a baseline of 0.
@@ -100,6 +101,16 @@ pub fn results_text(
         lines.push(format!("PC: {}", pc.join(", ")));
     }
     lines.join("\n")
+}
+
+/// A change in %: "+4.9%", "-1.0%", or "0.0%" when it rounds to zero, so a tiny change never reads "-0.0%" (the UI's
+/// `pct` does the same).
+fn pct_text(pct: f64) -> String {
+    if format!("{pct:.1}").trim_start_matches('-') == "0.0" {
+        "0.0%".to_string()
+    } else {
+        format!("{pct:+.1}%")
+    }
 }
 
 fn bottleneck_text(b: Bottleneck) -> &'static str {
@@ -255,6 +266,33 @@ mod tests {
         assert!(
             results_text(&later, Some(&other_route), Some("Starting point"))
                 .contains("\nNot compared with Starting point: different route\n")
+        );
+        // The sign follows the rounded digits: a change that rounds to zero reads "0.0%", never "-0.0%" or "+0.0%",
+        // while one that rounds to a visible 0.1 keeps its sign.
+        let delta = |metric, pct| MetricDelta {
+            metric,
+            baseline: 100.0,
+            current: 100.0,
+            delta_pct: Some(pct),
+            verdict: Verdict::Noise,
+        };
+        let near_zero = Comparison {
+            metrics: vec![
+                delta(MetricId::AvgFps, -0.04),
+                delta(MetricId::Low1Fps, 0.04),
+                delta(MetricId::Low01Fps, -0.0),
+                delta(MetricId::StuttersPerMin, -0.06),
+                delta(MetricId::PcLatencyMs, -1.04),
+            ],
+            ..Default::default()
+        };
+        let text = results_text(&later, Some(&near_zero), Some("Starting point"));
+        assert!(
+            text.contains(
+                "\nVersus Starting point: average FPS 0.0% (within noise), 1% low 0.0% (within noise), \
+                 0.1% low 0.0% (within noise), stutters -0.1% (within noise), PC latency -1.0% (within noise)\n"
+            ),
+            "{text}"
         );
     }
 }
