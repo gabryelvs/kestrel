@@ -101,6 +101,17 @@ impl Live {
     }
 }
 
+/// A finished session as the save needs it, taken in one look at the session: once `perform` has it, a dismiss (or a
+/// dismiss and a new start) can't take the session away from the save.
+struct Finished {
+    /// The benchmark the session's runs add up to.
+    bench: Benchmark,
+    /// Each run's frame times, or the first thing that's missing.
+    frames: Result<Vec<Vec<f32>>, String>,
+    /// Identifies the session the result belongs to (see `Live::cancel`).
+    cancel: Arc<AtomicBool>,
+}
+
 #[derive(Clone)]
 pub struct Controller {
     live: Arc<Mutex<Option<Live>>>,
@@ -329,9 +340,19 @@ impl Controller {
     }
 
     /// Gives the key back if the session is over, carries out the session's actions, and updates the UI. The key goes
-    /// first: `Finish` blocks while it saves, and F10 must not stay claimed through that.
+    /// first: `Finish` blocks while it saves, and F10 must not stay claimed through that. What `Finish` will save is
+    /// taken in the same look at the session that decides whether it's over, before anything blocks, so a dismiss
+    /// (or a dismiss and a new start) while the key is given back or the result saved can't take the session away.
     fn perform(&self, actions: Vec<Action>) {
-        let over = self.lock().as_ref().is_some_and(|l| l.session.is_over());
+        let (over, mut finished) = {
+            let guard = self.lock();
+            let over = guard.as_ref().is_some_and(|l| l.session.is_over());
+            let finished = guard
+                .as_ref()
+                .filter(|_| actions.contains(&Action::Finish))
+                .and_then(|live| self.finished_from(live));
+            (over, finished)
+        };
         if over {
             self.platform.unregister_start_key();
         }
@@ -342,7 +363,11 @@ impl Controller {
                 Action::BeepEnd => {}
                 Action::StartCapture { pass } => self.spawn_capture(pass),
                 Action::StopCapture => {} // cancel() already raised the flag the capture watches
-                Action::Finish => self.finish(),
+                Action::Finish => {
+                    if let Some(finished) = finished.take() {
+                        self.save(finished);
+                    }
+                }
             }
         }
         self.emit();
@@ -469,48 +494,56 @@ impl Controller {
         self.perform(actions);
     }
 
-    /// Combines the three runs and saves the benchmark (the first one becomes the starting point). Only a done session
-    /// without a result is saved, and the id (or a save error) goes back only to that session, even if it was
-    /// dismissed and another one started while saving.
-    fn finish(&self) {
-        let prepared = self
-            .lock()
-            .as_ref()
-            .filter(|l| l.session.phase() == &Phase::Done && l.session.view().result_id.is_none())
-            .map(|live| {
-                let runs = live.session.runs();
-                let bench = Benchmark {
-                    name: format!(
-                        "Benchmark {}",
-                        chrono::Local::now().format("%Y-%m-%d %H:%M")
-                    ),
-                    created_at: chrono::Utc::now()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    profile_id: live.profile.id.to_string(),
-                    route_version: live.profile.route.version,
-                    kestrel_version: self.kestrel_version.clone(),
-                    presentmon_version: PRESENTMON_VERSION.to_string(),
-                    result: result::combine(&runs),
-                    runs,
-                    context: live.context.clone(),
-                    ..Default::default()
-                };
-                // Every accepted run has its frame times. One without would be saved as an empty file that passes
-                // for a real run, so it fails the session instead.
-                let frames: Result<Vec<Vec<f32>>, String> = live
-                    .frames
-                    .iter()
-                    .enumerate()
-                    .map(|(i, f)| {
-                        f.clone()
-                            .ok_or_else(|| format!("run {} has no frame times.", i + 1))
-                    })
-                    .collect();
-                (bench, frames, live.cancel.clone())
-            });
-        let Some((mut bench, frames, cancel)) = prepared else {
-            return;
+    /// What saving needs from a done session that has no result yet (None for any other): the benchmark its runs add
+    /// up to, each run's frame times, and the handle that identifies the session. It makes no platform call, so
+    /// `perform` can take it with the lock held.
+    fn finished_from(&self, live: &Live) -> Option<Finished> {
+        if live.session.phase() != &Phase::Done || live.session.view().result_id.is_some() {
+            return None;
+        }
+        let runs = live.session.runs();
+        let bench = Benchmark {
+            name: format!(
+                "Benchmark {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M")
+            ),
+            created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            profile_id: live.profile.id.to_string(),
+            route_version: live.profile.route.version,
+            kestrel_version: self.kestrel_version.clone(),
+            presentmon_version: PRESENTMON_VERSION.to_string(),
+            result: result::combine(&runs),
+            runs,
+            context: live.context.clone(),
+            ..Default::default()
         };
+        // Every accepted run has its frame times. One without would be saved as an empty file that passes for a real
+        // run, so it fails the session instead.
+        let frames = live
+            .frames
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                f.clone()
+                    .ok_or_else(|| format!("run {} has no frame times.", i + 1))
+            })
+            .collect();
+        Some(Finished {
+            bench,
+            frames,
+            cancel: live.cancel.clone(),
+        })
+    }
+
+    /// Saves a finished session's benchmark (the first one becomes the starting point). The id (or a save error) goes
+    /// back only to the session it came from, even if that one was dismissed and another started meanwhile; the
+    /// benchmark is saved either way.
+    fn save(&self, finished: Finished) {
+        let Finished {
+            mut bench,
+            frames,
+            cancel,
+        } = finished;
         let saved = frames.and_then(|frames| {
             bench.context.game_settings = self.platform.game_settings();
             self.store
@@ -606,6 +639,13 @@ mod tests {
         hold_read: AtomicUsize,
         read_held: AtomicBool,
         release_read: AtomicBool,
+        /// Counts the calls that give the start key back. The call numbered `hold_unregister` (from 1; 0 holds none)
+        /// takes effect, then doesn't return until `release_unregister` is raised: a platform call that takes a
+        /// while, during which a test can act.
+        unregisters: AtomicUsize,
+        hold_unregister: AtomicUsize,
+        unregister_held: AtomicBool,
+        release_unregister: AtomicBool,
     }
 
     impl Platform for Fake {
@@ -618,6 +658,13 @@ mod tests {
         }
         fn unregister_start_key(&self) {
             self.key_held.store(false, Ordering::SeqCst);
+            let call = self.unregisters.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.hold_unregister.load(Ordering::SeqCst) {
+                self.unregister_held.store(true, Ordering::SeqCst);
+                while !self.release_unregister.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
         }
         fn game_running(&self, _process_name: &str) -> bool {
             self.game.load(Ordering::SeqCst)
@@ -1036,5 +1083,54 @@ mod tests {
         });
         assert!(c.state().is_none());
         assert!(!fake.key_held.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_quick_dismiss_and_restart_never_loses_the_saved_result() {
+        let (c, fake, _dir) = setup(fast());
+        // The first release is start()'s. The second is the one made when the last run puts the session in Done: it
+        // doesn't return until the test lets it, like a call that waits for the UI thread.
+        fake.hold_unregister.store(2, Ordering::SeqCst);
+        c.start("valorant", Context::default()).unwrap();
+        for pass in 0..4u8 {
+            wait_for(&c, "the next pass", waiting_at(pass));
+            c.start_pressed();
+        }
+        eventually("the release to be under way", || {
+            fake.unregister_held.load(Ordering::SeqCst)
+        });
+        let finished = c.state().unwrap();
+        assert_eq!(
+            (finished.session.phase, finished.session.result_id),
+            (Phase::Done, None)
+        );
+        // Meanwhile the owner dismisses the finished session and arms another one.
+        c.dismiss();
+        c.start("valorant", Context::default()).unwrap();
+        let emitted = fake.emitted.load(Ordering::SeqCst);
+        fake.release_unregister.store(true, Ordering::SeqCst);
+        eventually("the capture thread to finish", || {
+            fake.emitted.load(Ordering::SeqCst) > emitted
+        });
+        assert_eq!(
+            c.store().list().len(),
+            1,
+            "the dismissed session's result is saved"
+        );
+        let armed = c.state().unwrap();
+        assert_eq!(
+            (
+                armed.session.phase,
+                armed.session.pass,
+                armed.session.result_id
+            ),
+            (Phase::Waiting, 0, None),
+            "the new session is untouched by the old one's result"
+        );
+        assert!(
+            fake.key_held.load(Ordering::SeqCst),
+            "and keeps its start key"
+        );
+        c.cancel(); // the new session is still armed: stop its game check
     }
 }
