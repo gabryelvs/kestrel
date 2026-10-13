@@ -172,6 +172,7 @@ mod tests {
             manufacturer: String::new(),
             bank_label: bank.into(),
             device_locator: locator.into(),
+            ..Default::default()
         }
     }
 

@@ -115,6 +115,7 @@ mod tests {
             driver_date: None,
             vram_mb: vram,
             is_integrated: integrated,
+            ..Default::default()
         }
     }
 

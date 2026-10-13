@@ -56,6 +56,7 @@ pub fn fill(s: &mut SystemSnapshot) {
             width: current.dmPelsWidth,
             height: current.dmPelsHeight,
             is_primary: dev.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0,
+            ..Default::default()
         });
     }
     s.displays = displays;

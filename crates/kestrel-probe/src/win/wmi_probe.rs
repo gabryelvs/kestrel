@@ -106,7 +106,8 @@ impl Wmi {
             .iter()
             .map(|row| {
                 let name = text(row, "Name");
-                let vendor = gpu::vendor_from(&text(row, "PNPDeviceID"), &name);
+                let pnp_device_id = text(row, "PNPDeviceID");
+                let vendor = gpu::vendor_from(&pnp_device_id, &name);
                 let vram_mb = registry_probe::gpu_memory_mb(&name);
                 GpuInfo {
                     is_integrated: gpu::looks_integrated(vendor, &name, vram_mb),
@@ -115,6 +116,8 @@ impl Wmi {
                     vram_mb,
                     vendor,
                     name,
+                    pnp_device_id,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -135,6 +138,7 @@ impl Wmi {
                 manufacturer: text(row, "Manufacturer"),
                 bank_label: text(row, "BankLabel"),
                 device_locator: text(row, "DeviceLocator"),
+                ..Default::default()
             })
             .collect();
         s.memory.total_mb = s.memory.modules.iter().map(|m| m.capacity_mb).sum();

@@ -867,6 +867,7 @@ mod tests {
             height: 1080,
             is_primary: primary,
             is_virtual,
+            ..Default::default()
         }
     }
 
@@ -878,6 +879,7 @@ mod tests {
             driver_date: date.map(Into::into),
             vram_mb: Some(if integrated { 128 } else { 8192 }),
             is_integrated: integrated,
+            ..Default::default()
         }
     }
 
