@@ -4,6 +4,7 @@ pub mod bios_guide;
 pub mod cpu;
 pub mod gpu;
 pub mod health;
+pub mod pcie;
 pub mod ram;
 pub mod report;
 pub mod score;
