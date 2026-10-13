@@ -1940,6 +1940,8 @@ dependencies = [
 name = "kestrel"
 version = "0.2.0"
 dependencies = [
+ "chrono",
+ "kestrel-bench",
  "kestrel-core",
  "kestrel-probe",
  "serde",

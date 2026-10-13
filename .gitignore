@@ -4,3 +4,4 @@ app/dist/
 app/src-tauri/gen/
 .DS_Store
 *.log
+app/src-tauri/binaries/

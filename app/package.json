@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "tauri": "tauri",
-    "mock": "cargo run -q -p kestrel-probe --bin kestrel-probe -- --pretty > src/api/mock-report.json"
+    "mock": "cargo run -q -p kestrel-probe --bin kestrel-probe -- --pretty > src/api/mock-report.json",
+    "fetch:presentmon": "node scripts/fetch-presentmon.mjs"
   },
   "dependencies": {
     "@fontsource/chakra-petch": "^5.3.0",

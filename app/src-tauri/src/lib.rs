@@ -4,6 +4,8 @@ use kestrel_probe::load::{LoadSample, LoadSampler};
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
+pub mod bench;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct AppState {
