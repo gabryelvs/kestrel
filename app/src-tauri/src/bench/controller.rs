@@ -1,0 +1,887 @@
+//! Runs a benchmark session (decisions 37–49): the start key, the beeps, one capture at a time, and turning each
+//! capture into a run. The rules live in kestrel_bench::session; this file performs the actions they return. The
+//! outside world (start key, beeps, probes, events) sits behind `Platform`, so whole sessions run in tests with fakes.
+//!
+//! The platform is never called while the controller's lock is held: claiming or releasing the start key runs on the
+//! UI thread, which may be waiting for that lock to handle a key press.
+use super::beep::Cue;
+use super::capture::{Capture, CaptureOutput, CANCELLED};
+use kestrel_bench::flags::{flags, RunInputs};
+use kestrel_bench::session::{Action, Phase, Session, SessionView};
+use kestrel_bench::{
+    csv, metrics, result, Benchmark, Context, GameProfile, RunRecord, Store, ValorantSettings,
+    PRESENTMON_VERSION,
+};
+use serde::Serialize;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+/// The key that starts each pass (decision 37).
+pub const START_KEY: &str = "F10";
+/// Exists in the work folder while PresentMon runs; found at start-up, it means a crash mid-capture.
+pub const ACTIVE_MARKER: &str = "capture.active";
+const COUNTDOWN: u32 = 10;
+const BUSY: &str = "A benchmark is already running.";
+
+pub trait Platform: Send + Sync + 'static {
+    /// Claims the start key; false when another app already holds it.
+    fn register_start_key(&self) -> bool;
+    fn unregister_start_key(&self);
+    fn game_running(&self, process_name: &str) -> bool;
+    fn beep(&self, cue: Cue);
+    /// Background apps right now: name and share of the whole CPU, in %.
+    fn busy_now(&self) -> Vec<(String, f32)>;
+    fn game_settings(&self) -> Option<ValorantSettings>;
+    /// Tells the UI the session changed; None means there's no session.
+    fn emit(&self, state: Option<&BenchState>);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartMode {
+    /// The start key works.
+    Hotkey,
+    /// Another app holds the key: the UI's "Start run" button starts a 10-second countdown instead.
+    Countdown,
+}
+
+/// What the UI shows about the session.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchState {
+    #[serde(flatten)]
+    pub session: SessionView,
+    pub start_mode: StartMode,
+    pub start_key: &'static str,
+    pub capture_seconds: u32,
+    pub switch_at_seconds: u32,
+    /// Seconds left in the running capture.
+    pub seconds_left: Option<u32>,
+    /// Seconds left in the fallback countdown.
+    pub countdown: Option<u32>,
+}
+
+struct Live {
+    session: Session,
+    profile: &'static GameProfile,
+    start_mode: StartMode,
+    seconds_left: Option<u32>,
+    countdown: Option<u32>,
+    /// Raised by Cancel. Also identifies this session, so a late result from an old capture can't reach a new one.
+    cancel: Arc<AtomicBool>,
+    /// Frame times of accepted runs (index = run − 1).
+    frames: Vec<Option<Vec<f32>>>,
+    /// Frame times of a flagged run waiting for redo or keep.
+    pending_frames: Option<Vec<f32>>,
+    context: Context,
+}
+
+#[derive(Clone)]
+pub struct Controller {
+    live: Arc<Mutex<Option<Live>>>,
+    platform: Arc<dyn Platform>,
+    capture: Arc<dyn Capture>,
+    store: Arc<Store>,
+    work_dir: PathBuf,
+    kestrel_version: String,
+    /// How often the game check repeats while a session waits.
+    poll: Duration,
+    /// One step of the fallback countdown.
+    tick: Duration,
+}
+
+impl Controller {
+    pub fn new(
+        platform: Arc<dyn Platform>,
+        capture: Arc<dyn Capture>,
+        store: Arc<Store>,
+        work_dir: PathBuf,
+        kestrel_version: &str,
+    ) -> Self {
+        Self {
+            live: Arc::new(Mutex::new(None)),
+            platform,
+            capture,
+            store,
+            work_dir,
+            kestrel_version: kestrel_version.to_string(),
+            poll: Duration::from_secs(2),
+            tick: Duration::from_secs(1),
+        }
+    }
+
+    pub fn with_timing(mut self, poll: Duration, tick: Duration) -> Self {
+        self.poll = poll;
+        self.tick = tick;
+        self
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub fn game_settings(&self) -> Option<ValorantSettings> {
+        self.platform.game_settings()
+    }
+
+    pub fn state(&self) -> Option<BenchState> {
+        self.lock().as_ref().map(|live| BenchState {
+            session: live.session.view(),
+            start_mode: live.start_mode,
+            start_key: START_KEY,
+            capture_seconds: live.profile.route.capture_seconds,
+            switch_at_seconds: live.profile.route.switch_at_seconds,
+            seconds_left: live.seconds_left,
+            countdown: live.countdown,
+        })
+    }
+
+    /// Arms a session for `profile_id`. `context` describes the PC (from the last scan).
+    pub fn start(&self, profile_id: &str, context: Context) -> Result<BenchState, String> {
+        if self.busy() {
+            return Err(BUSY.into());
+        }
+        let profile =
+            kestrel_bench::profile(profile_id).ok_or("Kestrel doesn't know that game.")?;
+        // Never call the platform with the lock held (see the module docs).
+        self.platform.unregister_start_key();
+        let start_mode = if self.platform.register_start_key() {
+            StartMode::Hotkey
+        } else {
+            StartMode::Countdown
+        };
+        let mut session = Session::new(profile.id);
+        session.set_game_running(self.platform.game_running(profile.process_name));
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut live = self.lock();
+            if live.as_ref().is_some_and(|l| !l.session.is_over()) {
+                return Err(BUSY.into());
+            }
+            *live = Some(Live {
+                session,
+                profile,
+                start_mode,
+                seconds_left: None,
+                countdown: None,
+                cancel: cancel.clone(),
+                frames: vec![None; usize::from(kestrel_bench::session::RUNS)],
+                pending_frames: None,
+                context,
+            });
+        }
+        self.watch_game(profile, cancel);
+        self.emit();
+        self.state()
+            .ok_or_else(|| "The benchmark didn't start.".to_string())
+    }
+
+    /// The start key was pressed (or the countdown ended).
+    pub fn start_pressed(&self) {
+        let actions = match self.lock().as_mut() {
+            Some(live) if live.countdown.is_none() => live.session.start_pressed(),
+            _ => Vec::new(),
+        };
+        self.perform(actions);
+    }
+
+    /// Fallback when another app holds the start key: beeps for 10 seconds, then starts the pass.
+    pub fn start_countdown(&self) -> Result<(), String> {
+        let cancel = {
+            let mut guard = self.lock();
+            let live = guard.as_mut().ok_or("No benchmark is running.")?;
+            if live.session.phase() != &Phase::Waiting {
+                return Err("Wait for the current step to finish.".into());
+            }
+            if !live.session.view().game_running {
+                return Err("Start the game first.".into());
+            }
+            if live.countdown.is_some() {
+                return Ok(());
+            }
+            live.countdown = Some(COUNTDOWN);
+            live.cancel.clone()
+        };
+        self.emit();
+        let me = self.clone();
+        std::thread::spawn(move || {
+            for left in (1..=COUNTDOWN).rev() {
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                me.set_countdown(&cancel, Some(left));
+                me.platform.beep(Cue::Tick);
+                std::thread::sleep(me.tick);
+            }
+            me.set_countdown(&cancel, None);
+            if !cancel.load(Ordering::SeqCst) {
+                me.start_pressed();
+            }
+        });
+        Ok(())
+    }
+
+    /// Throws away a flagged run; the next press captures it again.
+    pub fn redo(&self) {
+        let actions = match self.lock().as_mut() {
+            Some(live) => {
+                live.pending_frames = None;
+                live.session.redo()
+            }
+            None => Vec::new(),
+        };
+        self.perform(actions);
+    }
+
+    /// Keeps a flagged run.
+    pub fn keep(&self) {
+        let actions = match self.lock().as_mut() {
+            Some(live) if matches!(live.session.phase(), Phase::Review { .. }) => {
+                let slot = usize::from(live.session.pass()) - 1;
+                live.frames[slot] = live.pending_frames.take();
+                live.session.keep()
+            }
+            _ => Vec::new(),
+        };
+        self.perform(actions);
+    }
+
+    pub fn cancel(&self) {
+        let actions = match self.lock().as_mut() {
+            Some(live) => {
+                live.cancel.store(true, Ordering::SeqCst);
+                live.countdown = None;
+                live.session.cancel()
+            }
+            None => Vec::new(),
+        };
+        self.perform(actions);
+    }
+
+    /// Clears a finished session, so the page shows the results list again.
+    pub fn dismiss(&self) {
+        let cleared = {
+            let mut guard = self.lock();
+            if guard.as_ref().is_some_and(|l| l.session.is_over()) {
+                if let Some(live) = guard.take() {
+                    live.cancel.store(true, Ordering::SeqCst);
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if cleared {
+            self.emit();
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.lock().as_ref().is_some_and(|l| !l.session.is_over())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<Live>> {
+        // A panic elsewhere must not lock the benchmark forever.
+        self.live
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn emit(&self) {
+        let state = self.state();
+        self.platform.emit(state.as_ref());
+    }
+
+    /// Carries out the session's actions, then gives the key back if the session is over, and updates the UI.
+    fn perform(&self, actions: Vec<Action>) {
+        for action in actions {
+            match action {
+                Action::BeepStart => self.platform.beep(Cue::Start),
+                // Already played by the capture thread the moment PresentMon stopped (see `spawn_capture`).
+                Action::BeepEnd => {}
+                Action::StartCapture { pass } => self.spawn_capture(pass),
+                Action::StopCapture => {} // cancel() already raised the flag the capture watches
+                Action::Finish => self.finish(),
+            }
+        }
+        let over = self.lock().as_ref().is_some_and(|l| l.session.is_over());
+        if over {
+            self.platform.unregister_start_key();
+        }
+        self.emit();
+    }
+
+    fn spawn_capture(&self, pass: u8) {
+        let Some((profile, cancel)) = self.lock().as_ref().map(|l| (l.profile, l.cancel.clone()))
+        else {
+            return;
+        };
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let done = Arc::new(AtomicBool::new(false));
+            let pacer = {
+                let (me, done, cancel) = (me.clone(), done.clone(), cancel.clone());
+                std::thread::spawn(move || me.pace(profile, &done, &cancel))
+            };
+            let _ = std::fs::create_dir_all(&me.work_dir);
+            let marker = me.work_dir.join(ACTIVE_MARKER);
+            let _ = std::fs::write(&marker, b"capturing");
+            let csv_path = me.work_dir.join(format!("capture-{pass}.csv"));
+            let outcome = me.capture.run(
+                profile.process_name,
+                profile.route.capture_seconds,
+                &csv_path,
+                &cancel,
+            );
+            let _ = std::fs::remove_file(&marker);
+            done.store(true, Ordering::SeqCst);
+            let _ = pacer.join();
+            // The double beep marks the end of the run as soon as PresentMon stops (spec: at 90 s), not after the
+            // analysis below, which samples the CPU for 1.5 s. It sounds in the cases where the session answers with
+            // `BeepEnd` (a capture that wasn't cancelled, for the session still capturing it), so `perform` skips that.
+            let cancelled = matches!(&outcome, Err(message) if message == CANCELLED);
+            if !cancelled && me.capturing(&cancel) {
+                me.platform.beep(Cue::End);
+            }
+            let outcome = outcome.and_then(|output| me.analyse(&output));
+            me.capture_finished(&cancel, pass, outcome);
+        });
+    }
+
+    /// Whether the session `cancel` belongs to is still the live one and still capturing.
+    fn capturing(&self, cancel: &Arc<AtomicBool>) -> bool {
+        self.lock().as_ref().is_some_and(|l| {
+            Arc::ptr_eq(&l.cancel, cancel) && l.session.phase() == &Phase::Capturing
+        })
+    }
+
+    /// Counts the capture down for the UI and beeps when it's time to switch to the bots.
+    fn pace(&self, profile: &GameProfile, done: &AtomicBool, cancel: &Arc<AtomicBool>) {
+        let started = Instant::now();
+        let mut switched = false;
+        while !done.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
+            let elapsed = started.elapsed().as_secs() as u32;
+            if !switched && elapsed >= profile.route.switch_at_seconds {
+                switched = true;
+                self.platform.beep(Cue::Switch);
+            }
+            self.set_seconds_left(
+                cancel,
+                Some(profile.route.capture_seconds.saturating_sub(elapsed)),
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        self.set_seconds_left(cancel, None);
+    }
+
+    fn analyse(&self, output: &CaptureOutput) -> Result<(RunRecord, Vec<f32>), String> {
+        // PresentMon writes no CSV when the game showed no frames (minimized, never in front): that's a run too
+        // short to use, which the owner can redo, not a broken session.
+        let frames = match csv::parse(&output.csv) {
+            Ok(frames) => frames,
+            Err(csv::CsvError::Empty) => Vec::new(),
+            Err(e) => return Err(format!("Couldn't read PresentMon's results ({e:?}).")),
+        };
+        let (metrics, times) = metrics::measure(&frames);
+        let busy = self.platform.busy_now();
+        let settings = self.platform.game_settings();
+        let flags = flags(&RunInputs {
+            frames: &frames,
+            metrics: &metrics,
+            stderr: &output.stderr,
+            settings: settings.as_ref(),
+            busy: &busy,
+        });
+        Ok((
+            RunRecord {
+                metrics,
+                flags,
+                kept: false,
+            },
+            times,
+        ))
+    }
+
+    fn capture_finished(
+        &self,
+        cancel: &Arc<AtomicBool>,
+        pass: u8,
+        outcome: Result<(RunRecord, Vec<f32>), String>,
+    ) {
+        let actions = {
+            let mut guard = self.lock();
+            let Some(live) = guard.as_mut().filter(|l| Arc::ptr_eq(&l.cancel, cancel)) else {
+                return;
+            };
+            match outcome {
+                Err(message) if message == CANCELLED => Vec::new(),
+                Err(message) => live.session.capture_finished(Err(message)),
+                Ok((run, times)) => {
+                    if pass > 0 {
+                        let slot = usize::from(pass) - 1;
+                        if run.flags.is_empty() {
+                            live.frames[slot] = Some(times);
+                        } else {
+                            live.pending_frames = Some(times);
+                        }
+                    }
+                    live.session.capture_finished(Ok(run))
+                }
+            }
+        };
+        self.perform(actions);
+    }
+
+    /// Combines the three runs and saves the benchmark (the first one becomes the starting point). Only a done session
+    /// without a result is saved, and the id (or a save error) goes back only to that session, even if it was
+    /// dismissed and another one started while saving.
+    fn finish(&self) {
+        let prepared = self
+            .lock()
+            .as_ref()
+            .filter(|l| l.session.phase() == &Phase::Done && l.session.view().result_id.is_none())
+            .map(|live| {
+                let runs = live.session.runs();
+                let bench = Benchmark {
+                    name: format!(
+                        "Benchmark {}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M")
+                    ),
+                    created_at: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    profile_id: live.profile.id.to_string(),
+                    route_version: live.profile.route.version,
+                    kestrel_version: self.kestrel_version.clone(),
+                    presentmon_version: PRESENTMON_VERSION.to_string(),
+                    result: result::combine(&runs),
+                    runs,
+                    context: live.context.clone(),
+                    ..Default::default()
+                };
+                let frames: Vec<Vec<f32>> = live
+                    .frames
+                    .iter()
+                    .map(|f| f.clone().unwrap_or_default())
+                    .collect();
+                (bench, frames, live.cancel.clone())
+            });
+        let Some((mut bench, frames, cancel)) = prepared else {
+            return;
+        };
+        bench.context.game_settings = self.platform.game_settings();
+        let saved = self.store.save(&mut bench, &frames);
+        if let Some(live) = self
+            .lock()
+            .as_mut()
+            .filter(|l| Arc::ptr_eq(&l.cancel, &cancel))
+        {
+            match saved {
+                Ok(id) => live.session.set_result_id(id),
+                Err(e) => live.session.fail(format!("Couldn't save the result: {e}")),
+            }
+        }
+    }
+
+    /// Re-checks whether the game runs until the session ends.
+    fn watch_game(&self, profile: &'static GameProfile, cancel: Arc<AtomicBool>) {
+        let me = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(me.poll);
+            if cancel.load(Ordering::SeqCst) {
+                return;
+            }
+            let running = me.platform.game_running(profile.process_name);
+            let changed = {
+                let mut guard = me.lock();
+                match guard.as_mut().filter(|l| Arc::ptr_eq(&l.cancel, &cancel)) {
+                    None => return,
+                    Some(live) if live.session.is_over() => return,
+                    Some(live) if live.session.view().game_running != running => {
+                        live.session.set_game_running(running);
+                        true
+                    }
+                    Some(_) => false,
+                }
+            };
+            if changed {
+                me.emit();
+            }
+        });
+    }
+
+    fn set_seconds_left(&self, cancel: &Arc<AtomicBool>, value: Option<u32>) {
+        let changed = match self
+            .lock()
+            .as_mut()
+            .filter(|l| Arc::ptr_eq(&l.cancel, cancel))
+        {
+            Some(live) if live.seconds_left != value => {
+                live.seconds_left = value;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.emit();
+        }
+    }
+
+    fn set_countdown(&self, cancel: &Arc<AtomicBool>, value: Option<u32>) {
+        if let Some(live) = self
+            .lock()
+            .as_mut()
+            .filter(|l| Arc::ptr_eq(&l.cancel, cancel))
+        {
+            live.countdown = value;
+        }
+        self.emit();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bench::capture::Simulated;
+    use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Default)]
+    struct Fake {
+        key_free: AtomicBool,
+        key_held: AtomicBool,
+        game: AtomicBool,
+        beeps: Mutex<Vec<Cue>>,
+        busy: Mutex<Vec<(String, f32)>>,
+        emitted: AtomicUsize,
+    }
+
+    impl Platform for Fake {
+        fn register_start_key(&self) -> bool {
+            let free = self.key_free.load(Ordering::SeqCst);
+            if free {
+                self.key_held.store(true, Ordering::SeqCst);
+            }
+            free
+        }
+        fn unregister_start_key(&self) {
+            self.key_held.store(false, Ordering::SeqCst);
+        }
+        fn game_running(&self, _process_name: &str) -> bool {
+            self.game.load(Ordering::SeqCst)
+        }
+        fn beep(&self, cue: Cue) {
+            self.beeps.lock().unwrap().push(cue);
+        }
+        fn busy_now(&self) -> Vec<(String, f32)> {
+            self.busy.lock().unwrap().clone()
+        }
+        fn game_settings(&self) -> Option<ValorantSettings> {
+            Some(ValorantSettings {
+                resolution: Some([1920, 1080]),
+                ..Default::default()
+            })
+        }
+        fn emit(&self, _state: Option<&BenchState>) {
+            self.emitted.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Never finishes on its own: returns only when cancelled.
+    #[derive(Default)]
+    struct Blocking {
+        started: AtomicBool,
+    }
+
+    impl Capture for Blocking {
+        fn run(
+            &self,
+            _p: &str,
+            _s: u32,
+            _c: &Path,
+            cancel: &AtomicBool,
+        ) -> Result<CaptureOutput, String> {
+            self.started.store(true, Ordering::SeqCst);
+            while !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(CANCELLED.into())
+        }
+        fn clean_up_stale_session(&self) {}
+    }
+
+    fn setup(capture: Arc<dyn Capture>) -> (Controller, Arc<Fake>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(Fake::default());
+        fake.key_free.store(true, Ordering::SeqCst);
+        fake.game.store(true, Ordering::SeqCst);
+        let store = Arc::new(Store::new(dir.path().join("benchmarks")));
+        let controller = Controller::new(
+            fake.clone(),
+            capture,
+            store,
+            dir.path().join("work"),
+            "0.2.0",
+        )
+        .with_timing(Duration::from_millis(10), Duration::from_millis(1));
+        (controller, fake, dir)
+    }
+
+    fn fast() -> Arc<dyn Capture> {
+        Arc::new(Simulated {
+            seconds_per_capture: 0.0,
+        })
+    }
+
+    fn wait_for(c: &Controller, what: &str, check: impl Fn(&BenchState) -> bool) -> BenchState {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(state) = c.state() {
+                if check(&state) {
+                    return state;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}: {:?}",
+                c.state()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn eventually(what: &str, check: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !check() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn waiting_at(pass: u8) -> impl Fn(&BenchState) -> bool {
+        move |s| s.session.phase == Phase::Waiting && s.session.pass == pass
+    }
+
+    #[test]
+    fn a_whole_session_saves_the_starting_point() {
+        let (c, fake, _dir) = setup(fast());
+        let state = c
+            .start(
+                "valorant",
+                Context {
+                    windows_build: 26200,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                state.session.pass,
+                state.start_mode,
+                state.session.game_running
+            ),
+            (0, StartMode::Hotkey, true)
+        );
+        assert_eq!(
+            (
+                state.start_key,
+                state.capture_seconds,
+                state.switch_at_seconds
+            ),
+            ("F10", 90, 30)
+        );
+        assert!(fake.key_held.load(Ordering::SeqCst));
+        for pass in 0..3u8 {
+            wait_for(&c, "the next pass", waiting_at(pass));
+            c.start_pressed();
+        }
+        wait_for(&c, "run 3", waiting_at(3));
+        c.start_pressed();
+        let done = wait_for(&c, "the saved result", |s| {
+            s.session.phase == Phase::Done && s.session.result_id.is_some()
+        });
+        let id = done.session.result_id.unwrap();
+        let saved = c.store().get(&id).unwrap();
+        assert_eq!(saved.name, kestrel_bench::STARTING_POINT);
+        assert_eq!(saved.runs.len(), 3);
+        assert!(saved.runs.iter().all(|r| r.flags.is_empty() && !r.kept));
+        assert_eq!(saved.context.windows_build, 26200);
+        assert_eq!(
+            saved.context.game_settings.unwrap().resolution,
+            Some([1920, 1080])
+        );
+        assert_eq!(
+            (
+                saved.kestrel_version.as_str(),
+                saved.presentmon_version.as_str()
+            ),
+            ("0.2.0", "2.6.0")
+        );
+        assert!(c.store().frame_times(&id, 3).unwrap().len() > 30_000);
+        eventually("the start key to be given back", || {
+            !fake.key_held.load(Ordering::SeqCst)
+        });
+        let beeps = fake.beeps.lock().unwrap();
+        assert_eq!(beeps.iter().filter(|&&b| b == Cue::Start).count(), 4);
+        assert_eq!(beeps.iter().filter(|&&b| b == Cue::End).count(), 4);
+        assert!(fake.emitted.load(Ordering::SeqCst) > 8);
+    }
+
+    #[test]
+    fn a_flagged_run_waits_and_can_be_kept_or_redone() {
+        let (c, fake, _dir) = setup(fast());
+        *fake.busy.lock().unwrap() = vec![("chrome.exe".into(), 30.0)];
+        c.start("valorant", Context::default()).unwrap();
+        c.start_pressed();
+        wait_for(&c, "run 1", waiting_at(1));
+        c.start_pressed();
+        let review = wait_for(&c, "review", |s| {
+            matches!(s.session.phase, Phase::Review { .. })
+        });
+        assert_eq!(
+            review.session.phase,
+            Phase::Review {
+                flags: vec![kestrel_bench::Flag::BusyBackground {
+                    name: "chrome.exe".into()
+                }]
+            }
+        );
+        c.redo();
+        wait_for(&c, "run 1 again", waiting_at(1));
+        c.start_pressed();
+        wait_for(&c, "review again", |s| {
+            matches!(s.session.phase, Phase::Review { .. })
+        });
+        c.keep();
+        wait_for(&c, "run 2", waiting_at(2));
+        fake.busy.lock().unwrap().clear();
+        c.start_pressed();
+        wait_for(&c, "run 3", waiting_at(3));
+        c.start_pressed();
+        let done = wait_for(&c, "done", |s| s.session.result_id.is_some());
+        let id = done.session.result_id.unwrap();
+        let saved = c.store().get(&id).unwrap();
+        assert!(saved.runs[0].kept && !saved.runs[1].kept);
+        assert!(
+            !c.store().frame_times(&id, 1).unwrap().is_empty(),
+            "the kept run's frames were saved"
+        );
+    }
+
+    #[test]
+    fn cancel_during_capture_stops_it() {
+        let blocking = Arc::new(Blocking::default());
+        let (c, fake, dir) = setup(blocking.clone());
+        c.start("valorant", Context::default()).unwrap();
+        c.start_pressed();
+        wait_for(&c, "the capture", |s| s.session.phase == Phase::Capturing);
+        eventually("the capture to start", || {
+            blocking.started.load(Ordering::SeqCst)
+        });
+        assert!(
+            dir.path().join("work").join(ACTIVE_MARKER).exists(),
+            "a marker exists while capturing"
+        );
+        c.cancel();
+        wait_for(&c, "cancelled", |s| s.session.phase == Phase::Cancelled);
+        eventually("the marker to go", || {
+            !dir.path().join("work").join(ACTIVE_MARKER).exists()
+        });
+        eventually("the key to be given back", || {
+            !fake.key_held.load(Ordering::SeqCst)
+        });
+        assert!(c.store().list().is_empty());
+        c.dismiss();
+        assert!(c.state().is_none());
+    }
+
+    #[test]
+    fn nothing_starts_until_the_game_runs() {
+        let (c, fake, _dir) = setup(fast());
+        fake.game.store(false, Ordering::SeqCst);
+        assert!(
+            !c.start("valorant", Context::default())
+                .unwrap()
+                .session
+                .game_running
+        );
+        c.start_pressed();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(c.state().unwrap().session.phase, Phase::Waiting);
+        assert!(fake.beeps.lock().unwrap().is_empty());
+        fake.game.store(true, Ordering::SeqCst);
+        wait_for(&c, "the game to be seen", |s| s.session.game_running);
+        c.start_pressed();
+        wait_for(&c, "run 1", waiting_at(1));
+    }
+
+    #[test]
+    fn a_taken_key_falls_back_to_a_countdown() {
+        let (c, fake, _dir) = setup(fast());
+        fake.key_free.store(false, Ordering::SeqCst);
+        assert_eq!(
+            c.start("valorant", Context::default()).unwrap().start_mode,
+            StartMode::Countdown
+        );
+        c.start_countdown().unwrap();
+        wait_for(&c, "run 1 after the countdown", waiting_at(1));
+        assert_eq!(
+            fake.beeps
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|&&b| b == Cue::Tick)
+                .count(),
+            10
+        );
+        assert!(c.state().unwrap().countdown.is_none());
+    }
+
+    #[test]
+    fn one_session_at_a_time() {
+        let (c, _fake, _dir) = setup(fast());
+        c.start("valorant", Context::default()).unwrap();
+        assert_eq!(
+            c.start("valorant", Context::default()).unwrap_err(),
+            "A benchmark is already running."
+        );
+        assert_eq!(
+            c.start("fivem", Context::default()).unwrap_err(),
+            "A benchmark is already running."
+        );
+        c.cancel();
+        assert!(c
+            .start("fivem", Context::default())
+            .unwrap_err()
+            .contains("doesn't know"));
+        assert!(
+            c.start("valorant", Context::default()).is_ok(),
+            "a cancelled session can be replaced"
+        );
+    }
+
+    #[test]
+    fn a_capture_without_frames_is_a_short_run() {
+        let (c, _fake, _dir) = setup(fast());
+        let empty = CaptureOutput {
+            csv: String::new(),
+            stderr: String::new(),
+        };
+        let (record, times) = c.analyse(&empty).unwrap();
+        assert_eq!(
+            record.flags,
+            vec![kestrel_bench::Flag::TooShort],
+            "the owner can redo it"
+        );
+        assert!(times.is_empty());
+        let no_frame_times = CaptureOutput {
+            csv: "Application,PresentMode\nx,y\n".into(),
+            stderr: String::new(),
+        };
+        assert!(
+            c.analyse(&no_frame_times).is_err(),
+            "a CSV without frame times is an error"
+        );
+    }
+}
