@@ -23,6 +23,7 @@ export const strings = {
     noBenchmark: 'No benchmark yet. Measure your starting point in the Range: about 6 minutes.',
     runStartingPoint: 'Run starting point',
     seeBenchmarks: 'See benchmarks',
+    benchmarksFailed: 'Couldn’t load your benchmarks.',
     rescan: 'Scan again',
     help: 'Help on GitHub',
   },

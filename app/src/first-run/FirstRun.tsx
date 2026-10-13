@@ -7,7 +7,7 @@ import { strings } from '../strings';
 
 type Phase = { name: 'welcome'; error?: string } | { name: 'scanning' } | { name: 'result'; report: Report };
 
-/** Spec decision 22, stage-1 version: welcome → scan → what Kestrel found → home. */
+/** Spec decision 22: welcome → scan → what Kestrel found → home, or the Benchmark tab to measure the starting point. */
 export function FirstRun({ onDone }: { onDone: (report: Report, next: 'home' | 'benchmark') => void }) {
   const [phase, setPhase] = useState<Phase>({ name: 'welcome' });
   const [step, setStep] = useState(0);

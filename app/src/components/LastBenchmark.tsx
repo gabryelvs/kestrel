@@ -5,23 +5,29 @@ import type { BenchDetail } from '../api/types';
 import { strings } from '../strings';
 import type { Tab } from './TitleBar';
 
+/** A load in progress, no benchmarks yet, a failed load, or the newest benchmark. */
+type Load = { state: 'loading' } | { state: 'none' } | { state: 'failed' } | { state: 'ready'; detail: BenchDetail };
+
 /** The latest benchmark against the baseline, or a nudge to measure the starting point. */
 export function LastBenchmark({ onTab }: { onTab: (tab: Tab) => void }) {
-  const [detail, setDetail] = useState<BenchDetail | null | undefined>(undefined);
+  const [load, setLoad] = useState<Load>({ state: 'loading' });
 
   useEffect(() => {
     let alive = true;
     void benchList()
       .then((list) => (list[0] ? benchGet(list[0].id) : null))
-      .then((d) => alive && setDetail(d), () => alive && setDetail(null));
+      .then(
+        (d) => alive && setLoad(d ? { state: 'ready', detail: d } : { state: 'none' }),
+        () => alive && setLoad({ state: 'failed' }),
+      );
     return () => {
       alive = false;
     };
   }, []);
 
   const h = strings.home;
-  if (detail === undefined) return <section className="panel home-bench" />;
-  if (detail === null) {
+  if (load.state === 'loading') return <section className="panel home-bench" />;
+  if (load.state === 'none') {
     return (
       <section className="panel home-bench">
         <div className="label">{h.lastBenchmark}</div>
@@ -32,6 +38,18 @@ export function LastBenchmark({ onTab }: { onTab: (tab: Tab) => void }) {
       </section>
     );
   }
+  if (load.state === 'failed') {
+    return (
+      <section className="panel home-bench">
+        <div className="label">{h.lastBenchmark}</div>
+        <p className="muted small">{h.benchmarksFailed}</p>
+        <div>
+          <button className="link" onClick={() => onTab('benchmark')}>{h.seeBenchmarks}</button>
+        </div>
+      </section>
+    );
+  }
+  const { detail } = load;
   const m = detail.benchmark.result.metrics;
   const delta = (id: 'avg-fps' | 'low1-fps') => detail.comparison?.metrics.find((d) => d.metric === id);
   return (
@@ -50,6 +68,9 @@ export function LastBenchmark({ onTab }: { onTab: (tab: Tab) => void }) {
         })}
         <button className="link" onClick={() => onTab('benchmark')}>{h.seeBenchmarks}</button>
       </div>
+      {detail.comparison && detail.baselineName !== null && (
+        <p className="muted small">{strings.bench.versus(detail.baselineName)}</p>
+      )}
     </section>
   );
 }
