@@ -3226,6 +3226,17 @@ mod tests {
         assert!(c.start("fivem", Context::default()).unwrap_err().contains("doesn't know"));
         assert!(c.start("valorant", Context::default()).is_ok(), "a cancelled session can be replaced");
     }
+
+    #[test]
+    fn a_capture_without_frames_is_a_short_run() {
+        let (c, _fake, _dir) = setup(fast());
+        let empty = CaptureOutput { csv: String::new(), stderr: String::new() };
+        let (record, times) = c.analyse(&empty).unwrap();
+        assert_eq!(record.flags, vec![kestrel_bench::Flag::TooShort], "the owner can redo it");
+        assert!(times.is_empty());
+        let no_frame_times = CaptureOutput { csv: "Application,PresentMode\nx,y\n".into(), stderr: String::new() };
+        assert!(c.analyse(&no_frame_times).is_err(), "a CSV without frame times is an error");
+    }
 }
 ```
 
@@ -3591,7 +3602,13 @@ impl Controller {
     }
 
     fn analyse(&self, output: &CaptureOutput) -> Result<(RunRecord, Vec<f32>), String> {
-        let frames = csv::parse(&output.csv).map_err(|e| format!("Couldn't read PresentMon's results ({e:?})."))?;
+        // PresentMon writes no CSV when the game showed no frames (minimized, never in front): that's a run too
+        // short to use, which the owner can redo, not a broken session.
+        let frames = match csv::parse(&output.csv) {
+            Ok(frames) => frames,
+            Err(csv::CsvError::Empty) => Vec::new(),
+            Err(e) => return Err(format!("Couldn't read PresentMon's results ({e:?}).")),
+        };
         let (metrics, times) = metrics::measure(&frames);
         let busy = self.platform.busy_now();
         let settings = self.platform.game_settings();
@@ -3716,7 +3733,7 @@ impl Controller {
 - [ ] **Step 3: Run the tests**
 
 Run: `cargo test -p kestrel bench:: && cargo clippy -p kestrel --all-targets -- -D warnings && cargo fmt -p kestrel`
-Expected: `10 passed` (4 from Task 11 + 6); clippy clean. If a timing test is slow on CI it has 20 s of headroom; it should finish in well under a second.
+Expected: `12 passed` (5 from Task 11 + 7); clippy clean. If a timing test is slow on CI it has 20 s of headroom; it should finish in well under a second.
 
 - [ ] **Step 4: Commit**
 
@@ -4174,7 +4191,7 @@ pub fn run() {
 - [ ] **Step 4: Run the tests and a Mac smoke run**
 
 Run: `cargo test -p kestrel && cargo clippy -p kestrel --all-targets -- -D warnings && cargo fmt -p kestrel && cargo build -p kestrel`
-Expected: `12 passed`; clippy clean; build succeeds.
+Expected: `14 passed`; clippy clean; build succeeds.
 
 Run (optional manual check on the Mac): `cd app && KESTREL_FAKE_GAME=1 npm run tauri dev`, then in the window's devtools console:
 `await window.__TAURI_INTERNALS__.invoke('bench_start', { profile: 'valorant' })` → a state with `"phase": "waiting"`, `"gameRunning": true`. Close the window afterwards.
