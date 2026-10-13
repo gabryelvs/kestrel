@@ -3,6 +3,7 @@
 pub mod bios_guide;
 pub mod cpu;
 pub mod gpu;
+pub mod hardware;
 pub mod health;
 pub mod pcie;
 pub mod ram;
