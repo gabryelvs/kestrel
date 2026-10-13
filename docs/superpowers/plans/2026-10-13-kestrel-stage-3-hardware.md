@@ -807,7 +807,7 @@ Replace `crates/kestrel-core/fixtures/owner-pc.json` with the owner's PC in sche
   "schemaVersion": 2,
   "collectedAt": "2026-10-09T16:30:00Z",
   "os": { "caption": "Microsoft Windows 11 Pro", "build": 26200, "displayVersion": "25H2" },
-  "machine": { "formFactor": "desktop", "manufacturer": "ASUS", "model": "System Product Name", "onBattery": null },
+  "machine": { "formFactor": "desktop", "manufacturer": "ASUS", "model": "", "onBattery": null },
   "cpu": {
     "name": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz", "vendor": "intel", "cores": 8, "threads": 16,
     "family": 6, "model": 167, "stepping": 1, "codename": "Rocket Lake-S", "socket": "LGA1200",
