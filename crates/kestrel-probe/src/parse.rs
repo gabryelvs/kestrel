@@ -197,7 +197,7 @@ pub fn busy_processes(samples: Vec<(String, f32)>, logical_cpus: u32) -> Vec<Bus
     busy
 }
 
-/// A NUL-terminated UTF-16 buffer (like a Toolhelp32 entry's exe name) → text up to the first NUL.
+/// A NUL-terminated UTF-16 buffer (a Toolhelp32 entry's exe name, a display device's name) → text up to the first NUL.
 pub fn exe_name(buffer: &[u16]) -> String {
     let end = buffer
         .iter()
