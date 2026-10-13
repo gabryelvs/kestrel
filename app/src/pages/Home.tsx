@@ -3,6 +3,7 @@ import { openLink } from '../api/client';
 import type { BiosTopic, Report } from '../api/types';
 import { CopyDiagnostics } from '../components/CopyDiagnostics';
 import { HardwarePanel } from '../components/HardwarePanel';
+import { LastBenchmark } from '../components/LastBenchmark';
 import { LoadGraph } from '../components/LoadGraph';
 import { LockInCard } from '../components/LockInCard';
 import { ScoreCard } from '../components/ScoreCard';
@@ -20,10 +21,7 @@ export function Home({ report, onTab, onGuide, onRescan }: Props) {
         <LockInCard />
         <LoadGraph />
       </div>
-      <section className="panel home-bench">
-        <div className="label">{strings.home.lastBenchmark}</div>
-        <p className="muted small">{strings.home.noBenchmark}</p>
-      </section>
+      <LastBenchmark onTab={onTab} />
       <footer className="home-footer">
         <CopyDiagnostics />
         <button className="btn btn-ghost cut-s" onClick={onRescan}>

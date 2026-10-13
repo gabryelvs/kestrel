@@ -5,19 +5,21 @@ https://claude.ai/artifact/G53gWshuJMv9FeQpzwEaNf. This file is the in-repo copy
 
 ## What it is
 
-Kestrel is a free Windows FPS optimiser for VALORANT, shared with friends, built so it can go
-public later. It detects the PC's hardware, finds misconfigurations (Health Check), applies
+Kestrel is a free Windows FPS optimiser, shared with friends, built so it can go public later.
+VALORANT comes first; FiveM, Rainbow Six Siege and Call of Duty: Warzone follow as game profiles
+(decisions 55, 56, 62). It detects the PC's hardware, finds misconfigurations (Health Check), applies
 reversible tweaks picked for that hardware (Smart Plan), runs a while-you-play booster (Lock In),
-and proves gains with a benchmark. Kestrel is not affiliated with Riot Games.
+and proves gains with a benchmark. Kestrel is not affiliated with Riot Games, Cfx.re/Rockstar
+Games, Ubisoft or Activision.
 
 ## Product decisions
 
 | # | Topic | Decision |
 | --- | --- | --- |
 | 1 | Audience | Owner + friends, free; can go public later |
-| 2 | Games | VALORANT first; other games later as profiles |
+| 2 | Games | VALORANT first; then FiveM, Rainbow Six Siege and Warzone as game profiles (revised by 55, 56, 62) |
 | 3 | Tweak tiers | Essential (default), Competitive (opt-in), Extreme (opt-in, warning each); each tweak explained, impact-labelled, reversible |
-| 3 | Never does | Read/write the game's memory or inject; load its own kernel driver; touch Vanguard (vgc/vgk); advise turning off TPM or Secure Boot; permanently disable Defender, UAC or Windows Update |
+| 3 | Never does | Read/write any game's memory or inject; load its own kernel driver; touch Vanguard (vgc/vgk) or any other anti-cheat; modify game files; advise turning off TPM or Secure Boot; permanently disable Defender, UAC or Windows Update; on a PC with FiveM, stop or disable Windows services or clean traces (decision 61) |
 | 4 | Detection | Info + Health Check + Smart Plan (explains why each tweak was picked) |
 | 5 | Apply model | Permanent tweaks + opt-in Lock In booster |
 | 6 | Measuring | Before/after benchmark with PresentMon (ETW, passive) |
@@ -47,16 +49,46 @@ and proves gains with a benchmark. Kestrel is not affiliated with Riot Games.
 | 34 | VALORANT settings | Guide + read-only check of the local settings file; never written |
 | 35 | FPS cap | Uncapped, NVIDIA Reflex On + Boost |
 
+### Decisions of 2026-10-10 to 2026-10-12
+
+| # | Topic | Decision |
+| --- | --- | --- |
+| 36–50 | Benchmark | See `2026-10-12-kestrel-stage-2-benchmark-design.md` (PresentMon 2.6.0, Range Route v1, warm-up + 3 runs, starting point, real-or-noise comparisons) |
+| 51 | Hardware & BIOS | Its own stage, right after the benchmark |
+| 52 | Hardware tab | CPU-Z-style tab showing everything readable without a kernel driver: CPU (codename, cores, caches, live per-core clock), board and BIOS, memory per module, GPU with PCIe link. No timings, voltages or CPU temperature (they need a driver) |
+| 53 | BIOS checks | New Health Check items: GPU below its PCIe link, Resizable BAR off (where Windows reports it), virtualization off; each with a BIOS-guide section for the owner's board |
+| 54 | CPU score | No CPU-Z-style CPU benchmark |
+| 55 | Multi-game | Everything from stage 2 on is built on game profiles; VALORANT stays the first complete game |
+| 56 | Game order | VALORANT → FiveM → Rainbow Six Siege → Call of Duty |
+| 57 | FiveM goals | Low FPS, stutter while moving around the city, crashes |
+| 58 | Game settings writes | Allowed for FiveM/GTA V (graphics settings and FiveM's own config) with automatic backup and undo, game closed only; VALORANT stays read-only; R6 and Warzone decided in their stage |
+| 59 | Other benchmarks | The game's built-in benchmark where it has one; FiveM gets a 90-second free capture, comparable only on the same server |
+| 60 | Stage 2 design | Approved |
+| 61 | Telagem safety | FiveM RP staff inspect players' PCs ("telagem") and treat stopped services, cleaned traces or edited forensic registry keys as hiding cheats. When FiveM is installed, Kestrel never stops or disables a Windows service and never cleans traces, PC-wide; if FiveM appears after such tweaks, Kestrel warns and offers to undo them. Without FiveM, service tweaks stay opt-in. A "Kestrel report" lists every change for everyone |
+| 62 | Call of Duty | Warzone |
+| 63 | Animation | Animated UI that pauses while a game runs or Kestrel is in the background, respects reduced motion, and has an off switch |
+| 64 | Redesign timing | The visual redesign is the last stage; the owner designs it in Claude Design (handoff: `docs/superpowers/notes/2026-10-12-claude-design-handoff.md`) |
+| 65 | Home hero | Decided in the owner's Claude Design work (preview options: particle falcon, tactical radar, wind currents) |
+| 66 | Stage order | As in the table below |
+| 67 | Redesign handoff | Arrived 2026-10-12 (Claude Design "Kestrel Redesign v4"): icon rail, status bar, HUD look, a motion system that pauses while a game is in front; Home hero is a hex shield over a rotating radar sweep (settles 65). The redesign stays the last stage (64) |
+| 68 | Benchmark in the redesign | Keeps the approved stage-2 flow (warm-up + 3 runs on Route v1, F10, beeps, review, starting point, real gain vs noise) in the design's visual language: an overlay per pass with ring and timer, a before→after chart, history. No live FPS during a pass |
+| 69 | Multi-game copy | The redesign's copy is game-neutral ("FPS optimiser for your games", "While your game runs"); animations pause when any supported game (VALORANT, FiveM, Rainbow Six Siege, Warzone) is in the foreground, found from the foreground window's process id in a Toolhelp32 snapshot (no handle to the game) |
+| 70 | Design data | Real data in the redesign stage: points per finding from `kestrel-core` ("What if you fix"), Kestrel's own CPU and RAM in the status bar, and status, note and menu path per BIOS-guide topic (menu paths only for boards Kestrel knows, ASUS first; hidden otherwise) |
+| 71 | Handoff in the repo | When the redesign stage starts, the handoff is copied to `docs/design/redesign-v4/` (public in the repo) |
+
 ## Stages
 
 | Stage | Contents |
 | --- | --- |
-| 1 | App shell, hardware detection, Health Check, BIOS guide, Copy diagnostics. Read-only. |
-| 2 | Benchmark |
-| 3 | Tweak engine, undo journal, restore points, Essential tier, Smart Plan |
-| 4 | Competitive + Extreme tiers, NVIDIA profile, network, debloat |
-| 5 | Lock In |
-| 6 | Fixes, VALORANT troubleshooter, auto-update, installer polish → v1.0 |
+| 1 | App shell, hardware detection, Health Check, BIOS guide, Copy diagnostics. Read-only. (v0.1.0, done) |
+| 2 | Benchmark, built on game profiles, VALORANT first |
+| 3 | Hardware & BIOS: Hardware tab and BIOS checks (51–53) |
+| 4 | Game profiles: FiveM, Rainbow Six Siege, Warzone (detection, checks, benchmarks); telagem safety (61) |
+| 5 | Tweak engine, undo journal, restore points, Essential tier, Smart Plan, Kestrel report |
+| 6 | Competitive + Extreme tiers, NVIDIA profiles per game, network, debloat, FiveM/GTA V settings (58) |
+| 7 | Lock In |
+| 8 | Fixes, troubleshooters per game, auto-update, installer polish |
+| 9 | Visual redesign from the owner's Claude Design work (63–65) → v1.0 |
 
 ## Health Check (all read-only)
 
@@ -79,8 +111,8 @@ recording off (Game Bar stays); Win11 "Optimizations for windowed games" on; NVI
 
 Competitive: VALORANT High CPU priority via IFEO PerfOptions (skipped under 6 cores); adapter power
 saving / EEE / interrupt moderation off; Delivery Optimization internet uploads off; QoS DSCP 46 for
-VALORANT; trim unused services (Fax, Remote Registry, Print Spooler without printer…); HAGS and
-fullscreen-optimizations toggles decided by the benchmark.
+VALORANT; trim unused services (Fax, Remote Registry, Print Spooler without printer…; opt-in, never on
+a PC with FiveM — decision 61); HAGS and fullscreen-optimizations toggles decided by the benchmark.
 
 Extreme: Memory Integrity/VBS off (decision 29); 0.5 ms timer resolution during Lock In (unproven).
 
@@ -88,16 +120,19 @@ Left out on purpose: Defender/UAC/Windows Update off; Spectre/Meltdown mitigatio
 edits; Nagle/TcpAckFrequency/TCP autotuning; HPET/dynamic-tick boot tweaks; clearing shader caches;
 removing Xbox Game Bar; third-party timer or memory-cleaner drivers.
 
-## Lock In (stage 5)
+## Lock In (stage 7)
 
-Kestrel power plan; pause Windows Search indexing and Windows Update downloads; close user-chosen
+Kestrel power plan; pause Windows Search indexing and Windows Update downloads (not on a PC with
+FiveM — decision 61); close user-chosen
 apps (none by default); purge standby memory when free RAM is low on PCs with ≤16 GB; 0.5 ms timer
 resolution only if that Extreme tweak is on; never touches VALORANT or Vanguard processes; everything
-reverted on game exit or at next start-up after a crash.
+reverted on game exit or at next start-up after a crash. The redesign mock-up's "Raise VALORANT
+priority to High" row is not built: changing a game's priority needs a handle to the game process.
 
 ## Known limits
 
-- No CPU temperature (needs a kernel driver; Vanguard blocks those). GPU temperature on NVIDIA via NVML.
+- No CPU temperature, memory timings or voltages (they need a kernel driver; Vanguard blocks those).
+  GPU temperature on NVIDIA via NVML.
 - RAM rated speed comes from the module part number; unusual kits may be missed (reported as Unknown).
 - Windows 10 untested. Unsigned builds show SmartScreen on first install.
 

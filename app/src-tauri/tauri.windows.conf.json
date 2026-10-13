@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "binaries/PresentMon-2.6.0-x64.exe": "presentmon/PresentMon.exe",
+      "binaries/PresentMon-LICENSE.txt": "presentmon/LICENSE.txt"
+    }
+  }
+}

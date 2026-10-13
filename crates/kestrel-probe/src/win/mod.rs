@@ -4,7 +4,7 @@ mod firmware;
 pub(crate) mod gpu_usage;
 mod pdh;
 mod registry_probe;
-mod system_info;
+pub(crate) mod system_info;
 mod wmi_probe;
 
 use kestrel_core::{valorant, ProbeError, SystemSnapshot, ValorantInstall, SCHEMA_VERSION};
