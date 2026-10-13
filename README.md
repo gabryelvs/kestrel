@@ -32,6 +32,8 @@ Stage 1 (v0.1.0): hardware detection, Health Check and BIOS guide.
 
 Plans live in `docs/superpowers/plans/`. Windows builds run on GitHub Actions.
 
+Before `tauri dev` or `tauri build` on Windows, run `npm run fetch:presentmon` in `app/`: it downloads the pinned PresentMon that ships inside Kestrel, and the build fails without it.
+
 ## Licence
 
 GPL-3.0. See [LICENSE](LICENSE).
