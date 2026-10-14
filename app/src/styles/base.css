@@ -14,6 +14,8 @@ h1, h2, h3, p { margin: 0; }
 .muted { color: var(--muted); }
 .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
 .label { font-size: 11px; letter-spacing: 0.14em; color: var(--muted); }
+.panel-head { display: flex; align-items: baseline; gap: 8px; }
+.panel-head > :last-child:not(:first-child) { margin-left: auto; }
 
 .panel { background: var(--panel); padding: 14px 16px; clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut)); }
 .cut-s { clip-path: polygon(var(--cut-s) 0, 100% 0, 100% calc(100% - var(--cut-s)), calc(100% - var(--cut-s)) 100%, 0 100%, 0 var(--cut-s)); }

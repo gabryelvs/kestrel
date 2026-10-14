@@ -4,8 +4,9 @@ import { osLabel } from '../api/format';
 import { gpuShortName } from '../api/hardware';
 import type { SystemSnapshot } from '../api/types';
 import { strings } from '../strings';
+import type { Tab } from './TitleBar';
 
-export function HardwarePanel({ snapshot: s }: { snapshot: SystemSnapshot }) {
+export function HardwarePanel({ snapshot: s, onTab }: { snapshot: SystemSnapshot; onTab: (tab: Tab) => void }) {
   const gpu = mainGpu(s.gpus);
   const rows: [string, string][] = [
     [strings.hardware.cpu, cpuLabel(s)],
@@ -17,7 +18,10 @@ export function HardwarePanel({ snapshot: s }: { snapshot: SystemSnapshot }) {
   ];
   return (
     <section className="panel">
-      <div className="label">{strings.home.hardware}</div>
+      <div className="panel-head">
+        <span className="label">{strings.home.hardware}</span>
+        <button className="link" onClick={() => onTab('hardware')}>{strings.home.seeHardware}</button>
+      </div>
       <dl className="hw num">
         {rows.map(([name, value]) => (
           <Fragment key={name}>

@@ -1,7 +1,7 @@
 /** Every user-facing string lives here (spec decision 17). Sentence case, no exclamation marks. */
 export const strings = {
   app: { name: 'Kestrel' },
-  tabs: { home: 'Home', health: 'Health', tweaks: 'Tweaks', lockIn: 'Lock In', benchmark: 'Benchmark', toolbox: 'Toolbox' },
+  tabs: { home: 'Home', health: 'Health', hardware: 'Hardware', tweaks: 'Tweaks', lockIn: 'Lock In', benchmark: 'Benchmark', toolbox: 'Toolbox' },
   titleBar: { sections: 'Sections', admin: 'admin', notAdmin: 'not admin', minimize: 'Minimise', maximize: 'Maximise', close: 'Close' },
   banners: {
     sample: 'Sample data: Kestrel isn’t running on Windows, so this is the test PC from the fixture.',
@@ -16,6 +16,7 @@ export const strings = {
     applyPlan: 'Apply plan',
     seeAll: 'See all checks',
     hardware: 'Hardware',
+    seeHardware: 'See all',
     lockIn: 'Lock In',
     lockInSoon: 'Arrives in stage 5',
     liveLoad: 'Live load',
@@ -29,7 +30,47 @@ export const strings = {
   },
   hardware: { cpu: 'CPU', gpu: 'GPU', ram: 'RAM', display: 'Panel', os: 'OS', board: 'Board' },
   hardwarePage: {
+    title: 'Hardware',
     notReported: 'Not reported',
+    lastScan: (when: string) => `Last scan ${when}`,
+    panelFailed: 'Kestrel couldn’t read everything here. Use Copy diagnostics on Home to share the details.',
+    biosGuide: 'BIOS guide',
+    panels: {
+      processor: 'Processor', clocks: 'Live clocks', graphics: 'Graphics', memory: 'Memory', board: 'Motherboard and BIOS',
+      displays: 'Displays', storage: 'Storage', network: 'Network',
+    },
+    processor: { codename: 'Codename', socket: 'Socket', cores: 'Cores', base: 'Base', maxBoost: 'Max boost', caches: 'Caches', instructions: 'Instructions' },
+    clocks: {
+      live: '1 Hz', paused: 'Paused', average: 'Average', highest: 'Highest',
+      core: (n: number) => `C${n}`,
+      kinds: { performance: 'P', efficiency: 'E' },
+    },
+    graphics: {
+      vram: 'VRAM', driver: 'Driver', pcie: 'PCIe link', now: 'Now', underLoad: 'Under load', resizableBar: 'Resizable BAR',
+      supports: (card: string, slot: string) => `Card ${card} · Slot ${slot}`,
+      idle: 'The card slows its link when idle.',
+      fromBenchmark: (link: string, day: string) => `${link} · from your benchmark on ${day}`,
+      runBenchmark: 'Run a benchmark to check the link under load.',
+      virtual: (names: string) => `Virtual adapters: ${names}`,
+    },
+    memory: {
+      channels: 'Channels', dual: 'Dual channel', single: 'Single channel', slots: 'Slots', speed: 'Speed now', kit: 'Kit rated',
+      slotsUsed: (used: number, total: number | null) => (total ? `${used} of ${total}` : `${used} used`),
+      ratingUnknown: 'Rating unknown',
+      columns: { slot: 'Slot', size: 'Size', maker: 'Maker', part: 'Part number', speed: 'Speed', rank: 'Rank' },
+      note: 'Timings and voltages need a driver, which Kestrel never loads.',
+    },
+    board: { chipset: 'Chipset', biosVendor: 'BIOS vendor', biosVersion: 'BIOS version', biosDate: 'BIOS date', settings: 'BIOS settings Kestrel can see' },
+    displays: {
+      resolution: 'Resolution', refresh: 'Refresh rate', connection: 'Connection', gpu: 'Graphics card', primary: 'Primary',
+      refreshOf: (now: number, max: number) => `${now} Hz of ${max} Hz`,
+      virtual: (names: string) => `Virtual displays: ${names}`,
+    },
+    storage: { type: 'Type', bus: 'Bus', size: 'Size', free: (free: string, total: string) => `${free} free of ${total}` },
+    network: {
+      type: 'Type', link: 'Link speed', status: 'Status', connected: 'Connected', disconnected: 'Not connected', powerSaving: 'Power saving',
+      kinds: { ethernet: 'Ethernet', wifi: 'Wi-Fi', other: 'Other' },
+    },
     months: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     build: (n: number) => `build ${n}`,
     cores: (n: number) => `${n} cores`,
@@ -59,6 +100,9 @@ export const strings = {
     },
   },
   specs: {
+    copy: 'Copy specs',
+    copied: 'Copied to clipboard',
+    failed: 'Couldn’t copy. Try again.',
     labels: { cpu: 'CPU', gpu: 'GPU', ram: 'RAM', board: 'Board', displays: 'Displays', storage: 'Storage', os: 'OS' },
     driver: (version: string) => `driver ${version}`,
     pcie: (link: string) => `PCIe ${link}`,

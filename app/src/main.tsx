@@ -8,6 +8,7 @@ import './styles/base.css';
 import './styles/home.css';
 import './styles/pages.css';
 import './styles/bench.css';
+import './styles/hardware.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';

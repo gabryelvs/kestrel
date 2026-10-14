@@ -7,6 +7,7 @@ import { FirstRun } from './first-run/FirstRun';
 import { firstRunDone, markFirstRunDone } from './first-run/flag';
 import { Benchmark } from './pages/Benchmark';
 import { ComingSoon } from './pages/ComingSoon';
+import { Hardware } from './pages/Hardware';
 import { Health } from './pages/Health';
 import { Home } from './pages/Home';
 import { Toolbox } from './pages/Toolbox';
@@ -36,7 +37,19 @@ export function App() {
     void isElevated().then(setAdmin, () => setAdmin(null));
   }, [run]);
 
+  // A benchmark saved since the last look changes the report (its PCIe link under load), so each tab change fetches it
+  // again, quietly: no loading screen. Only once a scan has finished: while one is under way, or after a failed one,
+  // get_report could start another full scan whose result nobody wants.
+  const refresh = () => {
+    if (scan.state !== 'ready') return;
+    void getReport().then(
+      (report) => setScan((current) => (current.state === 'ready' ? { state: 'ready', report } : current)),
+      () => undefined,
+    );
+  };
+
   const openGuide = (topic: BiosTopic) => {
+    refresh();
     setGuideTopic(topic);
     setTab('toolbox');
   };
@@ -44,6 +57,7 @@ export function App() {
   const chooseTab = (next: Tab) => {
     if (firstRun) return;
     if (next !== 'toolbox') setGuideTopic(null);
+    if (next !== tab) refresh();
     setTab(next);
   };
 
@@ -76,6 +90,7 @@ export function App() {
           )}
           {report && tab === 'home' && <Home report={report} onTab={chooseTab} onGuide={openGuide} onRescan={() => void run(true)} />}
           {report && tab === 'health' && <Health report={report} onGuide={openGuide} />}
+          {report && tab === 'hardware' && <Hardware report={report} onGuide={openGuide} onRescan={() => void run(true)} />}
           {report && tab === 'toolbox' && <Toolbox guide={report.guide} focus={guideTopic} appVersion={report.appVersion} />}
           {report && tab === 'tweaks' && <ComingSoon {...strings.comingSoon.tweaks} />}
           {report && tab === 'lockIn' && <ComingSoon {...strings.comingSoon.lockIn} />}

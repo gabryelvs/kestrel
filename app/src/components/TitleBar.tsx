@@ -3,8 +3,8 @@ import { inTauri } from '../api/client';
 import { strings } from '../strings';
 import { Logo } from './Logo';
 
-export type Tab = 'home' | 'health' | 'tweaks' | 'lockIn' | 'benchmark' | 'toolbox';
-const TABS: Tab[] = ['home', 'health', 'tweaks', 'lockIn', 'benchmark', 'toolbox'];
+export type Tab = 'home' | 'health' | 'hardware' | 'tweaks' | 'lockIn' | 'benchmark' | 'toolbox';
+export const TABS: Tab[] = ['home', 'health', 'hardware', 'tweaks', 'lockIn', 'benchmark', 'toolbox'];
 
 async function windowAction(action: 'minimize' | 'toggleMaximize' | 'close') {
   if (!inTauri()) return;

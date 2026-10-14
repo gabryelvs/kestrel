@@ -17,7 +17,7 @@ export function Home({ report, onTab, onGuide, onRescan }: Props) {
     <div className="home">
       <ScoreCard report={report} onTab={onTab} onGuide={onGuide} />
       <div className="home-side">
-        <HardwarePanel snapshot={report.snapshot} />
+        <HardwarePanel snapshot={report.snapshot} onTab={onTab} />
         <LockInCard />
         <LoadGraph />
       </div>
