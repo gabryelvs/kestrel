@@ -93,6 +93,8 @@ struct Ctx<'a> {
     enter_key: &'static str,
     /// 11th-gen Intel: the guide has the Gear 1 topic, and a BIOS update resets the gear.
     gear1: bool,
+    /// A laptop has no graphics slot or M.2 drive to move: its design sets the card's lanes.
+    laptop: bool,
 }
 
 fn v(items: &[&str]) -> Vec<String> {
@@ -121,6 +123,7 @@ pub fn build_guide(s: &SystemSnapshot) -> BiosGuide {
         profile: memory_profile_name(s),
         enter_key: key,
         gear1: s.cpu.vendor == CpuVendor::Intel && s.cpu.name.contains("11th Gen"),
+        laptop: s.machine.form_factor == FormFactor::Laptop,
     };
 
     let mut sections = vec![xmp(&ctx)];
@@ -295,13 +298,29 @@ fn update_bios(c: &Ctx) -> GuideSection {
     }
 }
 
+/// The card's slot is checked first, while the PC is off; then the slot's speed setting goes back to Auto. A laptop has
+/// no slot to check and no M.2 drive to move, so only the speed setting is left.
+fn pcie_slot(c: &Ctx) -> GuideSection {
+    GuideSection {
+        topic: BiosTopic::PcieSlot,
+        title: "Run the graphics card at full PCIe speed".into(),
+        why: "The card should use all its lanes (usually x16) at the PCIe generation it and the slot support. It drops when it sits in a lower slot, shares lanes with an M.2 drive, or the slot is set to an older generation.".into(),
+        steps: if c.laptop {
+            laptop_pcie_steps(c)
+        } else {
+            desktop_pcie_steps(c)
+        },
+        caution: Some("Menu names vary between boards and BIOS versions. Your board's manual lists which slots and M.2 drives share lanes.".into()),
+        link: None,
+    }
+}
+
 // Menu paths checked in October 2026 against: ASUS BIOS manuals E18567 (ROG MAXIMUS XIII HERO), E19474 (Intel 600),
 // E21631 (ROG STRIX B760), E25827 (Intel 800), E17678 (ROG STRIX B550-XE), E21968 (AMD 600), E25269 (AMD 800) and
 // FAQ 1055579; MSI BIOS user guides Intel 500/600/700/800, AMD X570-B550, AM5 and AM5 800; GIGABYTE BIOS Setup
 // Intel 600/700/800 and AMD X670-B650; ASRock Z590 Pro4 manual, Software/BIOS Setup Guides Intel Z790, Intel 800,
 // AMD X670 and AMD 800. Older boards name the slot setting differently, hence "or similar".
-/// The card's slot is checked first, while the PC is off; then the slot's speed setting goes back to Auto.
-fn pcie_slot(c: &Ctx) -> GuideSection {
+fn desktop_pcie_steps(c: &Ctx) -> Vec<String> {
     let mut steps = v(&[
         "Shut down the PC and check that the graphics card sits in the top long slot (the one closest to the CPU), pushed fully in with the slot's latch closed.",
         "If your board's manual says an M.2 slot shares lanes with the graphics card's slot, move that drive to another M.2 slot.",
@@ -359,14 +378,31 @@ fn pcie_slot(c: &Ctx) -> GuideSection {
             "Set it to Auto, then save and exit.",
         ]),
     });
-    GuideSection {
-        topic: BiosTopic::PcieSlot,
-        title: "Run the graphics card at full PCIe speed".into(),
-        why: "The card should use all its lanes (usually x16) at the PCIe generation it and the slot support. It drops when it sits in a lower slot, shares lanes with an M.2 drive, or the slot is set to an older generation.".into(),
-        steps,
-        caution: Some("Menu names vary between boards and BIOS versions. Your board's manual lists which slots and M.2 drives share lanes.".into()),
-        link: None,
-    }
+    steps
+}
+
+/// The BIOS opened with the maker's keys, as in the other topics, then any PCIe speed setting back to Auto.
+fn laptop_pcie_steps(c: &Ctx) -> Vec<String> {
+    const AUTO: &str = "If the BIOS has a PCIe speed setting, set it to Auto.";
+    let mut steps = vec![
+        "Laptops have no graphics slot to reseat: the laptop's design sets the lanes.".into(),
+        open_bios(c),
+    ];
+    steps.extend(match c.vendor {
+        BoardVendor::Asus | BoardVendor::Msi => v(&[
+            "Press F7 for Advanced Mode.",
+            AUTO,
+            "Press F10 and choose Yes.",
+        ]),
+        BoardVendor::Gigabyte => v(&[
+            "Press F2 for Advanced Mode.",
+            AUTO,
+            "Press F10 and choose Yes.",
+        ]),
+        BoardVendor::Asrock => v(&[AUTO, "Press F10 and choose Yes."]),
+        BoardVendor::Other => v(&[AUTO, "Save and exit (usually F10)."]),
+    });
+    steps
 }
 
 fn iommu(c: &Ctx) -> GuideSection {
@@ -942,6 +978,87 @@ mod tests {
                 "{maker}: {last}"
             );
         }
+    }
+
+    #[test]
+    fn a_laptops_pcie_steps_have_no_slot_or_m2_to_change() {
+        const NO_SLOT: &str =
+            "Laptops have no graphics slot to reseat: the laptop's design sets the lanes.";
+        const AUTO: &str = "If the BIOS has a PCIe speed setting, set it to Auto.";
+        const SAVE: &str = "Press F10 and choose Yes.";
+        let cases: [(&str, &[&str]); 5] = [
+            (
+                MAKERS[0],
+                &[
+                    NO_SLOT,
+                    "Restart and press F2 to open the BIOS.",
+                    "Press F7 for Advanced Mode.",
+                    AUTO,
+                    SAVE,
+                ],
+            ),
+            (
+                MAKERS[1],
+                &[
+                    NO_SLOT,
+                    "Restart and press Del to open the BIOS.",
+                    "Press F7 for Advanced Mode.",
+                    AUTO,
+                    SAVE,
+                ],
+            ),
+            (
+                MAKERS[2],
+                &[
+                    NO_SLOT,
+                    "Restart and press Del to open the BIOS.",
+                    "Press F2 for Advanced Mode.",
+                    AUTO,
+                    SAVE,
+                ],
+            ),
+            (
+                MAKERS[3],
+                &[
+                    NO_SLOT,
+                    "Restart and press F2 or Del to open the BIOS.",
+                    AUTO,
+                    SAVE,
+                ],
+            ),
+            (
+                MAKERS[4],
+                &[
+                    NO_SLOT,
+                    "Restart and open the BIOS (usually Del or F2 at start-up).",
+                    AUTO,
+                    "Save and exit (usually F10).",
+                ],
+            ),
+        ];
+        for (maker, expected) in cases {
+            for cpu in [CpuVendor::Intel, CpuVendor::Amd] {
+                let mut s = pc(maker, cpu);
+                s.machine.form_factor = FormFactor::Laptop;
+                let steps = section(&build_guide(&s), BiosTopic::PcieSlot).steps.clone();
+                assert_eq!(steps, expected, "{maker} {cpu:?}");
+                // Only the first step speaks of a slot, to say there is none; none speaks of an M.2 drive.
+                for step in &steps[1..] {
+                    assert!(
+                        !step.contains("slot") && !step.contains("M.2"),
+                        "{maker} {cpu:?}: {step}"
+                    );
+                }
+            }
+        }
+        // A PC whose form factor Windows didn't report keeps the desktop's slot and M.2 steps.
+        let mut unknown = owner_pc_fixture();
+        unknown.machine.form_factor = FormFactor::Unknown;
+        let steps = section(&build_guide(&unknown), BiosTopic::PcieSlot)
+            .steps
+            .clone();
+        assert!(steps[0].contains("top long slot"), "{steps:?}");
+        assert!(steps[1].contains("M.2"), "{steps:?}");
     }
 
     #[test]

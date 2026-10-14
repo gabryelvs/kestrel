@@ -262,6 +262,18 @@ fn pcie_lanes(s: &SystemSnapshot) -> Finding {
             "Graphics card uses all its PCIe lanes",
             format!("x{}, as the card supports.", now.width),
         ),
+        // Many gaming laptops wire an x16 card with x8 or x4 lanes: there is no slot to change.
+        (Some(now), Some(max)) if s.machine.form_factor == FormFactor::Laptop => Check {
+            severity: Severity::Info,
+            ..c
+        }
+        .info(
+            format!(
+                "Graphics card runs at x{} of its x{} lanes",
+                now.width, max.width
+            ),
+            "Laptops wire their graphics card this way, so there's nothing to change.",
+        ),
         (Some(now), Some(max)) => {
             let severity = if now.width <= 4 {
                 Severity::High
@@ -2118,6 +2130,70 @@ mod tests {
                     }
                 ),
                 "x{width}"
+            );
+        }
+    }
+
+    /// The owner's PC as a laptop whose RTX 3060 Ti (an x16 card) runs at `now`.
+    fn laptop_at(now: Option<PcieLink>) -> SystemSnapshot {
+        let mut s = with_card(|card| card.pcie.as_mut().unwrap().now = now);
+        s.machine.form_factor = FormFactor::Laptop;
+        s
+    }
+
+    #[test]
+    fn a_laptop_short_of_lanes_is_info_because_its_design_sets_them() {
+        // Gaming laptops often wire an x16 card with x8 or x4: no slot to change, so no fix and no points off.
+        for width in [8, 4, 1] {
+            assert_eq!(
+                finding(&laptop_at(link(4, width)), "pcie-lanes"),
+                expected(
+                    "pcie-lanes",
+                    Category::Hardware,
+                    Status::Info,
+                    Severity::Info,
+                    &format!("Graphics card runs at x{width} of its x16 lanes"),
+                    "Laptops wire their graphics card this way, so there's nothing to change.",
+                    Fix::Nothing
+                ),
+                "x{width}"
+            );
+        }
+        let score = |s: &SystemSnapshot| crate::score::score(&run_health_check(s, today()));
+        assert_eq!(
+            score(&laptop_at(link(4, 8))),
+            score(&laptop_at(link(4, 16)))
+        );
+        // A laptop using all its lanes still passes, and one whose link can't be read is still Unknown.
+        assert_eq!(
+            finding(&laptop_at(link(4, 16)), "pcie-lanes").status,
+            Status::Pass
+        );
+        assert_eq!(
+            finding(&laptop_at(None), "pcie-lanes").status,
+            Status::Unknown
+        );
+    }
+
+    #[test]
+    fn a_desktop_or_a_pc_of_unknown_form_short_of_lanes_is_still_a_problem() {
+        for form_factor in [FormFactor::Desktop, FormFactor::Unknown] {
+            let mut s = laptop_at(link(4, 8));
+            s.machine.form_factor = form_factor;
+            assert_eq!(
+                finding(&s, "pcie-lanes"),
+                expected(
+                    "pcie-lanes",
+                    Category::Hardware,
+                    Status::Problem,
+                    Severity::Medium,
+                    "Graphics card runs at x8 instead of x16",
+                    LANES_DETAIL,
+                    Fix::BiosGuide {
+                        topic: BiosTopic::PcieSlot
+                    }
+                ),
+                "{form_factor:?}"
             );
         }
     }
