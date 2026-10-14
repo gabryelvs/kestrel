@@ -1,8 +1,8 @@
 //! Pure helpers that turn raw Windows values into Kestrel's model. No OS calls, so they're tested anywhere.
 use kestrel_core::topology::PhysicalCore;
 use kestrel_core::{
-    hardware, BootMode, BusyProcess, CacheKind, CpuInfo, CpuVendor, DisplayInfo, DriveBus,
-    DriveMedia, FormFactor, NetKind,
+    hardware, pcie, BootMode, BusyProcess, CacheKind, CpuInfo, CpuVendor, DisplayInfo, DriveBus,
+    DriveMedia, FormFactor, NetKind, PcieLink,
 };
 use std::collections::HashMap;
 
@@ -473,6 +473,37 @@ pub fn is_pci_instance(instance_id: &str) -> bool {
     instance_id
         .get(..4)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("PCI\\"))
+}
+
+/// What NVML (it comes with NVIDIA's driver) says about the PCIe link: how many NVIDIA cards it sees, and device 0's
+/// current generation and lanes (None where it gave no answer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NvmlLink {
+    pub devices: u32,
+    pub gen: Option<u32>,
+    pub width: Option<u32>,
+}
+
+/// The card's link now. An NVIDIA card slows its link when idle, and nothing confirms Windows keeps Configuration
+/// Manager's stored link up to date, so an NVIDIA card (PCI vendor 10DE) takes NVML's current link when NVML answers,
+/// sees exactly one NVIDIA card (then device 0 is this one) and gives a link `pcie::link_from_codes` accepts.
+/// Otherwise, and for every other card, the link is `config_manager`'s. `nvml` is asked only about an NVIDIA card.
+pub fn link_now(
+    instance_id: &str,
+    config_manager: Option<PcieLink>,
+    nvml: impl FnOnce() -> Option<NvmlLink>,
+) -> Option<PcieLink> {
+    let nvidia = is_pci_instance(instance_id)
+        && instance_id
+            .get(4..12)
+            .is_some_and(|vendor| vendor.eq_ignore_ascii_case("VEN_10DE"));
+    if !nvidia {
+        return config_manager;
+    }
+    nvml()
+        .filter(|answer| answer.devices == 1)
+        .and_then(|answer| pcie::link_from_codes(answer.gen, answer.width))
+        .or(config_manager)
 }
 
 /// MSFT_PhysicalDisk.BusType (STORAGE_BUS_TYPE in winioctl.h): 17 NVMe; 11 SATA and 3 ATA; 7 USB; 10 SAS; 8 RAID;
@@ -1274,6 +1305,85 @@ mod tests {
             "",
         ] {
             assert!(!is_pci_instance(id), "{id}");
+        }
+    }
+
+    const RTX: &str = "PCI\\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\\4&2B0D3A0E&0&0008";
+
+    fn pcie(gen: u8, width: u8) -> Option<PcieLink> {
+        Some(PcieLink { gen, width })
+    }
+
+    /// NVML's answer: `devices` NVIDIA cards, device 0 at PCIe `gen` with `width` lanes.
+    fn nvml(devices: u32, gen: u32, width: u32) -> Option<NvmlLink> {
+        Some(NvmlLink {
+            devices,
+            gen: Some(gen),
+            width: Some(width),
+        })
+    }
+
+    #[test]
+    fn an_nvidia_card_takes_nvmls_live_link_when_nvml_sees_only_that_card() {
+        // Configuration Manager's stored link can stay at the idle 1.0 while the card runs at 4.0.
+        assert_eq!(link_now(RTX, pcie(1, 16), || nvml(1, 4, 16)), pcie(4, 16));
+        // Whatever the id's letter case, and when Configuration Manager has no link at all.
+        let lower = RTX.to_ascii_lowercase();
+        assert_eq!(link_now(&lower, None, || nvml(1, 3, 8)), pcie(3, 8));
+    }
+
+    #[test]
+    fn without_nvml_or_with_other_than_one_nvidia_card_configuration_manager_says() {
+        // NVML missing or not loading; no card, or two, so device 0 may be the other one.
+        assert_eq!(link_now(RTX, pcie(1, 16), || None), pcie(1, 16));
+        for devices in [0, 2, 3] {
+            assert_eq!(
+                link_now(RTX, pcie(1, 16), || nvml(devices, 4, 16)),
+                pcie(1, 16),
+                "{devices} devices"
+            );
+        }
+        assert_eq!(link_now(RTX, None, || None), None);
+    }
+
+    #[test]
+    fn an_invalid_link_from_nvml_leaves_configuration_managers() {
+        // Generations 1–6 and widths 1–32 only, as `pcie::link_from_codes` decodes them; a missing answer is none.
+        for (gen, width) in [
+            (Some(0), Some(16)),
+            (Some(7), Some(16)),
+            (Some(4), Some(0)),
+            (Some(4), Some(33)),
+            (None, Some(16)),
+            (Some(4), None),
+        ] {
+            let answer = Some(NvmlLink {
+                devices: 1,
+                gen,
+                width,
+            });
+            assert_eq!(
+                link_now(RTX, pcie(1, 16), || answer),
+                pcie(1, 16),
+                "{gen:?} {width:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nvml_is_never_asked_about_another_makers_card() {
+        for id in [
+            "PCI\\VEN_1002&DEV_73BF&SUBSYS_0E3A1002&REV_C1\\6&1B3F2C1A&0&00000019",
+            "PCI\\VEN_8086&DEV_56A0&SUBSYS_10201463&REV_08\\6&2B4E3C1D&0&00080008",
+            // A virtual adapter, and an AMD card whose id has 10DE outside its vendor.
+            "ROOT\\DISPLAY\\0000",
+            "PCI\\VEN_1002&DEV_73BF&SUBSYS_10DE1002&REV_C1\\6&1B3F2C1A&0&00000019",
+            "",
+        ] {
+            assert_eq!(
+                link_now(id, pcie(3, 8), || panic!("NVML was asked about {id}")),
+                pcie(3, 8)
+            );
         }
     }
 

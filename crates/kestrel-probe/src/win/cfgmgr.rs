@@ -1,10 +1,11 @@
 //! Configuration Manager reads: the graphics card's PCIe link (its PCI device and the bridges above it), the memory
 //! ranges Windows gave the card (Resizable BAR), and the Intel LPC/eSPI controller's name (the chipset). Read-only:
-//! every call reads a device property or a list Windows keeps; nothing is changed and no driver is involved.
-use super::problem;
+//! every call reads a device property or a list Windows keeps; nothing is changed and no driver is involved. An NVIDIA
+//! card's link now comes from NVML when it can (`parse::link_now`).
+use super::{gpu_usage, problem};
 use crate::parse::{self, WalkStep};
 use kestrel_core::pcie::{self, PciNode};
-use kestrel_core::{hardware, PcieLink, ProbeError, SystemSnapshot};
+use kestrel_core::{hardware, PcieInfo, PcieLink, ProbeError, SystemSnapshot};
 use windows_sys::core::GUID;
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Free_Log_Conf_Handle, CM_Free_Res_Des_Handle, CM_Get_DevNode_PropertyW, CM_Get_Device_IDW,
@@ -73,7 +74,11 @@ pub fn fill(s: &mut SystemSnapshot, errors: &mut Vec<ProbeError>) {
             ));
             continue;
         };
-        gpu.pcie = pcie::resolve(&chain(node, &gpu.pnp_device_id), &gpu.pnp_device_id);
+        let id = &gpu.pnp_device_id;
+        gpu.pcie = pcie::resolve(&chain(node, id), id).map(|info| PcieInfo {
+            now: parse::link_now(id, info.now, gpu_usage::nvml_link),
+            ..info
+        });
         match memory_ranges(node) {
             Some(ranges) => (gpu.largest_bar_mb, gpu.resizable_bar) = pcie::bar_summary(&ranges),
             None => errors.push(problem(
@@ -92,14 +97,15 @@ pub fn fill(s: &mut SystemSnapshot, errors: &mut Vec<ProbeError>) {
     s.board.chipset = hardware::chipset(board_name, description.as_deref());
 }
 
-/// The current link of the card's slot device. None when the card isn't a PCI device Windows lists, or its link
-/// isn't reported (a card asleep, a virtual machine).
+/// The current link of the card's slot device, or NVML's for an NVIDIA card (`parse::link_now`). None when the card
+/// isn't a PCI device Windows lists, or its link isn't reported (a card asleep, a virtual machine).
 pub fn gpu_link(pnp_device_id: &str) -> Option<PcieLink> {
     if !parse::is_pci_instance(pnp_device_id) {
         return None;
     }
     let nodes = chain(locate(pnp_device_id)?, pnp_device_id);
-    pcie::slot_device(&nodes, pnp_device_id)?.current.clone()
+    let stored = pcie::slot_device(&nodes, pnp_device_id)?.current.clone();
+    parse::link_now(pnp_device_id, stored, gpu_usage::nvml_link)
 }
 
 /// The card's node and its PCI ancestors up to the first root port (at most MAX_ANCESTORS), each with its type and

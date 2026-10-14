@@ -1,9 +1,12 @@
-//! GPU load from Windows performance counters (what Task Manager shows) and NVIDIA temperature via NVML.
+//! GPU load from Windows performance counters (what Task Manager shows), and from NVML on NVIDIA cards the temperature
+//! and the live PCIe link.
 use super::pdh;
+use crate::parse::NvmlLink;
 use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use windows_sys::Win32::Foundation::MAX_PATH;
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 
@@ -49,10 +52,33 @@ impl GpuUsage {
     }
 }
 
+/// What NVML says about the PCIe link, for `parse::link_now` to judge: how many NVIDIA cards it sees and device 0's
+/// current link. None when NVML isn't there, doesn't load or can't count the cards.
+pub(crate) fn nvml_link() -> Option<NvmlLink> {
+    // Loading NVML is slow and a benchmark reads the link every 2 s, so it is kept once loaded; until then each read
+    // tries again.
+    static KEPT: Mutex<Option<Nvml>> = Mutex::new(None);
+    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
+    if kept.is_none() {
+        *kept = load_nvml();
+    }
+    let nvml = kept.as_ref()?;
+    let devices = nvml.device_count().ok()?;
+    let device = nvml.device_by_index(0).ok();
+    Some(NvmlLink {
+        devices,
+        gen: device.as_ref().and_then(|d| d.current_pcie_link_gen().ok()),
+        width: device
+            .as_ref()
+            .and_then(|d| d.current_pcie_link_width().ok()),
+    })
+}
+
 /// Loads NVML from the Windows system folder by its full path, and from nowhere else. A bare "nvml.dll" would also
 /// be searched for in the current folder and in every PATH entry, and some of those (WindowsApps in the user's
 /// profile, say) are writable without administrator rights, while this process runs as administrator: a planted
-/// nvml.dll would run with admin rights. Without the system copy (AMD and Intel PCs) there is no temperature.
+/// nvml.dll would run with admin rights. Without the system copy (AMD and Intel PCs) there is no temperature, and the
+/// PCIe link comes from Configuration Manager.
 fn load_nvml() -> Option<Nvml> {
     let path = nvml_in(&system_directory()?)?;
     Nvml::builder().lib_path(path.as_os_str()).init().ok()

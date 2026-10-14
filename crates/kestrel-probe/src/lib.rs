@@ -33,8 +33,9 @@ pub fn collect_report(app_version: &str) -> Report {
 }
 
 /// The current PCIe link of the card's slot device (see kestrel_core::pcie::slot_device). Windows: Configuration
-/// Manager; elsewhere None. The benchmark reads it every 2 s while a pass runs: it reads only device properties of
-/// the card and the PCI bridges above it.
+/// Manager, or for an NVIDIA card NVML's live link when NVML sees only that card (see parse::link_now); elsewhere
+/// None. The benchmark reads it every 2 s while a pass runs: it reads only device properties of the card and the PCI
+/// bridges above it, and NVML's current link of the card.
 pub fn gpu_link(pnp_device_id: &str) -> Option<kestrel_core::PcieLink> {
     #[cfg(windows)]
     {
@@ -78,5 +79,10 @@ mod tests {
         );
         assert_eq!(super::gpu_link("ROOT\\DISPLAY\\0000"), None);
         assert_eq!(super::gpu_link(""), None);
+        // An NVIDIA card Windows doesn't list has no link either, whatever NVML says about the cards it sees.
+        assert_eq!(
+            super::gpu_link("PCI\\VEN_10DE&DEV_FFFF\\0&KESTREL&0&0000"),
+            None
+        );
     }
 }
