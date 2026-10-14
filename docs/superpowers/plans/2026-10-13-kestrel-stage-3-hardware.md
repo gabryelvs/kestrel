@@ -15,7 +15,7 @@
 - Never read or write a game's memory, never inject, never load a kernel driver, never start, stop or change Vanguard or any anti-cheat.
 - No network calls at runtime except opening links; no telemetry.
 - Kestrel writes only inside its own app-data folder. Stage 3 adds no writes; the only new stored data is `context.gpuPnpDeviceId` and `context.gpuLink` inside the existing benchmark files.
-- Kestrel's own code never opens a handle to a game. During benchmark passes it reads only device properties of the graphics card and the PCI bridges above it.
+- Kestrel's own code never opens a handle to a game. During benchmark passes it reads only device properties of the graphics card and the PCI bridges above it, or NVML's link reading for an NVIDIA card (final-review ruling FR2).
 - Every new Windows read is user-mode: the `CPUID` instruction and `XGETBV`, `GetLogicalProcessorInformationEx`, PDH through `PdhAddEnglishCounterW`, Configuration Manager (`CM_*`) device properties and allocated resources, `QueryDisplayConfig` / `DisplayConfigGetDeviceInfo`, `GetFirmwareType`, `IsProcessorFeaturePresent`, WMI.
 - A value Windows doesn't report is `None` / empty and shows **Not reported**; nothing is guessed. Drive and volume sizes use 0 for unknown, like `ValorantInstall`, and the UI shows 0 as Not reported.
 - A failing probe adds a `ProbeError` (names below), never fails the scan.

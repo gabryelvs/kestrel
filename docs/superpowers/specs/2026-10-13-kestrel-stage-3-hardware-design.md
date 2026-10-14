@@ -47,7 +47,7 @@ doesn't report shows **Not reported**; nothing is guessed.
   tab is shown and Kestrel's window is visible and focused; otherwise the cells dim and say
   **Paused** (a game in front means Kestrel isn't focused). With reduced motion on, values change
   without animation.
-- **Graphics:** one panel per graphics card (virtual adapters such as Parsec on one dim line at the
+- **Graphics:** one panel per graphics card (other adapters — virtual ones such as Parsec, USB docks, cards without a driver — on one dim line at the
   end): name, VRAM, driver version and date; PCIe link: what the card and the slot support
   (`Card 4.0 x16 · Slot 4.0 x16`), the link now (with "The card slows its link when idle.") and under
   load (`Under load 4.0 x16 · from your benchmark on 13 Oct`, or "Run a benchmark to check the link
@@ -103,6 +103,7 @@ separate graphics card to check" (Info).
 - `pcie-lanes` compares the lanes in use with the lanes the card supports. Its text lists the usual
   causes: the wrong slot, a slot that shares lanes with an M.2 drive or second card, a card not
   pushed fully in; and says an external (Thunderbolt) enclosure limits a card to x4 by design.
+- On a laptop, a lane shortfall is Info with no fix: the laptop's design sets the lanes. Its PCIe BIOS-guide steps skip the slot and M.2 checks.
 - `pcie-speed` compares the highest generation seen during a benchmark with the lower of what the
   card and the slot support. It uses the latest benchmark measured on the same card.
 - `resizable-bar` treats NVIDIA RTX 30 and newer, AMD RX 6000 and newer and Intel Arc as cards that
@@ -151,7 +152,7 @@ Everything is a user-mode read: no driver, no handle to any game, nothing writte
 | Chipset | A chipset token in the board name (`Z590`, `B550`, `X670E`…), else in the description of the Intel LPC/eSPI controller (PCI class 06/01) |
 | Boot mode | `GetFirmwareType` |
 | Slots, rank | `Win32_PhysicalMemoryArray.MemoryDevices`; `Win32_PhysicalMemory.Attributes` |
-| PCIe link | Configuration Manager device properties `DEVPKEY_PciDevice_CurrentLinkSpeed/Width` and `MaxLinkSpeed/Width` of the card's PCI device, found from `Win32_VideoController.PNPDeviceID`. Through a card's own internal PCIe switch (AMD Radeon) Kestrel walks up to the device under the root port. The slot's maximum is the root port's. Speed codes 1–6 are PCIe 1.0–6.0 |
+| PCIe link | Configuration Manager device properties `DEVPKEY_PciDevice_CurrentLinkSpeed/Width` and `MaxLinkSpeed/Width` of the card's PCI device, found from `Win32_VideoController.PNPDeviceID`. Through a card's own internal PCIe switch (AMD Radeon) Kestrel walks up to the device under the root port. The slot's maximum is the root port's. Speed codes 1–6 are PCIe 1.0–6.0. For an NVIDIA card, the link now and under load come from NVML (the NVIDIA driver's own library, loaded from System32) when it reports exactly that one card, because the stored property may not follow the live link |
 | Resizable BAR | The card's allocated memory ranges (`CM_Get_First_Log_Conf` with `ALLOC_LOG_CONF`, memory and large-memory descriptors): on when a range is larger than 256 MB, off when none is, Not reported when Windows lists none |
 | Monitor names and connection | `QueryDisplayConfig` and `DisplayConfigGetDeviceInfo` (target and source names), joined to the existing display list by GDI name |
 | Drives and volumes | `MSFT_PhysicalDisk` and `MSFT_Partition` (Windows storage WMI), free space per volume |
@@ -252,7 +253,7 @@ tab shows. Benchmarks gain `context.gpuLink`. Copy diagnostics carries all of it
 
 - **Kestrel runs the `CPUID` instruction (the CPU's identification, readable in user mode) and reads
   device properties through Configuration Manager; still no driver.**
-- **During benchmark passes it reads the graphics card's PCIe link (a device property), never
+- **During benchmark passes it reads the graphics card's PCIe link (a device property, or NVML for an NVIDIA card), never
   anything from the game.**
 - Unchanged: writes only inside its own app-data folder; runs the bundled PresentMon only during
   captures; registers F10 only while a session is armed; never reads or writes a game's memory, never
