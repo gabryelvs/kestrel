@@ -60,6 +60,11 @@ pub enum Fix {
     Nothing,
 }
 
+/// The stage that brings the tweak engine: Kestrel's own power plan, Game Mode and background recording.
+pub const TWEAKS_STAGE: u8 = 5;
+/// The stage that brings the Competitive tier: startup apps, adapter power saving and Delivery Optimization.
+pub const COMPETITIVE_STAGE: u8 = 6;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
@@ -598,8 +603,8 @@ fn power_plan(s: &SystemSnapshot) -> Finding {
     } else if guid == BALANCED || guid == POWER_SAVER {
         c.problem(
             format!("Power plan is {}", plan.name),
-            "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 3. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead.",
-            Fix::LaterStage { stage: 3 },
+            format!("This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage {TWEAKS_STAGE}. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead."),
+            Fix::LaterStage { stage: TWEAKS_STAGE },
         )
     } else {
         c.info(
@@ -617,7 +622,7 @@ fn game_mode(s: &SystemSnapshot) -> Finding {
     };
     match s.windows.game_mode {
         Some(true) => c.pass("Game Mode is on", ""),
-        Some(false) => c.problem("Game Mode is off", "Game Mode tells Windows to favour the game you're playing. Ryzen X3D chips also need it to pick the right cores.", Fix::LaterStage { stage: 3 }),
+        Some(false) => c.problem("Game Mode is off", "Game Mode tells Windows to favour the game you're playing. Ryzen X3D chips also need it to pick the right cores.", Fix::LaterStage { stage: TWEAKS_STAGE }),
         None => c.unknown("Couldn't read the Game Mode setting", ""),
     }
 }
@@ -629,7 +634,7 @@ fn background_recording(s: &SystemSnapshot) -> Finding {
         severity: Severity::Medium,
     };
     match s.windows.background_recording {
-        Some(true) => c.problem("Background recording is on", "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS.", Fix::LaterStage { stage: 3 }),
+        Some(true) => c.problem("Background recording is on", "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS.", Fix::LaterStage { stage: TWEAKS_STAGE }),
         Some(false) => c.pass("Background recording is off", ""),
         None => c.unknown("Couldn't read the background recording setting", ""),
     }
@@ -779,8 +784,8 @@ fn startup_apps(s: &SystemSnapshot) -> Finding {
     match s.windows.startup_app_count {
         Some(n) if n > 10 => c.problem(
             title(n),
-            "Each one uses memory and CPU in the background. Kestrel's startup manager arrives in stage 4; until then, turn off what you don't need in Task Manager → Startup apps.",
-            Fix::LaterStage { stage: 4 },
+            format!("Each one uses memory and CPU in the background. Kestrel's startup manager arrives in stage {COMPETITIVE_STAGE}; until then, turn off what you don't need in Task Manager → Startup apps."),
+            Fix::LaterStage { stage: COMPETITIVE_STAGE },
         ),
         Some(n) => c.pass(title(n), ""),
         None => c.unknown("Couldn't count startup apps", ""),
@@ -994,7 +999,7 @@ fn adapter_power(s: &SystemSnapshot) -> Finding {
     };
     let active: Vec<&NetAdapter> = s.network.adapters.iter().filter(|a| a.connected).collect();
     if active.iter().any(|a| a.power_saving == Some(true)) {
-        c.problem("Network adapter power saving is on", "Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage 4.", Fix::LaterStage { stage: 4 })
+        c.problem("Network adapter power saving is on", format!("Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage {COMPETITIVE_STAGE}."), Fix::LaterStage { stage: COMPETITIVE_STAGE })
     } else if !active.is_empty() && active.iter().all(|a| a.power_saving == Some(false)) {
         c.pass("Network adapter power saving is off", "")
     } else {
@@ -1012,7 +1017,9 @@ fn delivery_optimization(s: &SystemSnapshot) -> Finding {
         Some(true) => c.problem(
             "Windows Update uploads to other PCs over the internet",
             "Your PC shares updates with strangers, which uses upload bandwidth while you play.",
-            Fix::LaterStage { stage: 4 },
+            Fix::LaterStage {
+                stage: COMPETITIVE_STAGE,
+            },
         ),
         Some(false) => c.pass("Windows Update doesn't upload to the internet", ""),
         None => c.unknown("Couldn't read the Windows Update sharing setting", ""),
@@ -1418,7 +1425,12 @@ mod tests {
                 "{name}"
             );
             assert_eq!(plan.title, format!("Power plan is {name}"));
-            assert_eq!(plan.fix, Fix::LaterStage { stage: 3 });
+            assert_eq!(
+                plan.fix,
+                Fix::LaterStage {
+                    stage: TWEAKS_STAGE
+                }
+            );
             // Laptops with Modern Standby only offer Balanced, so the detail names the Power mode setting too.
             assert!(
                 plan.detail
@@ -2378,5 +2390,76 @@ mod tests {
             serde_json::to_string(&BiosTopic::Virtualization).unwrap(),
             r#""virtualization""#
         );
+    }
+
+    #[test]
+    fn later_stage_fixes_follow_the_current_stage_order() {
+        let mut s = owner_pc_fixture();
+        // The owner's PC already has Balanced and adapter power saving; make the other four problems too.
+        s.windows.game_mode = Some(false);
+        s.windows.background_recording = Some(true);
+        s.windows.startup_app_count = Some(11);
+        s.network.delivery_optimization_internet = Some(true);
+        let f = run_health_check(&s, today());
+        for (id, stage) in [
+            ("power-plan", TWEAKS_STAGE),
+            ("game-mode", TWEAKS_STAGE),
+            ("background-recording", TWEAKS_STAGE),
+            ("startup-apps", COMPETITIVE_STAGE),
+            ("adapter-power", COMPETITIVE_STAGE),
+            ("delivery-optimization", COMPETITIVE_STAGE),
+        ] {
+            let finding = get(&f, id);
+            assert_eq!(
+                (finding.status, finding.fix.clone()),
+                (Status::Problem, Fix::LaterStage { stage }),
+                "{id}"
+            );
+        }
+        assert_eq!(get(&f, "power-plan").detail, "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 5. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead.");
+        assert_eq!(get(&f, "startup-apps").detail, "Each one uses memory and CPU in the background. Kestrel's startup manager arrives in stage 6; until then, turn off what you don't need in Task Manager → Startup apps.");
+        assert_eq!(get(&f, "adapter-power").detail, "Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage 6.");
+        for finding in &f {
+            for old in ["stage 3", "stage 4"] {
+                assert!(
+                    !finding.title.contains(old) && !finding.detail.contains(old),
+                    "{} still says {old}",
+                    finding.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ram_speed_passes_normalised_mhz_clocks_and_flags_slow_kits() {
+        // The owner's PC with both sticks of `part` reporting `configured`, normalised as the probe does.
+        let ram_at = |part: &str, configured: u32| {
+            let mut s = owner_pc_fixture();
+            for m in &mut s.memory.modules {
+                m.part_number = part.into();
+                m.configured_mts = Some(configured);
+            }
+            ram::normalize_configured(&mut s.memory.modules, s.memory.ddr_generation);
+            get(&run_health_check(&s, today()), "ram-speed").clone()
+        };
+        // The owner's DDR4-3600 kit on a board that reports 1800 MHz.
+        let mhz = ram_at("CMG32GX4M2D3600C18", 1800);
+        assert_eq!(
+            (mhz.status, mhz.title.as_str()),
+            (Status::Pass, "RAM runs at 3600 MT/s, its rated speed")
+        );
+        // A DDR4-4266 kit really running at 2133 (XMP off), and a 3600 kit at 2133, stay problems.
+        for (part, rated) in [("F4-4266C17D-16GTZR", 4266), ("CMG32GX4M2D3600C18", 3600)] {
+            let slow = ram_at(part, 2133);
+            assert_eq!(
+                (slow.status, slow.severity, slow.title),
+                (
+                    Status::Problem,
+                    Severity::High,
+                    format!("RAM runs at 2133 MT/s, but the kit is rated {rated}")
+                ),
+                "{part}"
+            );
+        }
     }
 }

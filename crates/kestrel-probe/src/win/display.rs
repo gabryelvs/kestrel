@@ -1,6 +1,6 @@
 //! Monitors: current and highest refresh rate at the current resolution, via EnumDisplaySettings.
 use crate::parse;
-use kestrel_core::{gpu, DisplayInfo, GpuVendor, SystemSnapshot};
+use kestrel_core::{gpu, DisplayInfo, SystemSnapshot};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW,
     DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICE_PRIMARY_DEVICE, ENUM_CURRENT_SETTINGS,
@@ -49,7 +49,7 @@ pub fn fill(s: &mut SystemSnapshot) {
         let adapter = parse::exe_name(&dev.DeviceString);
         displays.push(DisplayInfo {
             name: parse::exe_name(&dev.DeviceName),
-            is_virtual: gpu::vendor_from("", &adapter) == GpuVendor::Virtual,
+            is_virtual: gpu::is_virtual_display(&adapter),
             adapter,
             current_hz: current.dmDisplayFrequency,
             max_hz: max_hz.max(current.dmDisplayFrequency),
