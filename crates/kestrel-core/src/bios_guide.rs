@@ -415,7 +415,7 @@ fn iommu(c: &Ctx) -> GuideSection {
         ]),
         (BoardVendor::Msi, false) => v(&[
             "Press F7 for Advanced Mode.",
-            "Open OC → CPU Features.",
+            "Open OC → CPU Features (on newer boards, Overclocking → CPU Features).",
             "Set Intel VT-D Tech to Enabled.",
             "Press F10 and choose Yes.",
         ]),
@@ -482,7 +482,7 @@ fn resizable_bar(c: &Ctx) -> GuideSection {
         ]),
         BoardVendor::Msi => v(&[
             "Press F7 for Advanced Mode.",
-            "Open Settings → Advanced → PCI Subsystem Settings.",
+            "Open Settings → Advanced → PCI Subsystem Settings (on newer boards, PCIe/PCI Sub-system Settings).",
             "Enable Above 4G memory, then Re-Size BAR Support.",
             "Press F10 and choose Yes.",
         ]),
@@ -1176,6 +1176,32 @@ mod tests {
                 "SVM"
             };
             assert!(!steps.contains(wrong), "{maker} {cpu:?}: {steps}");
+        }
+    }
+
+    #[test]
+    fn msi_steps_name_the_older_and_the_newer_menu() {
+        let steps = |cpu, topic| {
+            section(&build_guide(&pc(MAKERS[1], cpu)), topic)
+                .steps
+                .clone()
+        };
+        // IOMMU (VT-d) sits beside virtualization on Intel boards, so both say the same.
+        let cpu_features = "Open OC → CPU Features (on newer boards, Overclocking → CPU Features).";
+        assert_eq!(steps(CpuVendor::Intel, BiosTopic::Iommu)[1], cpu_features);
+        assert_eq!(
+            steps(CpuVendor::Intel, BiosTopic::Virtualization)[1],
+            cpu_features
+        );
+        // Resizable BAR, on Intel and AMD boards: the newer name is the one the PCIe slot topic opens.
+        for cpu in [CpuVendor::Intel, CpuVendor::Amd] {
+            assert_eq!(
+                steps(cpu, BiosTopic::ResizableBar)[1],
+                "Open Settings → Advanced → PCI Subsystem Settings (on newer boards, PCIe/PCI Sub-system Settings)."
+            );
+            assert!(steps(cpu, BiosTopic::PcieSlot)
+                .join(" ")
+                .contains("PCIe/PCI Sub-system Settings"));
         }
     }
 
