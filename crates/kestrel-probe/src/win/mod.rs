@@ -1,4 +1,5 @@
 //! Real probes for Windows. Each one is independent: a failure becomes `None` plus a ProbeError.
+pub(crate) mod cfgmgr;
 mod cpu;
 mod display;
 mod firmware;
@@ -41,6 +42,8 @@ fn collect_here() -> SystemSnapshot {
     }
     // After WMI: the socket depends on the form factor (machine query), virtualization on VBS (device-guard query).
     cpu::fill(&mut s, &mut errors);
+    // After WMI too: the PCIe reads start from each card's PNPDeviceID, and the chipset from the board's name.
+    cfgmgr::fill(&mut s, &mut errors);
     registry_probe::fill(&mut s, &mut errors);
     display::fill(&mut s);
     s.security.iommu = Some(firmware::iommu_enabled());

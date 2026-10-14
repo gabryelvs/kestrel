@@ -370,6 +370,65 @@ pub fn rated_mhz(instances: &[(String, f64)]) -> Option<u32> {
     Some(mhz.round() as u32)
 }
 
+/// DEVPROPTYPE values (devpropdef.h) of the device properties Kestrel reads; `win::cfgmgr` checks them against
+/// windows-sys.
+pub const DEVPROP_BYTE: u32 = 3;
+pub const DEVPROP_UINT32: u32 = 7;
+pub const DEVPROP_STRING: u32 = 18;
+
+/// A device property stored as DEVPROP_TYPE_UINT32 (four bytes) → its value; None for any other type or size.
+pub fn device_property_u32(property_type: u32, data: &[u8]) -> Option<u32> {
+    if property_type != DEVPROP_UINT32 {
+        return None;
+    }
+    Some(u32::from_le_bytes(data.try_into().ok()?))
+}
+
+/// A device property stored as DEVPROP_TYPE_BYTE (one byte) → its value; None for any other type or size.
+pub fn device_property_byte(property_type: u32, data: &[u8]) -> Option<u8> {
+    match data {
+        [byte] if property_type == DEVPROP_BYTE => Some(*byte),
+        _ => None,
+    }
+}
+
+/// A device property stored as DEVPROP_TYPE_STRING (UTF-16, little-endian, NUL-terminated) → the text; None for any
+/// other type or an empty text.
+pub fn device_property_text(property_type: u32, data: &[u8]) -> Option<String> {
+    if property_type != DEVPROP_STRING {
+        return None;
+    }
+    let (pairs, _) = data.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    Some(exe_name(&units).trim().to_string()).filter(|text| !text.is_empty())
+}
+
+/// The data of a memory resource descriptor (`CM_Get_Res_Des_Data` for ResType_Mem or ResType_MemLarge) starts with
+/// a MEM_DES or MEM_LARGE_DES header, both laid out the same: Count (u32), Type (u32), Alloc_Base (u64) at 8 and
+/// Alloc_End (u64, inclusive) at 16 → the allocated range's size in bytes, End − Base + 1. None when the data is too
+/// short or the range impossible.
+pub fn allocated_range_bytes(data: &[u8]) -> Option<u64> {
+    let (base, end) = (le_u64(data, 8)?, le_u64(data, 16)?);
+    end.checked_sub(base)?.checked_add(1)
+}
+
+/// NUL-terminated UTF-16 strings one after another, ended by an empty one (what `CM_Get_Device_ID_ListW` writes) →
+/// the strings.
+pub fn multi_sz(units: &[u16]) -> Vec<String> {
+    units
+        .split(|&unit| unit == 0)
+        .filter(|part| !part.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect()
+}
+
+/// Whether a device instance id ("PCI\VEN_10DE&DEV_2489&…\4&2B5E7C3&0&0008") names a device on the PCI bus.
+pub fn is_pci_instance(instance_id: &str) -> bool {
+    instance_id
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("PCI\\"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,5 +1062,105 @@ mod tests {
     fn the_rated_clock_is_rounded_to_whole_megahertz() {
         assert_eq!(rated_mhz(&instances(&[("_Total", 3499.6)])), Some(3500));
         assert_eq!(rated_mhz(&instances(&[("_Total", 3499.4)])), Some(3499));
+    }
+
+    #[test]
+    fn device_properties_are_read_only_with_their_expected_type() {
+        assert_eq!(device_property_u32(DEVPROP_UINT32, &[4, 0, 0, 0]), Some(4));
+        assert_eq!(
+            device_property_u32(DEVPROP_UINT32, &[16, 0, 0, 0]),
+            Some(16)
+        );
+        // Another type or size is not a u32, whatever its bytes say.
+        assert_eq!(device_property_u32(DEVPROP_BYTE, &[4, 0, 0, 0]), None);
+        assert_eq!(device_property_u32(DEVPROP_UINT32, &[4, 0]), None);
+        assert_eq!(device_property_byte(DEVPROP_BYTE, &[0x06]), Some(0x06));
+        assert_eq!(device_property_byte(DEVPROP_UINT32, &[0x06, 0, 0, 0]), None);
+        assert_eq!(device_property_byte(DEVPROP_BYTE, &[]), None);
+    }
+
+    #[test]
+    fn device_property_text_is_utf16_up_to_its_nul() {
+        let bytes: Vec<u8> = "Intel(R) Z590 LPC/eSPI Controller - 4385\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            device_property_text(DEVPROP_STRING, &bytes).as_deref(),
+            Some("Intel(R) Z590 LPC/eSPI Controller - 4385")
+        );
+        assert_eq!(device_property_text(DEVPROP_UINT32, &bytes), None);
+        assert_eq!(device_property_text(DEVPROP_STRING, &[0, 0]), None);
+    }
+
+    /// The 32-byte header of a memory resource descriptor (MEM_DES or MEM_LARGE_DES): Count, Type, Alloc_Base,
+    /// Alloc_End, Flags, Reserved.
+    fn memory_header(base: u64, end: u64) -> Vec<u8> {
+        let mut header = vec![0u8; 32];
+        header[8..16].copy_from_slice(&base.to_le_bytes());
+        header[16..24].copy_from_slice(&end.to_le_bytes());
+        header
+    }
+
+    #[test]
+    fn an_allocated_range_runs_from_its_base_to_its_end_inclusive() {
+        // A card's 16 MB of registers, the 256 MB window it gets without Resizable BAR, and 8 GB with it.
+        assert_eq!(
+            allocated_range_bytes(&memory_header(0xF600_0000, 0xF6FF_FFFF)),
+            Some(16 << 20)
+        );
+        assert_eq!(
+            allocated_range_bytes(&memory_header(0xE000_0000, 0xEFFF_FFFF)),
+            Some(256 << 20)
+        );
+        assert_eq!(
+            allocated_range_bytes(&memory_header(0x40_0000_0000, 0x41_FFFF_FFFF)),
+            Some(8 << 30)
+        );
+        // Data cut before the end address, a range that ends before it starts, and one with no size that fits.
+        assert_eq!(
+            allocated_range_bytes(&memory_header(0xE000_0000, 0xEFFF_FFFF)[..20]),
+            None
+        );
+        assert_eq!(allocated_range_bytes(&memory_header(0x2000, 0x1FFF)), None);
+        assert_eq!(allocated_range_bytes(&memory_header(0, u64::MAX)), None);
+    }
+
+    #[test]
+    fn a_device_id_list_splits_at_each_nul() {
+        let list: Vec<u16> =
+            "PCI\\VEN_8086&DEV_4385\\3&11583659&0&F8\0PCI\\VEN_10DE&DEV_2489\\4&2B5E7C3&0&0008\0\0"
+                .encode_utf16()
+                .collect();
+        assert_eq!(
+            multi_sz(&list),
+            vec![
+                "PCI\\VEN_8086&DEV_4385\\3&11583659&0&F8",
+                "PCI\\VEN_10DE&DEV_2489\\4&2B5E7C3&0&0008"
+            ]
+        );
+        assert!(multi_sz(&[0]).is_empty());
+        assert!(multi_sz(&[]).is_empty());
+    }
+
+    #[test]
+    fn only_pci_instance_ids_are_pci_devices() {
+        assert!(is_pci_instance(
+            "PCI\\VEN_10DE&DEV_2489&SUBSYS_88131043&REV_A1\\4&2B5E7C3&0&0008"
+        ));
+        assert!(is_pci_instance(
+            "pci\\ven_1002&dev_73bf\\6&1a2b3c4d&0&00000019"
+        ));
+        // Virtual adapters, Hyper-V's video, the PCI root bus itself and an IDE channel are not.
+        for id in [
+            "ROOT\\DISPLAY\\0000",
+            "ROOT\\BASICDISPLAY\\0000",
+            "VMBUS\\{da0a7802-e377-4aac-8e77-0558eb1073f8}\\{5620e0c7-8062-4dce-aeb7-520c7ef76171}",
+            "ACPI\\PNP0A08\\0",
+            "PCIIDE\\IDECHANNEL\\4&1&0&0",
+            "",
+        ] {
+            assert!(!is_pci_instance(id), "{id}");
+        }
     }
 }
