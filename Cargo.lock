@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "kestrel-bench",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-bench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "regex",
@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-probe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "kestrel-core",
