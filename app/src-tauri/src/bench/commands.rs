@@ -4,9 +4,10 @@
 use super::beep;
 use super::capture::Capture;
 use super::controller::{BenchState, Controller, Platform, ACTIVE_MARKER};
+use crate::hardware;
 use kestrel_bench::{
-    result, settings, text, Benchmark, BenchmarkSummary, Comparison, Context, GameProfile, Store,
-    ValorantSettings, PROFILES,
+    result, settings, text, Benchmark, BenchmarkSummary, Comparison, Context, GameProfile, GpuLink,
+    Store, ValorantSettings, PROFILES,
 };
 use kestrel_core::Report;
 use serde::Serialize;
@@ -69,6 +70,10 @@ impl Platform for TauriPlatform {
         )
     }
 
+    fn gpu_link(&self, pnp_device_id: &str) -> Option<GpuLink> {
+        kestrel_probe::gpu_link(pnp_device_id).map(hardware::gpu_link_from)
+    }
+
     fn emit(&self, state: Option<&BenchState>) {
         let _ = self.app.emit("bench-state", state);
     }
@@ -127,8 +132,11 @@ pub fn context_from(report: &Report) -> Context {
         ram_mts: kestrel_core::ram::configured_mts(&s.memory.modules),
         gpu: gpu.map(|g| g.name.clone()),
         gpu_driver: gpu.map(kestrel_core::gpu::display_driver_version),
-        // The benchmark doesn't record the card or its PCIe link yet.
-        gpu_pnp_device_id: None,
+        // The card whose PCIe link the captures read; an empty id means Windows didn't name it.
+        gpu_pnp_device_id: gpu
+            .map(|g| g.pnp_device_id.clone())
+            .filter(|id| !id.is_empty()),
+        // Read while the captures run (Controller::pace).
         gpu_link: None,
         windows_build: s.os.build,
         display_hz: s
@@ -281,10 +289,19 @@ mod tests {
     use super::*;
     use kestrel_bench::{RunMetrics, RunRecord};
 
+    const CARD: &str = "PCI\\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\\4&1A2B3C4D&0&0008";
+
     #[test]
     fn the_context_comes_from_the_scan() {
         let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
-        let report = kestrel_core::build_report(kestrel_core::owner_pc_fixture(), date, "test");
+        let mut snapshot = kestrel_core::owner_pc_fixture();
+        for gpu in &mut snapshot.gpus {
+            gpu.pnp_device_id = match gpu.vendor {
+                kestrel_core::GpuVendor::Nvidia => CARD.into(),
+                _ => "ROOT\\DISPLAY\\0000".into(),
+            };
+        }
+        let report = kestrel_core::build_report(snapshot.clone(), date, "test");
         let c = context_from(&report);
         assert_eq!(c.power_plan.as_deref(), Some("Balanced"));
         assert_eq!(c.ram_mts, Some(3600));
@@ -299,6 +316,18 @@ mod tests {
             c.game_settings.is_none(),
             "added when the benchmark is saved"
         );
+        assert_eq!(
+            c.gpu_pnp_device_id.as_deref(),
+            Some(CARD),
+            "the real card's id, not Parsec's"
+        );
+        assert!(c.gpu_link.is_none(), "read while the captures run");
+        // Windows gave the main card no id: there's no card to read the link of.
+        for gpu in &mut snapshot.gpus {
+            gpu.pnp_device_id.clear();
+        }
+        let c = context_from(&kestrel_core::build_report(snapshot, date, "test"));
+        assert_eq!(c.gpu_pnp_device_id, None);
     }
 
     fn saved(store: &Store, created_at: &str, avg: f64) -> String {

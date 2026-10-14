@@ -9,8 +9,8 @@ use super::capture::{Capture, CaptureOutput, CANCELLED};
 use kestrel_bench::flags::{flags, RunInputs};
 use kestrel_bench::session::{Action, Phase, Session, SessionView};
 use kestrel_bench::{
-    csv, metrics, result, Benchmark, Context, GameProfile, RunRecord, Store, ValorantSettings,
-    PRESENTMON_VERSION,
+    csv, metrics, result, Benchmark, Context, GameProfile, GpuLink, RunRecord, Store,
+    ValorantSettings, PRESENTMON_VERSION,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -23,6 +23,10 @@ pub const START_KEY: &str = "F10";
 /// Exists in the work folder while PresentMon runs; found at start-up, it means a crash mid-capture.
 pub const ACTIVE_MARKER: &str = "capture.active";
 const COUNTDOWN: u32 = 10;
+/// One step of the pacer: it updates the countdown this often.
+const PACE_STEP: Duration = Duration::from_millis(200);
+/// The pacer reads the graphics card's PCIe link every this many steps (every 2 s), starting with the first.
+const LINK_EVERY: u32 = 10;
 const BUSY: &str = "A benchmark is already running.";
 
 pub trait Platform: Send + Sync + 'static {
@@ -36,6 +40,9 @@ pub trait Platform: Send + Sync + 'static {
     /// Background apps right now: name and share of the whole CPU, in %.
     fn busy_now(&self) -> Vec<(String, f32)>;
     fn game_settings(&self) -> Option<ValorantSettings>;
+    /// The PCIe link of the graphics card with this PCI instance id right now (a device property, nothing from the
+    /// game); None when Windows doesn't report it.
+    fn gpu_link(&self, pnp_device_id: &str) -> Option<GpuLink>;
     /// Tells the UI the session changed; None means there's no session.
     fn emit(&self, state: Option<&BenchState>);
 }
@@ -418,23 +425,54 @@ impl Controller {
         })
     }
 
-    /// Counts the capture down for the UI and beeps when it's time to switch to the bots.
+    /// Counts the capture down for the UI, beeps when it's time to switch to the bots, and, when the session knows
+    /// its graphics card, reads the card's PCIe link every 2 s (every 10th step, starting with the first).
     fn pace(&self, profile: &GameProfile, done: &AtomicBool, cancel: &Arc<AtomicBool>) {
         let started = Instant::now();
         let mut switched = false;
+        let card = self.card(cancel);
+        let mut step: u32 = 0;
         while !done.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
             let elapsed = started.elapsed().as_secs() as u32;
             if !switched && elapsed >= profile.route.switch_at_seconds {
                 switched = true;
                 self.platform.beep(Cue::Switch);
             }
+            if let Some(card) = card.as_deref().filter(|_| step.is_multiple_of(LINK_EVERY)) {
+                // Read with the lock released (see the module docs), then kept if it beats the session's best.
+                if let Some(link) = self.platform.gpu_link(card) {
+                    self.keep_link(cancel, link);
+                }
+            }
+            step += 1;
             self.set_seconds_left(
                 cancel,
                 Some(profile.route.capture_seconds.saturating_sub(elapsed)),
             );
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(PACE_STEP);
         }
         self.set_seconds_left(cancel, None);
+    }
+
+    /// The PCI instance id of the card the session `cancel` belongs to measures; None when the scan had none.
+    fn card(&self, cancel: &Arc<AtomicBool>) -> Option<String> {
+        self.lock()
+            .as_ref()
+            .filter(|l| Arc::ptr_eq(&l.cancel, cancel))
+            .and_then(|l| l.context.gpu_pnp_device_id.clone())
+    }
+
+    /// Keeps `link` in the context of the session `cancel` belongs to when it `beats` the one kept so far.
+    fn keep_link(&self, cancel: &Arc<AtomicBool>, link: GpuLink) {
+        if let Some(live) = self
+            .lock()
+            .as_mut()
+            .filter(|l| Arc::ptr_eq(&l.cancel, cancel))
+        {
+            if live.context.gpu_link.is_none_or(|kept| beats(link, kept)) {
+                live.context.gpu_link = Some(link);
+            }
+        }
     }
 
     fn analyse(&self, output: &CaptureOutput) -> Result<(RunRecord, Vec<f32>), String> {
@@ -619,10 +657,17 @@ impl Controller {
     }
 }
 
+/// Whether a link reading beats the one kept so far: a higher generation wins, then, at the same generation, more
+/// lanes. An equal reading doesn't, so of equal readings the first is kept.
+fn beats(link: GpuLink, kept: GpuLink) -> bool {
+    (link.gen, link.width) > (kept.gen, kept.width)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bench::capture::Simulated;
+    use crate::bench::capture::{simulated_csv, Simulated};
+    use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
@@ -647,6 +692,17 @@ mod tests {
         hold_unregister: AtomicUsize,
         unregister_held: AtomicBool,
         release_unregister: AtomicBool,
+        /// What the card's link reads answer, one per read, in order; None once they run out.
+        links: Mutex<VecDeque<Option<GpuLink>>>,
+        /// The card each link read asked about.
+        link_reads: Mutex<Vec<String>>,
+        /// When each of those reads was made.
+        link_times: Mutex<Vec<Instant>>,
+        /// While raised, a link read waits (raising `link_held`) until `release_links` is raised: a read that takes a
+        /// while, during which a test can act.
+        hold_links: AtomicBool,
+        link_held: AtomicBool,
+        release_links: AtomicBool,
     }
 
     impl Platform for Fake {
@@ -688,6 +744,20 @@ mod tests {
                 resolution: Some([1920, 1080]),
                 ..Default::default()
             })
+        }
+        fn gpu_link(&self, pnp_device_id: &str) -> Option<GpuLink> {
+            if self.hold_links.load(Ordering::SeqCst) {
+                self.link_held.store(true, Ordering::SeqCst);
+                while !self.release_links.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            self.link_times.lock().unwrap().push(Instant::now());
+            self.link_reads
+                .lock()
+                .unwrap()
+                .push(pnp_device_id.to_string());
+            self.links.lock().unwrap().pop_front().flatten()
         }
         fn emit(&self, _state: Option<&BenchState>) {
             self.emitted.fetch_add(1, Ordering::SeqCst);
@@ -733,9 +803,81 @@ mod tests {
         fn clean_up_stale_session(&self) {}
     }
 
+    /// Ends the n-th capture (from 0) once the platform has had n + 1 link reads, or after `limit` when none comes.
+    /// The pacer reads at its first step and then only every 2 s, so in a session that knows its card each capture
+    /// gets exactly one read, however slowly the threads run.
+    struct UntilLinkRead {
+        fake: Arc<Fake>,
+        limit: Duration,
+        runs: AtomicUsize,
+    }
+
+    impl Capture for UntilLinkRead {
+        fn run(
+            &self,
+            _p: &str,
+            seconds: u32,
+            _c: &Path,
+            cancel: &AtomicBool,
+        ) -> Result<CaptureOutput, String> {
+            let reads_wanted = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
+            let deadline = Instant::now() + self.limit;
+            while self.fake.link_reads.lock().unwrap().len() < reads_wanted
+                && Instant::now() < deadline
+            {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(CANCELLED.into());
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(CaptureOutput {
+                csv: simulated_csv(seconds),
+                stderr: String::new(),
+            })
+        }
+        fn clean_up_stale_session(&self) {}
+    }
+
+    /// The first capture runs until it's cancelled (raising `started` as it begins); every later one ends at once.
+    #[derive(Default)]
+    struct FirstBlocks {
+        runs: AtomicUsize,
+        started: AtomicBool,
+    }
+
+    impl Capture for FirstBlocks {
+        fn run(
+            &self,
+            _p: &str,
+            seconds: u32,
+            _c: &Path,
+            cancel: &AtomicBool,
+        ) -> Result<CaptureOutput, String> {
+            if self.runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.store(true, Ordering::SeqCst);
+                while !cancel.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                return Err(CANCELLED.into());
+            }
+            Ok(CaptureOutput {
+                csv: simulated_csv(seconds),
+                stderr: String::new(),
+            })
+        }
+        fn clean_up_stale_session(&self) {}
+    }
+
     fn setup(capture: Arc<dyn Capture>) -> (Controller, Arc<Fake>, tempfile::TempDir) {
+        setup_with(Arc::new(Fake::default()), capture)
+    }
+
+    /// `setup` with a platform the test made first, for a capture that watches it.
+    fn setup_with(
+        fake: Arc<Fake>,
+        capture: Arc<dyn Capture>,
+    ) -> (Controller, Arc<Fake>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let fake = Arc::new(Fake::default());
         fake.key_free.store(true, Ordering::SeqCst);
         fake.game.store(true, Ordering::SeqCst);
         let store = Arc::new(Store::new(dir.path().join("benchmarks")));
@@ -783,6 +925,45 @@ mod tests {
 
     fn waiting_at(pass: u8) -> impl Fn(&BenchState) -> bool {
         move |s| s.session.phase == Phase::Waiting && s.session.pass == pass
+    }
+
+    const CARD: &str = "PCI\\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\\4&1A2B3C4D&0&0008";
+
+    fn link(gen: u8, width: u8) -> Option<GpuLink> {
+        Some(GpuLink { gen, width })
+    }
+
+    /// Presses the start key for the warm-up and the three runs of an armed session; returns the saved result's id.
+    fn run_session(c: &Controller) -> String {
+        for pass in 0..4u8 {
+            wait_for(c, "the next pass", waiting_at(pass));
+            c.start_pressed();
+        }
+        wait_for(c, "the saved result", |s| s.session.result_id.is_some())
+            .session
+            .result_id
+            .unwrap()
+    }
+
+    /// A session armed on `CARD` whose link reads answer `links` in order, one read per capture.
+    fn session_on_card(links: Vec<Option<GpuLink>>) -> (Controller, Arc<Fake>, tempfile::TempDir) {
+        let fake = Arc::new(Fake::default());
+        *fake.links.lock().unwrap() = links.into();
+        let capture = Arc::new(UntilLinkRead {
+            fake: fake.clone(),
+            limit: Duration::from_secs(5),
+            runs: AtomicUsize::new(0),
+        });
+        let (c, fake, dir) = setup_with(fake, capture);
+        c.start(
+            "valorant",
+            Context {
+                gpu_pnp_device_id: Some(CARD.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        (c, fake, dir)
     }
 
     #[test]
@@ -848,6 +1029,127 @@ mod tests {
         assert_eq!(beeps.iter().filter(|&&b| b == Cue::Start).count(), 4);
         assert_eq!(beeps.iter().filter(|&&b| b == Cue::End).count(), 4);
         assert!(fake.emitted.load(Ordering::SeqCst) > 8);
+    }
+
+    #[test]
+    fn a_whole_session_saves_the_highest_pcie_link() {
+        // One read per capture: the warm-up catches the card still idling at 1.0, the runs read 4.0, 3.0 and nothing.
+        let (c, fake, _dir) = session_on_card(vec![link(1, 16), link(4, 16), link(3, 16), None]);
+        let id = run_session(&c);
+        let saved = c.store().get(&id).unwrap();
+        assert_eq!(saved.context.gpu_link, link(4, 16));
+        assert_eq!(saved.context.gpu_pnp_device_id.as_deref(), Some(CARD));
+        assert_eq!(
+            *fake.link_reads.lock().unwrap(),
+            vec![CARD.to_string(); 4],
+            "one read per capture, of the session's card"
+        );
+    }
+
+    #[test]
+    fn at_the_same_generation_more_lanes_win_and_an_equal_reading_keeps_the_first() {
+        // 4.0 x8, then 4.0 x16 (more lanes: it wins), 4.0 x16 again (equal: the first stays), then 4.0 x4.
+        let (c, _fake, _dir) =
+            session_on_card(vec![link(4, 8), link(4, 16), link(4, 16), link(4, 4)]);
+        let id = run_session(&c);
+        assert_eq!(c.store().get(&id).unwrap().context.gpu_link, link(4, 16));
+        // The rule itself: the generation counts first, then the lanes; an equal reading never replaces the kept one.
+        let l = |gen, width| GpuLink { gen, width };
+        assert!(beats(l(4, 16), l(4, 8)));
+        assert!(
+            !beats(l(4, 16), l(4, 16)),
+            "the first of equal readings stays"
+        );
+        assert!(!beats(l(4, 4), l(4, 16)));
+        assert!(
+            beats(l(5, 1), l(4, 16)),
+            "a higher generation wins whatever the lanes"
+        );
+        assert!(!beats(l(3, 16), l(4, 1)));
+    }
+
+    #[test]
+    fn without_the_card_s_id_the_link_is_never_read() {
+        let fake = Arc::new(Fake::default());
+        *fake.links.lock().unwrap() = vec![link(4, 16); 4].into();
+        // No read comes, so each capture lasts its 300 ms: long enough for the pacer to take two steps.
+        let capture = Arc::new(UntilLinkRead {
+            fake: fake.clone(),
+            limit: Duration::from_millis(300),
+            runs: AtomicUsize::new(0),
+        });
+        let (c, fake, _dir) = setup_with(fake, capture);
+        c.start("valorant", Context::default()).unwrap();
+        let id = run_session(&c);
+        assert!(fake.link_reads.lock().unwrap().is_empty());
+        assert_eq!(c.store().get(&id).unwrap().context.gpu_link, None);
+    }
+
+    #[test]
+    fn the_link_is_read_with_the_first_step_and_then_every_two_seconds() {
+        let (c, fake, _dir) = setup_with(Arc::new(Fake::default()), Arc::new(Blocking::default()));
+        c.start(
+            "valorant",
+            Context {
+                gpu_pnp_device_id: Some(CARD.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        c.start_pressed();
+        // The pacer shows the countdown once it has taken its first step; it began that step with a read.
+        wait_for(&c, "the pacer's first step", |s| s.seconds_left.is_some());
+        assert!(
+            !fake.link_reads.lock().unwrap().is_empty(),
+            "the first read comes with the first step"
+        );
+        // The next one is ten steps (2 s) later, not at the next step: the fake noted when each read was made.
+        eventually("the second link read", || {
+            fake.link_reads.lock().unwrap().len() >= 2
+        });
+        let times = fake.link_times.lock().unwrap().clone();
+        assert!(
+            times[1] - times[0] >= Duration::from_millis(1800),
+            "{times:?}"
+        );
+        c.cancel();
+    }
+
+    #[test]
+    fn a_late_reading_never_reaches_the_next_session() {
+        let fake = Arc::new(Fake::default());
+        *fake.links.lock().unwrap() = vec![link(4, 16)].into();
+        fake.hold_links.store(true, Ordering::SeqCst);
+        let first = Arc::new(FirstBlocks::default());
+        let (c, fake, _dir) = setup_with(fake, first.clone());
+        c.start(
+            "valorant",
+            Context {
+                gpu_pnp_device_id: Some(CARD.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        c.start_pressed();
+        // The warm-up's capture is under way (so it is the one that blocks), and its link read is out.
+        eventually("the warm-up's capture", || {
+            first.started.load(Ordering::SeqCst)
+        });
+        eventually("the warm-up's link read", || {
+            fake.link_held.load(Ordering::SeqCst)
+        });
+        // The owner cancels while the read is still out, and arms a session that doesn't know its card.
+        c.cancel();
+        wait_for(&c, "cancelled", |s| s.session.phase == Phase::Cancelled);
+        c.start("valorant", Context::default()).unwrap();
+        fake.release_links.store(true, Ordering::SeqCst);
+        let id = run_session(&c);
+        assert_eq!(*fake.link_reads.lock().unwrap(), vec![CARD.to_string()]);
+        assert_eq!(
+            c.store().get(&id).unwrap().context.gpu_link,
+            None,
+            "the cancelled session's reading isn't the new one's"
+        );
     }
 
     #[test]

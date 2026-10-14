@@ -1,11 +1,16 @@
-//! Kestrel's Tauri shell: the scan, live load and the benchmark (stage 2). It writes only inside its own folder.
+//! Kestrel's Tauri shell: the scan, live load and clocks, and the benchmark with the PCIe link it measures. It writes
+//! only inside its own folder.
+use chrono::NaiveDate;
+use kestrel_core::topology::CoreClock;
 use kestrel_core::Report;
+use kestrel_probe::clocks::ClockSampler;
 use kestrel_probe::load::{LoadSample, LoadSampler};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::ShortcutState;
 
 pub mod bench;
+pub mod hardware;
 
 use bench::commands;
 use bench::controller::Controller;
@@ -13,35 +18,49 @@ use bench::controller::Controller;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct AppState {
-    /// The last scan; `None` until the first one finishes.
+    /// The last scan as the probe returned it; `None` until the first one finishes. Commands hand it out through
+    /// `hardware::with_links`, so a benchmark saved since the scan shows at once.
     report: Mutex<Option<Report>>,
     /// One sampler for the whole run, created and primed in `setup`: its first reading is unreliable.
     load: Mutex<LoadSampler>,
+    /// One sampler for the whole run, created in `setup`: it collects once then, so the first poll has a baseline.
+    clocks: Mutex<ClockSampler>,
 }
 
-/// The last report; scans first if there isn't one yet.
+/// The day the findings are judged on (BIOS and driver age).
+fn today() -> NaiveDate {
+    chrono::Local::now().date_naive()
+}
+
+/// The last report, with the newest PCIe link under load; scans first if there isn't one yet.
 #[tauri::command]
-async fn get_report(state: State<'_, AppState>) -> Result<Report, String> {
+async fn get_report(
+    state: State<'_, AppState>,
+    bench: State<'_, Controller>,
+) -> Result<Report, String> {
     let cached = state.report.lock().map_err(|e| e.to_string())?.clone();
     match cached {
-        Some(report) => Ok(report),
-        None => rescan(state).await,
+        Some(report) => Ok(hardware::with_links(report, bench.store(), today())),
+        None => rescan(state, bench).await,
     }
 }
 
-/// Scans the PC again (on a worker thread) and keeps the result.
+/// Scans the PC again (on a worker thread) and keeps the probe's report; returns it with the newest link under load.
 #[tauri::command]
-async fn rescan(state: State<'_, AppState>) -> Result<Report, String> {
+async fn rescan(
+    state: State<'_, AppState>,
+    bench: State<'_, Controller>,
+) -> Result<Report, String> {
     let report = tauri::async_runtime::spawn_blocking(|| kestrel_probe::collect_report(VERSION))
         .await
         .map_err(|e| e.to_string())?;
     *state.report.lock().map_err(|e| e.to_string())? = Some(report.clone());
-    Ok(report)
+    Ok(hardware::with_links(report, bench.store(), today()))
 }
 
 /// The last scan, scanning first if needed: a benchmark records the PC's context from it.
 pub(crate) async fn latest_report(app: &AppHandle) -> Result<Report, String> {
-    get_report(app.state::<AppState>()).await
+    get_report(app.state::<AppState>(), app.state::<Controller>()).await
 }
 
 /// One live-load reading; the UI polls this about once a second.
@@ -52,8 +71,17 @@ fn get_load(state: State<'_, AppState>) -> Result<LoadSample, String> {
     Ok(sampler.sample())
 }
 
-/// Pretty JSON for the "Copy diagnostics" button: the last scan, the saved benchmarks, VALORANT's settings, and the
-/// benchmark session as it is now (a failed one carries PresentMon's error), or null when there is none.
+/// Each physical core's clock right now; the Hardware page polls this about once a second while it's shown.
+// Keep `async`: the PDH read must stay off the UI thread.
+#[tauri::command(async)]
+fn get_cpu_clocks(state: State<'_, AppState>) -> Result<Vec<CoreClock>, String> {
+    let mut sampler = state.clocks.lock().map_err(|e| e.to_string())?;
+    Ok(sampler.sample())
+}
+
+/// Pretty JSON for the "Copy diagnostics" button: the last scan (with the newest link under load, as the app shows it),
+/// the saved benchmarks, VALORANT's settings, and the benchmark session as it is now (a failed one carries
+/// PresentMon's error), or null when there is none.
 #[tauri::command(async)]
 fn get_diagnostics(
     state: State<'_, AppState>,
@@ -66,7 +94,7 @@ fn get_diagnostics(
         .clone()
         .ok_or("Run a scan first.")?;
     let diagnostics = serde_json::json!({
-        "report": report,
+        "report": hardware::with_links(report, bench.store(), today()),
         "benchmarks": bench.store().list(),
         "valorantSettings": bench.game_settings(),
         // An owned snapshot: no platform call, and the controller's lock is released before this is serialised.
@@ -113,6 +141,7 @@ pub fn run() {
             app.manage(AppState {
                 report: Mutex::new(None),
                 load: Mutex::new(sampler),
+                clocks: Mutex::new(ClockSampler::new()),
             });
             app.manage(commands::controller(app.handle())?);
             Ok(())
@@ -121,6 +150,7 @@ pub fn run() {
             get_report,
             rescan,
             get_load,
+            get_cpu_clocks,
             get_diagnostics,
             is_elevated,
             commands::bench_profiles,

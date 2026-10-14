@@ -95,6 +95,14 @@ impl Store {
             .collect()
     }
 
+    /// The saved benchmarks' ids, newest first. They come from the index, so no benchmark file is opened (a lost or
+    /// damaged index is first rebuilt from the folders): a caller that wants the benchmarks reads each one once with
+    /// `get`, where `list` has already read them all. A benchmark whose files can't be read is still named here, and
+    /// `get` returns None for it.
+    pub fn ids(&self) -> Vec<String> {
+        self.index().ids.into_iter().rev().collect()
+    }
+
     pub fn get(&self, id: &str) -> Option<Benchmark> {
         if !safe_id(id) {
             return None;
@@ -361,6 +369,31 @@ mod tests {
             leftovers.is_empty(),
             "no temporary files stay behind: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn ids_are_newest_first_and_come_from_the_index_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        assert!(store.ids().is_empty(), "nothing saved yet");
+        let a = store
+            .save(&mut bench("2026-10-12T21:30:05Z", 1.0), &[])
+            .unwrap();
+        let b = store
+            .save(&mut bench("2026-10-13T08:00:00Z", 2.0), &[])
+            .unwrap();
+        let c = store
+            .save(&mut bench("2026-10-14T08:00:00Z", 3.0), &[])
+            .unwrap();
+        assert_eq!(store.ids(), vec![c.clone(), b.clone(), a.clone()]);
+        // No benchmark file is opened: a damaged one is still named (`get` says it can't be read), where `list`
+        // leaves it out.
+        std::fs::write(dir.path().join(&b).join("summary.json"), "{not json").unwrap();
+        assert_eq!(store.ids(), vec![c.clone(), b.clone(), a.clone()]);
+        assert!(store.get(&b).is_none());
+        assert_eq!(store.list().len(), 2);
+        store.delete(&c).unwrap();
+        assert_eq!(store.ids(), vec![b, a]);
     }
 
     /// A summary.json as v0.2.0 wrote it: its context has no `gpuPnpDeviceId` and no `gpuLink`.
