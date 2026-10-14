@@ -91,6 +91,14 @@ pub struct ValorantSettings {
     pub riot_settings_read: bool,
 }
 
+/// A PCIe link as Windows reports it: the generation (4 = PCIe 4.0) and the number of lanes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GpuLink {
+    pub gen: u8,
+    pub width: u8,
+}
+
 /// The PC and game when the benchmark ran (spec "Saved data").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -99,6 +107,12 @@ pub struct Context {
     pub ram_mts: Option<u32>,
     pub gpu: Option<String>,
     pub gpu_driver: Option<String>,
+    /// The main graphics card's `Win32_VideoController.PNPDeviceID`, so a link measured on it is only ever applied to
+    /// that card. None when the scan had no id for it, and in benchmarks saved by v0.2.0.
+    pub gpu_pnp_device_id: Option<String>,
+    /// The card's PCIe link during the warm-up and runs, read every 2 s: the highest generation seen, with its lane
+    /// count. None when Windows never reported it, and in benchmarks saved by v0.2.0.
+    pub gpu_link: Option<GpuLink>,
     pub windows_build: u32,
     pub display_hz: Option<u32>,
     pub game_settings: Option<ValorantSettings>,

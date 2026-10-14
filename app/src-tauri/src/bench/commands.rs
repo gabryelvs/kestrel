@@ -127,6 +127,9 @@ pub fn context_from(report: &Report) -> Context {
         ram_mts: kestrel_core::ram::configured_mts(&s.memory.modules),
         gpu: gpu.map(|g| g.name.clone()),
         gpu_driver: gpu.map(kestrel_core::gpu::display_driver_version),
+        // The benchmark doesn't record the card or its PCIe link yet.
+        gpu_pnp_device_id: None,
+        gpu_link: None,
         windows_build: s.os.build,
         display_hz: s
             .displays
