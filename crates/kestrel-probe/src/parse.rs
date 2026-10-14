@@ -355,6 +355,21 @@ pub fn fill_missing_cpu_counts(cpu: &mut CpuInfo, cores: &[PhysicalCore]) {
     }
 }
 
+/// The rated clock in MHz from the instances of PDH's `Processor Information` `Processor Frequency` counter, as
+/// (name, value): the `_Total` row's when it has a usable value, else the first row that has one. A usable value is a
+/// finite number of at least 1 MHz; zero, negative, NaN and infinite values mean Windows has no clock to give. None
+/// when no row has one.
+pub fn rated_mhz(instances: &[(String, f64)]) -> Option<u32> {
+    let mut usable = instances
+        .iter()
+        .filter(|(_, mhz)| mhz.is_finite() && *mhz >= 1.0);
+    let total = usable
+        .clone()
+        .find(|(name, _)| name.eq_ignore_ascii_case("_Total"));
+    let (_, mhz) = total.or_else(|| usable.next())?;
+    Some(mhz.round() as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,5 +939,69 @@ mod tests {
         fill_missing_cpu_identity(&mut cpu, "", CpuVendor::Other);
         fill_missing_cpu_counts(&mut cpu, &[]);
         assert_eq!(cpu, CpuInfo::default());
+    }
+
+    /// Instances of a `Processor Information` counter as PDH lists them, as (name, value).
+    fn instances(rows: &[(&str, f64)]) -> Vec<(String, f64)> {
+        rows.iter()
+            .map(|&(name, value)| (name.to_string(), value))
+            .collect()
+    }
+
+    #[test]
+    fn the_total_row_gives_the_rated_clock() {
+        // The total is preferred over the per-processor rows and the per-group total, wherever it comes in the list.
+        let rows = instances(&[
+            ("0,0", 3200.0),
+            ("0,1", 3200.0),
+            ("0,_Total", 2900.0),
+            ("_Total", 2800.0),
+        ]);
+        assert_eq!(rated_mhz(&rows), Some(2800));
+        let rows = instances(&[("_Total", 2800.0), ("0,0", 3200.0)]);
+        assert_eq!(rated_mhz(&rows), Some(2800));
+        // PDH matches instance names without regard to case.
+        assert_eq!(
+            rated_mhz(&instances(&[("0,0", 3200.0), ("_total", 2800.0)])),
+            Some(2800)
+        );
+    }
+
+    #[test]
+    fn without_a_total_the_first_row_with_a_clock_stands_in() {
+        let rows = instances(&[("0,0", 4200.0), ("0,1", 4000.0)]);
+        assert_eq!(rated_mhz(&rows), Some(4200));
+    }
+
+    #[test]
+    fn rows_without_a_usable_clock_are_skipped() {
+        // Zero, negative, not-a-number and infinite values mean Windows has no clock to give, on the total as on any
+        // other row.
+        let rows = instances(&[
+            ("_Total", 0.0),
+            ("0,0", f64::NAN),
+            ("0,1", -1.0),
+            ("0,2", f64::INFINITY),
+            ("0,3", 3600.0),
+            ("0,4", 4000.0),
+        ]);
+        assert_eq!(rated_mhz(&rows), Some(3600));
+        let rows = instances(&[("0,0", 3600.0), ("_Total", f64::NAN)]);
+        assert_eq!(rated_mhz(&rows), Some(3600));
+        // Under 1 MHz would round to a base clock of 0.
+        assert_eq!(rated_mhz(&instances(&[("_Total", 0.4)])), None);
+    }
+
+    #[test]
+    fn no_usable_clock_anywhere_is_not_reported() {
+        assert_eq!(rated_mhz(&[]), None);
+        let rows = instances(&[("_Total", 0.0), ("0,0", f64::NAN), ("0,1", -3.0)]);
+        assert_eq!(rated_mhz(&rows), None);
+    }
+
+    #[test]
+    fn the_rated_clock_is_rounded_to_whole_megahertz() {
+        assert_eq!(rated_mhz(&instances(&[("_Total", 3499.6)])), Some(3500));
+        assert_eq!(rated_mhz(&instances(&[("_Total", 3499.4)])), Some(3499));
     }
 }

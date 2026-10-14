@@ -191,14 +191,15 @@ pub(crate) fn topology() -> Option<Topology> {
 }
 
 /// The processor's rated clock in MHz from PDH's `Processor Frequency`, which Windows keeps at the rated (base)
-/// clock; the live clock is that times `% Processor Performance`. It isn't a rate, so one sample is enough.
+/// clock; the live clock is that times `% Processor Performance`. It isn't a rate, so one sample is enough. The path
+/// has a wildcard because that is the shape `PdhGetFormattedCounterArray` is documented for; `parse::rated_mhz` then
+/// picks the `_Total` row, or the first processor with a clock.
 fn rated_mhz() -> Option<u32> {
-    let query = pdh::Query::open(r"\Processor Information(_Total)\Processor Frequency")?;
+    let query = pdh::Query::open(r"\Processor Information(*)\Processor Frequency")?;
     if !query.collect() {
         return None;
     }
-    let (_, mhz) = query.formatted_array(0)?.into_iter().next()?;
-    (mhz >= 1.0).then(|| mhz.round() as u32)
+    parse::rated_mhz(&query.formatted_array(0)?)
 }
 
 fn firmware_type() -> Option<FIRMWARE_TYPE> {
