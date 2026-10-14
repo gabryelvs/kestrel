@@ -41,7 +41,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 10, 9).unwrap(),
             "0.1.0",
         );
-        assert_eq!(r.findings.len(), 27);
+        assert_eq!(r.findings.len(), 31);
         assert_eq!(r.score.value, 86);
         assert_eq!(r.app_version, "0.1.0");
         let json = serde_json::to_string(&r).unwrap();
