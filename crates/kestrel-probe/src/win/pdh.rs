@@ -20,8 +20,8 @@ pub struct Query {
 }
 
 // SAFETY: PDH handles can be used from any thread, they are not tied to the one that opened them. A `Query` has a
-// single owner and is never used from two threads at once: the live load sampler that holds one sits behind a Mutex
-// in the app's state.
+// single owner and is never used from two threads at once: the live load sampler and the clock sampler, which hold
+// them, each sit behind a Mutex in the app's state.
 unsafe impl Send for Query {}
 
 impl Query {

@@ -165,7 +165,7 @@ state change and once a second while capturing. `get_diagnostics` adds benchmark
 | Situation | What happens |
 | --- | --- |
 | VALORANT isn't running | Armed state waits with "Start VALORANT and open the Range" |
-| F10 can't be registered | Fallback: **Start run** in Kestrel, then a 10-second beep countdown |
+| F10 can't be registered, or the game swallows it | **Start run** in Kestrel, offered whenever a pass waits with the game running (in both cases), then a 10-second beep countdown |
 | PresentMon missing or fails to start | Session stops with the error and "Copy diagnostics" |
 | No frames captured | The run is flagged "Too short" with Redo |
 | Kestrel closes mid-session | The session is discarded; the stale capture session is cleaned up at next start |

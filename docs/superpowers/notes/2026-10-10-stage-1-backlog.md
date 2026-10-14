@@ -17,9 +17,11 @@ read-only guarantee. Stage 2 planning should start from this list. Recorded 2026
 - A wholesale probe failure scores 100 ("Nothing to fix") on Home; show the probe notice on Home and on the
   first-run result too.
 - Monitors on a DisplayLink dock or on the Microsoft Basic Display driver are classed virtual, so they get
-  "a virtual display is active" and skip the refresh check.
+  "a virtual display is active" and skip the refresh check. Done in stage 3: `gpu::is_virtual_display` counts
+  them as real monitors.
 - Firmware that reports `ConfiguredClockSpeed` in MHz (half the MT/s) could raise a false XMP alarm on a
-  recognised kit; treat configured × 2 ≈ rated as Unknown.
+  recognised kit; treat configured × 2 ≈ rated as Unknown. Done in stage 3: `ram::normalize_configured` puts
+  such a clock back into MT/s.
 - The TPM Unknown text blames missing admin rights even when Kestrel is elevated and the query failed for
   another reason.
 - A failed battery query on a PC whose `PCSystemType` is 0 or missing counts as Desktop, and on-battery then
@@ -42,17 +44,22 @@ read-only guarantee. Stage 2 planning should start from this list. Recorded 2026
 - `main_gpu` ties depend on order and unknown VRAM counts as 0; prefer known vendors over Other (QEMU QXL);
   the Intel Arc regex misses "Arc(TM) Pro A60/B50".
 - Dual-socket (`CPU1 DIMM A1`) and underscore (`P0_ChannelA`) channel labels still alias to single channel.
+  Done in stage 3: `ram::channel_layout` reads the channel in both.
 - Excluding Kestrel by exe name also hides other apps' msedgewebview2.exe and wmiprvse.exe load.
 - A standard user who elevates with an admin's password makes HKCU and LocalAppData the admin's, so per-user
   checks read the wrong settings; stage 3 must handle this before writing per-user settings.
 
 ## BIOS guide
 
-- The ASUS laptop page shows enterKey F2 but step 1 says "press Del".
-- Unknown-maker update copy reads awkwardly; "Advanced mode" vs "Advanced Mode"; the update caution omits the
-  Gear 1 reset on 11th gen; SMBIOS placeholder board names ("To Be Filled By O.E.M.") are shown as-is.
+- The ASUS laptop page shows enterKey F2 but step 1 says "press Del". Done in stage 3: step 1 names the page's
+  key.
+- Unknown-maker update copy reads awkwardly; "Advanced mode" vs "Advanced Mode" (done in stage 3: one
+  spelling); the update caution omits the Gear 1 reset on 11th gen (done in stage 3: it asks for Gear 1
+  again); SMBIOS placeholder board names ("To Be Filled By O.E.M.") are shown as-is (done in stage 3: the
+  probe blanks them and nothing matches one).
 - ROG Strix boards may also say "Extreme Tweaker" (unconfirmed); no `Fix::BiosGuide` points at MemoryGear or
-  ResizableBar, so those sections are reachable only by scrolling.
+  ResizableBar, so those sections are reachable only by scrolling. Done in stage 3 for ResizableBar: the
+  resizable-bar check points at it. MemoryGear is still reachable only by scrolling.
 
 ## Probes and runtime
 
@@ -100,6 +107,6 @@ read-only guarantee. Stage 2 planning should start from this list. Recorded 2026
 
 ## Tests to add
 
-- `fixture_loses_nothing_when_parsed`; RAM regex negative tests and speed-bin snap boundaries; GPU id/name
-  fallbacks; the health arms and boundaries listed above; format.ts branches; first-run gating (needs jsdom);
-  a `tauri::test` of the command surface.
+- `fixture_loses_nothing_when_parsed` (done in stage 3, in snapshot.rs); RAM regex negative tests and
+  speed-bin snap boundaries; GPU id/name fallbacks; the health arms and boundaries listed above; format.ts
+  branches; first-run gating (needs jsdom); a `tauri::test` of the command surface.

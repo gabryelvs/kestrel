@@ -93,39 +93,68 @@ pub fn configured_mts(modules: &[MemoryModule]) -> Option<u32> {
         .flatten()
 }
 
+/// Puts speeds a board reported in MHz back into MT/s. Some boards report `ConfiguredClockSpeed` in MHz, half the
+/// MT/s (1800 for a DDR4-3600 kit). A module's speed is doubled only when it is below its generation's JEDEC floor,
+/// so it can't be MT/s (DDR4 under 2133, DDR5 under 4800), and when, doubled, it is within 50 MT/s of the kit's
+/// rating (`rated_mts`, read before anything changes). So a DDR4-4266 kit really running at 2133 (XMP off) and a
+/// DDR5-9600 kit at 4800 keep those speeds and stay flagged. With an unknown or other generation, or no rating,
+/// nothing changes. The probe calls this right after reading the modules, so every reader of the snapshot sees MT/s.
+pub fn normalize_configured(modules: &mut [MemoryModule], ddr_generation: Option<u8>) {
+    let floor = match ddr_generation {
+        Some(4) => 2133,
+        Some(5) => 4800,
+        _ => return,
+    };
+    let Some(rated) = rated_mts(modules) else {
+        return;
+    };
+    for m in modules.iter_mut() {
+        m.configured_mts = m.configured_mts.map(|c| {
+            if c < floor && (c * 2).abs_diff(rated) <= 50 {
+                c * 2
+            } else {
+                c
+            }
+        });
+    }
+}
+
+/// A module's locator and bank label, with underscores read as spaces ("P0_ChannelA" → "P0 ChannelA").
+fn labels(module: &MemoryModule) -> [String; 2] {
+    [&module.device_locator, &module.bank_label].map(|text| text.replace('_', " "))
+}
+
 fn channel_letter(module: &MemoryModule) -> Option<char> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         Regex::new(r"(?i)channel\s*([a-h])\b|\bdimm[_\s]?([a-h])\d").expect("valid pattern")
     });
-    [&module.device_locator, &module.bank_label]
-        .into_iter()
-        .find_map(|text| {
-            let caps = re.captures(text)?;
-            let letter = caps.get(1).or_else(|| caps.get(2))?;
-            letter
-                .as_str()
-                .chars()
-                .next()
-                .map(|c| c.to_ascii_uppercase())
-        })
+    labels(module).iter().find_map(|text| {
+        let caps = re.captures(text)?;
+        let letter = caps.get(1).or_else(|| caps.get(2))?;
+        letter
+            .as_str()
+            .chars()
+            .next()
+            .map(|c| c.to_ascii_uppercase())
+    })
 }
 
-/// The socket or controller a module sits behind: the N in `Controller<N>` or a `P<N>` socket token.
+/// The socket or controller a module sits behind: the N in `Controller<N>`, `CPU<N>` or a `P<N>` socket token.
 fn socket_qualifier(module: &MemoryModule) -> Option<u32> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re =
-        RE.get_or_init(|| Regex::new(r"(?i)controller\s*(\d+)|\bp(\d+)\b").expect("valid pattern"));
-    [&module.device_locator, &module.bank_label]
-        .into_iter()
-        .find_map(|text| {
-            let caps = re.captures(text)?;
-            caps.get(1)
-                .or_else(|| caps.get(2))?
-                .as_str()
-                .parse::<u32>()
-                .ok()
-        })
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)controller\s*(\d+)|\bcpu\s*(\d+)|\bp(\d+)\b").expect("valid pattern")
+    });
+    labels(module).iter().find_map(|text| {
+        let caps = re.captures(text)?;
+        caps.get(1)
+            .or_else(|| caps.get(2))
+            .or_else(|| caps.get(3))?
+            .as_str()
+            .parse::<u32>()
+            .ok()
+    })
 }
 
 /// A module's channel: its letter, qualified by the socket or controller it sits behind.
@@ -172,6 +201,7 @@ mod tests {
             manufacturer: String::new(),
             bank_label: bank.into(),
             device_locator: locator.into(),
+            ..Default::default()
         }
     }
 
@@ -365,5 +395,134 @@ mod tests {
             module("", None, None, "DIMM 1", "P1 CHANNEL A"),
         ];
         assert_eq!(channel_layout(&sockets), ChannelLayout::Dual);
+    }
+
+    #[test]
+    fn dual_socket_labels_name_the_cpu_and_the_channel() {
+        let layout = |a: &str, b: &str| {
+            channel_layout(&[module("", None, None, a, ""), module("", None, None, b, "")])
+        };
+        assert_eq!(layout("CPU1 DIMM A1", "CPU1 DIMM B1"), ChannelLayout::Dual);
+        assert_eq!(
+            layout("CPU1 DIMM A1", "CPU1 DIMM A2"),
+            ChannelLayout::Single
+        );
+        // Channel A of each processor is two channels, as with P0/P1 and Controller0/1.
+        assert_eq!(layout("CPU1 DIMM A1", "CPU2 DIMM A1"), ChannelLayout::Dual);
+        // Some boards join the words with underscores.
+        assert_eq!(layout("CPU1_DIMM_A1", "CPU1_DIMM_B1"), ChannelLayout::Dual);
+        assert_eq!(
+            layout("CPU1_DIMM_A1", "CPU1_DIMM_A2"),
+            ChannelLayout::Single
+        );
+        assert_eq!(layout("CPU1_DIMM_A1", "CPU2_DIMM_A1"), ChannelLayout::Dual);
+    }
+
+    #[test]
+    fn underscore_labels_name_the_socket_and_the_channel() {
+        let layout = |a: (&str, &str), b: (&str, &str)| {
+            channel_layout(&[
+                module("", None, None, a.0, a.1),
+                module("", None, None, b.0, b.1),
+            ])
+        };
+        assert_eq!(
+            layout(("P0_ChannelA", ""), ("P0_ChannelB", "")),
+            ChannelLayout::Dual
+        );
+        assert_eq!(
+            layout(("P0_ChannelA_DIMM0", ""), ("P0_ChannelA_DIMM1", "")),
+            ChannelLayout::Single
+        );
+        assert_eq!(
+            layout(("P0_ChannelA", ""), ("P1_ChannelA", "")),
+            ChannelLayout::Dual
+        );
+        // In the bank label, with underscores throughout.
+        assert_eq!(
+            layout(("DIMM 0", "P0_CHANNEL_A"), ("DIMM 1", "P0_CHANNEL_B")),
+            ChannelLayout::Dual
+        );
+        assert_eq!(
+            layout(("DIMM 0", "P0_CHANNEL_A"), ("DIMM 1", "P0_CHANNEL_A")),
+            ChannelLayout::Single
+        );
+    }
+
+    /// Two sticks of `part` reporting `configured`, normalised for DDR `generation`: their speeds afterwards.
+    fn normalized(part: &str, configured: u32, generation: Option<u8>) -> Vec<Option<u32>> {
+        let mut kit = [
+            module(part, Some(configured), None, "ChannelA-DIMM2", ""),
+            module(part, Some(configured), None, "ChannelB-DIMM2", ""),
+        ];
+        normalize_configured(&mut kit, generation);
+        kit.iter().map(|m| m.configured_mts).collect()
+    }
+
+    #[test]
+    fn a_clock_reported_in_mhz_is_doubled_only_below_the_jedec_floor() {
+        // DDR4-3600 reported as 1800: under DDR4's 2133 floor, and 3600 once doubled.
+        assert_eq!(
+            normalized("CMG32GX4M2D3600C18", 1800, Some(4)),
+            [Some(3600); 2]
+        );
+        // DDR5-8000 reported as 4000: under DDR5's 4800 floor.
+        assert_eq!(
+            normalized("F5-8000J3848H16GX2-TZ5RK", 4000, Some(5)),
+            [Some(8000); 2]
+        );
+        // At or above the floor it is MT/s: a DDR4-4266 kit really at 2133 (XMP off), a DDR5-9600 kit at 4800, and
+        // a 3600 kit at 2133.
+        assert_eq!(
+            normalized("F4-4266C17D-16GTZR", 2133, Some(4)),
+            [Some(2133); 2]
+        );
+        assert_eq!(
+            normalized("F5-9600J4656F24GX2-TZ5CK", 4800, Some(5)),
+            [Some(4800); 2]
+        );
+        assert_eq!(
+            normalized("CMG32GX4M2D3600C18", 2133, Some(4)),
+            [Some(2133); 2]
+        );
+        // Doubled, it must be within 50 MT/s of the kit's rating.
+        assert_eq!(
+            normalized("CMG32GX4M2D3600C18", 1775, Some(4)),
+            [Some(3550); 2]
+        );
+        assert_eq!(
+            normalized("CMG32GX4M2D3600C18", 1774, Some(4)),
+            [Some(1774); 2]
+        );
+        // A mixed kit goes by its rating, the slowest module's: 3600 and 3200 sticks reporting 1600.
+        let mut mixed = [
+            module("CMG32GX4M2D3600C18", Some(1600), None, "", ""),
+            module("F4-3200C16-8GVKB", Some(1600), None, "", ""),
+        ];
+        normalize_configured(&mut mixed, Some(4));
+        assert_eq!(configured_mts(&mixed), Some(3200));
+    }
+
+    #[test]
+    fn without_a_known_generation_or_rating_nothing_is_doubled() {
+        assert_eq!(
+            normalized("CMG32GX4M2D3600C18", 1800, None),
+            [Some(1800); 2]
+        );
+        assert_eq!(
+            normalized("CMG32GX4M2D3600C18", 1800, Some(3)),
+            [Some(1800); 2]
+        );
+        assert_eq!(normalized("CT16G4DFRA32A", 1600, Some(4)), [Some(1600); 2]);
+        // Missing and zero speeds stay as they are.
+        let mut unreported = [
+            module("CMG32GX4M2D3600C18", None, None, "", ""),
+            module("CMG32GX4M2D3600C18", Some(0), None, "", ""),
+        ];
+        normalize_configured(&mut unreported, Some(4));
+        assert_eq!(
+            [unreported[0].configured_mts, unreported[1].configured_mts],
+            [None, Some(0)]
+        );
     }
 }

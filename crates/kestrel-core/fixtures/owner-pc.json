@@ -1,22 +1,45 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "collectedAt": "2026-10-09T16:30:00Z",
   "os": { "caption": "Microsoft Windows 11 Pro", "build": 26200, "displayVersion": "25H2" },
-  "machine": { "formFactor": "desktop", "manufacturer": "ASUS", "model": "System Product Name", "onBattery": null },
-  "cpu": { "name": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz", "vendor": "intel", "cores": 8, "threads": 16 },
+  "machine": { "formFactor": "desktop", "manufacturer": "ASUS", "model": "", "onBattery": null },
+  "cpu": {
+    "name": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz", "vendor": "intel", "cores": 8, "threads": 16,
+    "family": 6, "model": 167, "stepping": 1, "codename": "Rocket Lake-S", "socket": "LGA1200",
+    "baseMhz": 3500, "maxMhz": 5300, "pCores": null, "eCores": null,
+    "caches": [
+      { "level": 1, "kind": "data", "sizeKb": 48, "count": 8 },
+      { "level": 1, "kind": "instruction", "sizeKb": 32, "count": 8 },
+      { "level": 2, "kind": "unified", "sizeKb": 512, "count": 8 },
+      { "level": 3, "kind": "unified", "sizeKb": 16384, "count": 1 }
+    ],
+    "instructions": ["SSE4.2", "AVX", "AVX2", "AVX-512"],
+    "virtualization": true
+  },
   "gpus": [
-    { "name": "Parsec Virtual Display Adapter", "vendor": "virtual", "driverVersion": "0.45.0.0", "driverDate": null, "vramMb": null, "isIntegrated": false },
-    { "name": "NVIDIA GeForce RTX 3060 Ti", "vendor": "nvidia", "driverVersion": "32.0.16.1074", "driverDate": "2026-09-15", "vramMb": 8192, "isIntegrated": false }
+    { "name": "Parsec Virtual Display Adapter", "vendor": "virtual", "driverVersion": "0.45.0.0", "driverDate": null, "vramMb": null, "isIntegrated": false,
+      "pnpDeviceId": "ROOT\\DISPLAY\\0000", "pcie": null, "linkUnderLoad": null, "largestBarMb": null, "resizableBar": null },
+    { "name": "NVIDIA GeForce RTX 3060 Ti", "vendor": "nvidia", "driverVersion": "32.0.16.1074", "driverDate": "2026-09-15", "vramMb": 8192, "isIntegrated": false,
+      "pnpDeviceId": "PCI\\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\\4&2B0D3A0E&0&0008",
+      "pcie": { "cardMax": { "gen": 4, "width": 16 }, "slotMax": { "gen": 4, "width": 16 }, "now": { "gen": 1, "width": 16 } },
+      "linkUnderLoad": null, "largestBarMb": 8192, "resizableBar": true }
   ],
-  "memory": { "totalMb": 32768, "ddrGeneration": 4, "modules": [
-    { "capacityMb": 16384, "configuredMts": 3600, "maxMts": 2133, "partNumber": "CMG32GX4M2D3600C18", "manufacturer": "Corsair", "bankLabel": "BANK 1", "deviceLocator": "ChannelA-DIMM2" },
-    { "capacityMb": 16384, "configuredMts": 3600, "maxMts": 2133, "partNumber": "CMG32GX4M2D3600C18", "manufacturer": "Corsair", "bankLabel": "BANK 3", "deviceLocator": "ChannelB-DIMM2" }
+  "memory": { "totalMb": 32768, "ddrGeneration": 4, "slotsTotal": 4, "ratedMts": 3600, "modules": [
+    { "capacityMb": 16384, "configuredMts": 3600, "maxMts": 2133, "partNumber": "CMG32GX4M2D3600C18", "manufacturer": "Corsair", "bankLabel": "BANK 1", "deviceLocator": "ChannelA-DIMM2", "rank": 2 },
+    { "capacityMb": 16384, "configuredMts": 3600, "maxMts": 2133, "partNumber": "CMG32GX4M2D3600C18", "manufacturer": "Corsair", "bankLabel": "BANK 3", "deviceLocator": "ChannelB-DIMM2", "rank": 2 }
   ] },
   "displays": [
-    { "name": "\\\\.\\DISPLAY1", "adapter": "NVIDIA GeForce RTX 3060 Ti", "currentHz": 360, "maxHz": 360, "width": 1920, "height": 1080, "isPrimary": true, "isVirtual": false }
+    { "name": "\\\\.\\DISPLAY1", "adapter": "NVIDIA GeForce RTX 3060 Ti", "currentHz": 360, "maxHz": 360, "width": 1920, "height": 1080, "isPrimary": true, "isVirtual": false, "monitorName": "XL2566K", "connection": "DisplayPort" },
+    { "name": "\\\\.\\DISPLAY2", "adapter": "NVIDIA GeForce RTX 3060 Ti", "currentHz": 180, "maxHz": 180, "width": 1920, "height": 1080, "isPrimary": false, "isVirtual": false, "monitorName": "24G4", "connection": "DisplayPort" }
   ],
-  "board": { "manufacturer": "ASUSTeK COMPUTER INC.", "product": "ROG MAXIMUS XIII HERO", "biosVersion": "2103", "biosDate": "2024-05-20" },
-  "storage": { "valorant": { "path": "C:/Riot Games/VALORANT/live", "driveLetter": "C", "media": "nvme", "freeGb": 210.5, "totalGb": 931.5 } },
+  "board": { "manufacturer": "ASUSTeK COMPUTER INC.", "product": "ROG MAXIMUS XIII HERO", "biosVersion": "2103", "biosDate": "2024-05-20", "biosVendor": "American Megatrends Inc.", "chipset": "Intel Z590", "bootMode": "uefi" },
+  "storage": {
+    "valorant": { "path": "C:/Riot Games/VALORANT/live", "driveLetter": "C", "media": "nvme", "freeGb": 210.5, "totalGb": 931.5 },
+    "drives": [
+      { "model": "Samsung SSD 980 PRO 1TB", "media": "nvme", "bus": "nvme", "sizeGb": 931.5, "volumes": [ { "letter": "C", "freeGb": 210.5, "totalGb": 931.5 } ] },
+      { "model": "WDC WD20EZBX-00AYRA0", "media": "hdd", "bus": "sata", "sizeGb": 1863.0, "volumes": [ { "letter": "D", "freeGb": 1228.8, "totalGb": 1863.0 } ] }
+    ]
+  },
   "windows": { "powerPlan": { "guid": "381b4222-f694-41f0-9685-ff5bb260df2e", "name": "Balanced" }, "gameMode": true, "backgroundRecording": false, "hags": true, "valorantGpuPreference": null, "pendingRestart": false, "startupAppCount": 7 },
   "security": { "tpm2": true, "secureBoot": true, "vbsRunning": false, "hvciRunning": false, "iommu": false, "vanguard": "running" },
   "network": { "adapters": [ { "name": "Intel(R) Ethernet Controller (3) I225-V", "kind": "ethernet", "linkMbps": 2500, "connected": true, "powerSaving": true } ], "deliveryOptimizationInternet": false },

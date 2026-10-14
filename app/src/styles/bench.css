@@ -33,6 +33,6 @@
 .axis-top { position: absolute; top: 0; left: 0; }
 .axis-bottom { position: absolute; bottom: 0; left: 0; }
 .hw-row { display: contents; }
-.detail .hw { grid-template-columns: 110px minmax(0, 1fr); }
+.detail .hw { grid-template-columns: 160px minmax(0, 1fr); }
 .confirm { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .confirm p { margin: 0; }

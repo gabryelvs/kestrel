@@ -1,8 +1,8 @@
 {
-  "appVersion": "0.2.0",
+  "appVersion": "0.3.0",
   "snapshot": {
-    "schemaVersion": 1,
-    "collectedAt": "2026-10-09T23:31:59Z",
+    "schemaVersion": 2,
+    "collectedAt": "2026-10-14T03:48:57Z",
     "os": {
       "caption": "Microsoft Windows 11 Pro",
       "build": 26200,
@@ -11,14 +11,56 @@
     "machine": {
       "formFactor": "desktop",
       "manufacturer": "ASUS",
-      "model": "System Product Name",
+      "model": "",
       "onBattery": null
     },
     "cpu": {
       "name": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz",
       "vendor": "intel",
       "cores": 8,
-      "threads": 16
+      "threads": 16,
+      "family": 6,
+      "model": 167,
+      "stepping": 1,
+      "codename": "Rocket Lake-S",
+      "socket": "LGA1200",
+      "baseMhz": 3500,
+      "maxMhz": 5300,
+      "pCores": null,
+      "eCores": null,
+      "caches": [
+        {
+          "level": 1,
+          "kind": "data",
+          "sizeKb": 48,
+          "count": 8
+        },
+        {
+          "level": 1,
+          "kind": "instruction",
+          "sizeKb": 32,
+          "count": 8
+        },
+        {
+          "level": 2,
+          "kind": "unified",
+          "sizeKb": 512,
+          "count": 8
+        },
+        {
+          "level": 3,
+          "kind": "unified",
+          "sizeKb": 16384,
+          "count": 1
+        }
+      ],
+      "instructions": [
+        "SSE4.2",
+        "AVX",
+        "AVX2",
+        "AVX-512"
+      ],
+      "virtualization": true
     },
     "gpus": [
       {
@@ -27,7 +69,12 @@
         "driverVersion": "0.45.0.0",
         "driverDate": null,
         "vramMb": null,
-        "isIntegrated": false
+        "isIntegrated": false,
+        "pnpDeviceId": "ROOT\\DISPLAY\\0000",
+        "pcie": null,
+        "linkUnderLoad": null,
+        "largestBarMb": null,
+        "resizableBar": null
       },
       {
         "name": "NVIDIA GeForce RTX 3060 Ti",
@@ -35,7 +82,25 @@
         "driverVersion": "32.0.16.1074",
         "driverDate": "2026-09-15",
         "vramMb": 8192,
-        "isIntegrated": false
+        "isIntegrated": false,
+        "pnpDeviceId": "PCI\\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\\4&2B0D3A0E&0&0008",
+        "pcie": {
+          "cardMax": {
+            "gen": 4,
+            "width": 16
+          },
+          "slotMax": {
+            "gen": 4,
+            "width": 16
+          },
+          "now": {
+            "gen": 1,
+            "width": 16
+          }
+        },
+        "linkUnderLoad": null,
+        "largestBarMb": 8192,
+        "resizableBar": true
       }
     ],
     "memory": {
@@ -49,7 +114,8 @@
           "partNumber": "CMG32GX4M2D3600C18",
           "manufacturer": "Corsair",
           "bankLabel": "BANK 1",
-          "deviceLocator": "ChannelA-DIMM2"
+          "deviceLocator": "ChannelA-DIMM2",
+          "rank": 2
         },
         {
           "capacityMb": 16384,
@@ -58,9 +124,12 @@
           "partNumber": "CMG32GX4M2D3600C18",
           "manufacturer": "Corsair",
           "bankLabel": "BANK 3",
-          "deviceLocator": "ChannelB-DIMM2"
+          "deviceLocator": "ChannelB-DIMM2",
+          "rank": 2
         }
-      ]
+      ],
+      "slotsTotal": 4,
+      "ratedMts": 3600
     },
     "displays": [
       {
@@ -71,14 +140,31 @@
         "width": 1920,
         "height": 1080,
         "isPrimary": true,
-        "isVirtual": false
+        "isVirtual": false,
+        "monitorName": "XL2566K",
+        "connection": "DisplayPort"
+      },
+      {
+        "name": "\\\\.\\DISPLAY2",
+        "adapter": "NVIDIA GeForce RTX 3060 Ti",
+        "currentHz": 180,
+        "maxHz": 180,
+        "width": 1920,
+        "height": 1080,
+        "isPrimary": false,
+        "isVirtual": false,
+        "monitorName": "24G4",
+        "connection": "DisplayPort"
       }
     ],
     "board": {
       "manufacturer": "ASUSTeK COMPUTER INC.",
       "product": "ROG MAXIMUS XIII HERO",
       "biosVersion": "2103",
-      "biosDate": "2024-05-20"
+      "biosDate": "2024-05-20",
+      "biosVendor": "American Megatrends Inc.",
+      "chipset": "Intel Z590",
+      "bootMode": "uefi"
     },
     "storage": {
       "valorant": {
@@ -87,7 +173,35 @@
         "media": "nvme",
         "freeGb": 210.5,
         "totalGb": 931.5
-      }
+      },
+      "drives": [
+        {
+          "model": "Samsung SSD 980 PRO 1TB",
+          "media": "nvme",
+          "bus": "nvme",
+          "sizeGb": 931.5,
+          "volumes": [
+            {
+              "letter": "C",
+              "freeGb": 210.5,
+              "totalGb": 931.5
+            }
+          ]
+        },
+        {
+          "model": "WDC WD20EZBX-00AYRA0",
+          "media": "hdd",
+          "bus": "sata",
+          "sizeGb": 1863.0,
+          "volumes": [
+            {
+              "letter": "D",
+              "freeGb": 1228.8,
+              "totalGb": 1863.0
+            }
+          ]
+        }
+      ]
     },
     "windows": {
       "powerPlan": {
@@ -167,11 +281,44 @@
       }
     },
     {
+      "id": "pcie-lanes",
+      "category": "hardware",
+      "severity": "medium",
+      "status": "pass",
+      "title": "Graphics card uses all its PCIe lanes",
+      "detail": "x16, as the card supports.",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "pcie-speed",
+      "category": "hardware",
+      "severity": "info",
+      "status": "info",
+      "title": "Run a benchmark to check the PCIe link under load",
+      "detail": "Graphics cards slow their link when idle, so Kestrel checks it during a benchmark.",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
+      "id": "resizable-bar",
+      "category": "hardware",
+      "severity": "low",
+      "status": "pass",
+      "title": "Resizable BAR is on",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
       "id": "display-refresh",
       "category": "display",
       "severity": "high",
       "status": "pass",
-      "title": "Monitor runs at its top refresh rate (360 Hz)",
+      "title": "All monitors run at their top refresh rate",
       "detail": "",
       "fix": {
         "kind": "nothing"
@@ -227,10 +374,10 @@
       "severity": "medium",
       "status": "problem",
       "title": "Power plan is Balanced",
-      "detail": "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 3. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead.",
+      "detail": "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 5. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead.",
       "fix": {
         "kind": "later-stage",
-        "stage": 3
+        "stage": 5
       }
     },
     {
@@ -355,6 +502,17 @@
       }
     },
     {
+      "id": "virtualization",
+      "category": "vanguard",
+      "severity": "info",
+      "status": "pass",
+      "title": "Virtualization is on",
+      "detail": "",
+      "fix": {
+        "kind": "nothing"
+      }
+    },
+    {
       "id": "iommu",
       "category": "vanguard",
       "severity": "info",
@@ -416,10 +574,10 @@
       "severity": "low",
       "status": "problem",
       "title": "Network adapter power saving is on",
-      "detail": "Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage 4.",
+      "detail": "Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage 6.",
       "fix": {
         "kind": "later-stage",
-        "stage": 4
+        "stage": 6
       }
     },
     {
@@ -480,23 +638,26 @@
           "In the BIOS, open Tool → ASUS EZ Flash 3 Utility.",
           "Pick the file on the USB stick and confirm."
         ],
-        "caution": "Don't turn off the PC while it updates. Updating resets BIOS settings, so turn XMP back on afterwards.",
+        "caution": "Don't turn off the PC while it updates. Updating resets BIOS settings, so turn XMP back on afterwards. On 11th-gen Intel the memory gear goes back to its default too, so set Gear 1 again.",
         "link": {
           "label": "Open ASUS support",
           "url": "https://www.asus.com/support/download-center/"
         }
       },
       {
-        "topic": "iommu",
-        "title": "Turn on IOMMU (only if you need it)",
-        "why": "Vanguard's optional On-Demand mode needs it, and Riot can ask for it on some accounts. It doesn't change FPS.",
+        "topic": "pcie-slot",
+        "title": "Run the graphics card at full PCIe speed",
+        "why": "The card should use all its lanes (usually x16) at the PCIe generation it and the slot support. It drops when it sits in a lower slot, shares lanes with an M.2 drive, or the slot is set to an older generation.",
         "steps": [
+          "Shut down the PC and check that the graphics card sits in the top long slot (the one closest to the CPU), pushed fully in with the slot's latch closed.",
+          "If your board's manual says an M.2 slot shares lanes with the graphics card's slot, move that drive to another M.2 slot.",
+          "Start the PC and open the BIOS.",
           "Press F7 for Advanced Mode.",
-          "Open Advanced → System Agent (SA) Configuration.",
-          "Set VT-d to Enabled.",
+          "Open Advanced → System Agent (SA) Configuration → PCI Express Configuration.",
+          "Set the top x16 slot's link speed (PCIEX16_1 Link Speed or similar) to Auto.",
           "Press F10 and choose Yes."
         ],
-        "caution": "Menu names vary between boards and BIOS versions. If you can't find it, search the BIOS for VT-d or IOMMU.",
+        "caution": "Menu names vary between boards and BIOS versions. Your board's manual lists which slots and M.2 drives share lanes.",
         "link": null
       },
       {
@@ -510,6 +671,32 @@
           "Press F10 and choose Yes."
         ],
         "caution": "Windows must start in UEFI mode (CSM off) for this to work.",
+        "link": null
+      },
+      {
+        "topic": "virtualization",
+        "title": "Turn on virtualization (only if you need it)",
+        "why": "Windows needs it for Memory Integrity, which Riot can require on flagged accounts. It doesn't change FPS.",
+        "steps": [
+          "Press F7 for Advanced Mode.",
+          "Open Advanced → CPU Configuration.",
+          "Set Intel (VMX) Virtualization Technology to Enabled.",
+          "Press F10 and choose Yes."
+        ],
+        "caution": "Menu names vary between boards and BIOS versions. If you can't find it, search the BIOS for SVM or Virtualization.",
+        "link": null
+      },
+      {
+        "topic": "iommu",
+        "title": "Turn on IOMMU (only if you need it)",
+        "why": "Vanguard's optional On-Demand mode needs it, and Riot can ask for it on some accounts. It doesn't change FPS.",
+        "steps": [
+          "Press F7 for Advanced Mode.",
+          "Open Advanced → System Agent (SA) Configuration.",
+          "Set VT-d to Enabled.",
+          "Press F10 and choose Yes."
+        ],
+        "caution": "Menu names vary between boards and BIOS versions. If you can't find it, search the BIOS for VT-d or IOMMU.",
         "link": null
       }
     ]

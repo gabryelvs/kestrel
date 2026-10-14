@@ -5,5 +5,5 @@ members = ["crates/kestrel-core", "crates/kestrel-probe", "crates/kestrel-bench"
 [workspace.package]
 edition = "2021"
 license = "GPL-3.0-only"
-version = "0.2.0"
+version = "0.3.0"
 repository = "https://github.com/gabryelvs/kestrel"

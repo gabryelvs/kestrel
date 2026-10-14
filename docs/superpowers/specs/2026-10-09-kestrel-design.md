@@ -75,6 +75,13 @@ Games, Ubisoft or Activision.
 | 69 | Multi-game copy | The redesign's copy is game-neutral ("FPS optimiser for your games", "While your game runs"); animations pause when any supported game (VALORANT, FiveM, Rainbow Six Siege, Warzone) is in the foreground, found from the foreground window's process id in a Toolhelp32 snapshot (no handle to the game) |
 | 70 | Design data | Real data in the redesign stage: points per finding from `kestrel-core` ("What if you fix"), Kestrel's own CPU and RAM in the status bar, and status, note and menu path per BIOS-guide topic (menu paths only for boards Kestrel knows, ASUS first; hidden otherwise) |
 | 71 | Handoff in the repo | When the redesign stage starts, the handoff is copied to `docs/design/redesign-v4/` (public in the repo) |
+| 72 | Build cadence | Stages run as a queue: the next stage is built while the owner tests the last one. Each stage still ships as its own test build, and its fixes land before the owner merges it. Stages 6–8 start only after stage 5 passes the owner's test on the real PC |
+| 73 | Test builds | Each stage's test build (a GitHub pre-release) is published as soon as it is ready and CI is green, without asking first. Merging stays the owner's call |
+| 74 | Hardware tab scope | Processor, graphics, memory per module, board and BIOS (52), plus displays, every drive and network adapters |
+| 75 | PCIe link check | Lanes are checked at any time; the PCIe generation is checked under load, sampled during benchmark runs and shown in the result (a card slows its link when idle) |
+| 76 | BIOS check weights | Fewer lanes than the card supports: Medium (x4 or less: High). Generation below what card and slot support, under load: Low (1.0 or 2.0: High). Resizable BAR off: High on Intel Arc, Low on AMD, Info on NVIDIA. Virtualization off: Info |
+| 77 | Copy specs | A Copy specs button on the Hardware tab copies a short plain-text summary of the PC |
+| 78 | Hardware screen design | The owner designs the Hardware screen in Claude Design from Kestrel's brief (`docs/superpowers/notes/2026-10-13-hardware-tab-brief.md`); stage 3 builds the tab in the current look and stage 9 builds the owner's design |
 
 ## Stages
 
@@ -101,7 +108,7 @@ Games, Ubisoft or Activision.
 - Vanguard readiness: TPM 2.0, Secure Boot, Memory Integrity, IOMMU, Vanguard installed, On-Demand eligibility
 - Network: Wi-Fi instead of cable; link speed; adapter power saving; Delivery Optimization internet uploads
 
-## Tweak list (stages 3–4)
+## Tweak list (stages 5–6)
 
 Essential: Kestrel power plan (High performance base, no core parking, USB/PCIe power saving off;
 laptops only on charger); VALORANT on "High performance" GPU; Game Mode on; Game DVR background

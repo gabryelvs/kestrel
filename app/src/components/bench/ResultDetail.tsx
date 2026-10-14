@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { benchCopyResults, benchDelete, benchGet, benchRename, benchSetBaseline } from '../../api/client';
-import { dateText, flagText, METRIC_ORDER, metricText, metricValue, pct, settingsText, spreadText, verdictText, verdictTone } from '../../api/bench';
+import { contextRows, dateText, flagText, METRIC_ORDER, metricText, metricValue, pct, spreadText, verdictText, verdictTone } from '../../api/bench';
 import type { BenchDetail } from '../../api/types';
 import { strings } from '../../strings';
 import { FrameGraph } from './FrameGraph';
@@ -50,16 +50,6 @@ export function ResultDetail({ id, onChanged, revealWhenLoaded = false }: { id: 
       setNote(b.copyFailed);
     }
   };
-
-  const ctx = bench.context;
-  const contextRows: [string, string][] = [
-    [b.contextRows.powerPlan, ctx.powerPlan ?? '—'],
-    [b.contextRows.ram, ctx.ramMts ? `${ctx.ramMts} MT/s` : '—'],
-    [b.contextRows.gpu, ctx.gpu ? `${ctx.gpu}${ctx.gpuDriver ? ` · ${ctx.gpuDriver}` : ''}` : '—'],
-    [b.contextRows.windows, ctx.windowsBuild ? String(ctx.windowsBuild) : '—'],
-    [b.contextRows.display, ctx.displayHz ? `${ctx.displayHz} Hz` : '—'],
-    [b.contextRows.game, settingsText(ctx.gameSettings)],
-  ];
 
   return (
     <section ref={sectionRef} className="panel detail">
@@ -125,7 +115,7 @@ export function ResultDetail({ id, onChanged, revealWhenLoaded = false }: { id: 
       <div>
         <div className="label">{b.context}</div>
         <dl className="hw num">
-          {contextRows.map(([name, value]) => (
+          {contextRows(bench.context).map(([name, value]) => (
             <div key={name} className="hw-row">
               <dt>{name}</dt>
               <dd title={value}>{value}</dd>

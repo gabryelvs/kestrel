@@ -3,24 +3,26 @@ use crate::snapshot::{GpuInfo, GpuVendor};
 use regex::Regex;
 use std::sync::OnceLock;
 
-const VIRTUAL_HINTS: &[&str] = &[
-    "virtual",
-    "parsec",
-    "basic display",
-    "remote display",
-    "indirect display",
-    "displaylink",
-];
+/// Name hints of adapters whose monitors exist only in software: remote play, remote desktop and virtual displays.
+const VIRTUAL_DISPLAY_HINTS: &[&str] = &["virtual", "parsec", "remote display", "indirect display"];
+
+/// Adapters that drive real monitors but aren't a graphics card a game runs on: DisplayLink USB docks, and the
+/// Microsoft Basic Display Adapter Windows uses for a card without its driver.
+const NOT_A_GAMING_GPU_HINTS: &[&str] = &["basic display", "displaylink"];
 
 /// PCI vendor ids (uppercase) of virtual adapters: Microsoft, VMware, VirtIO and Parallels.
 const VIRTUAL_VENDOR_IDS: &[&str] = &["VEN_1414", "VEN_15AD", "VEN_1AF4", "VEN_1AB8"];
 
 /// Vendor from the PCI id inside a PNP device id ("PCI\\VEN_10DE&…"), falling back to the name.
-/// Virtual name hints and virtual vendor ids are checked first and override the PCI vendor.
+/// Virtual name hints and virtual vendor ids are checked first and override the PCI vendor, so virtual adapters and
+/// adapters no game runs on (DisplayLink, Microsoft Basic Display Adapter) never become the main GPU.
 pub fn vendor_from(pnp_device_id: &str, name: &str) -> GpuVendor {
     let id = pnp_device_id.to_ascii_uppercase();
     let lower = name.to_ascii_lowercase();
-    if VIRTUAL_HINTS.iter().any(|h| lower.contains(h))
+    if VIRTUAL_DISPLAY_HINTS
+        .iter()
+        .chain(NOT_A_GAMING_GPU_HINTS)
+        .any(|h| lower.contains(h))
         || VIRTUAL_VENDOR_IDS.iter().any(|v| id.contains(v))
     {
         GpuVendor::Virtual
@@ -33,6 +35,13 @@ pub fn vendor_from(pnp_device_id: &str, name: &str) -> GpuVendor {
     } else {
         GpuVendor::Other
     }
+}
+
+/// Whether a monitor on this adapter (the name `EnumDisplayDevices` gives) exists only in software, like Parsec's or
+/// a remote desktop's. Monitors on a DisplayLink dock or on the Microsoft Basic Display Adapter are real.
+pub fn is_virtual_display(adapter: &str) -> bool {
+    let lower = adapter.to_ascii_lowercase();
+    VIRTUAL_DISPLAY_HINTS.iter().any(|h| lower.contains(h))
 }
 
 /// Integrated graphics. Intel: anything without a discrete Arc model number (A- or B-series).
@@ -115,6 +124,7 @@ mod tests {
             driver_date: None,
             vram_mb: vram,
             is_integrated: integrated,
+            ..Default::default()
         }
     }
 
@@ -298,6 +308,29 @@ mod tests {
     }
 
     #[test]
+    fn main_gpu_keeps_the_last_of_equally_big_discrete_cards() {
+        // `max_by_key` keeps the last of equal maxima: of two discrete cards with the same video memory (or none
+        // reported for either) the one listed second is the main one. The TypeScript `mainGpu` in
+        // app/src/api/findings.ts has to break ties the same way, or the Hardware tab and the checks would name
+        // different cards.
+        for vram in [Some(8192), None] {
+            let card = |name: &str| gpu(name, GpuVendor::Nvidia, false, vram);
+            let first = card("NVIDIA GeForce RTX 3060 Ti");
+            let second = card("NVIDIA GeForce RTX 3070");
+            assert_eq!(
+                main_gpu(&[first.clone(), second.clone()]).unwrap().name,
+                "NVIDIA GeForce RTX 3070",
+                "{vram:?}"
+            );
+            assert_eq!(
+                main_gpu(&[second, first]).unwrap().name,
+                "NVIDIA GeForce RTX 3060 Ti",
+                "{vram:?}"
+            );
+        }
+    }
+
+    #[test]
     fn nvidia_versions_decode() {
         assert_eq!(nvidia_version("32.0.16.1074").as_deref(), Some("610.74"));
         assert_eq!(nvidia_version("31.0.15.5222").as_deref(), Some("552.22"));
@@ -311,6 +344,36 @@ mod tests {
                 ..g
             }),
             "610.74"
+        );
+    }
+
+    #[test]
+    fn monitors_on_displaylink_and_basic_display_adapters_are_real() {
+        // A DisplayLink dock drives real monitors over USB; Windows uses the Basic Display Adapter for a graphics card
+        // without its driver. Neither monitor is virtual.
+        for adapter in [
+            "DisplayLink USB Device",
+            "Microsoft Basic Display Adapter",
+            "NVIDIA GeForce RTX 3060 Ti",
+            "Intel(R) UHD Graphics 750",
+        ] {
+            assert!(!is_virtual_display(adapter), "{adapter}");
+        }
+        for adapter in [
+            "Parsec Virtual Display Adapter",
+            "Microsoft Remote Display Adapter",
+            "Virtual Display Driver",
+        ] {
+            assert!(is_virtual_display(adapter), "{adapter}");
+        }
+        // As graphics cards they still don't count, so neither becomes the card the checks look at.
+        assert_eq!(
+            vendor_from("USB\\VID_17E9&PID_4301", "DisplayLink USB Device"),
+            GpuVendor::Virtual
+        );
+        assert_eq!(
+            vendor_from("PCI\\VEN_10DE&DEV_2489", "Microsoft Basic Display Adapter"),
+            GpuVendor::Virtual
         );
     }
 }

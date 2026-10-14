@@ -1,6 +1,6 @@
 import mock from './mock-report.json';
 import { fakeSession, sampleDelete, sampleDetail, sampleList, sampleProfile, sampleRename, sampleSetBaseline } from './sample-bench';
-import type { BenchDetail, BenchState, BenchmarkSummary, GameProfile, LoadSample, Report } from './types';
+import type { BenchDetail, BenchState, BenchmarkSummary, CoreClock, GameProfile, LoadSample, Report } from './types';
 
 const sample = mock as unknown as Report;
 
@@ -27,6 +27,15 @@ export const getLoad = (): Promise<LoadSample> => {
   return Promise.resolve({ cpuPercent: wave(3, 9, 5), ramPercent: 41, gpuPercent: wave(5, 4, 2), gpuTempC: 44 });
 };
 
+let clockTick = 0;
+/** Each physical core's clock now. The browser preview makes up 8 cores around 4.8 GHz that move on every call. */
+export const getCpuClocks = (): Promise<CoreClock[]> => {
+  if (inTauri()) return call<CoreClock[]>('get_cpu_clocks');
+  clockTick += 1;
+  const mhz = (core: number) => Math.round(4800 + 250 * Math.sin(clockTick / 2 + core) + Math.random() * 40);
+  return Promise.resolve(Array.from({ length: 8 }, (_, core) => ({ core, kind: null, mhz: mhz(core) })));
+};
+
 export async function openLink(url: string): Promise<void> {
   if (!inTauri()) {
     window.open(url, '_blank', 'noopener');
@@ -36,7 +45,7 @@ export async function openLink(url: string): Promise<void> {
   await openUrl(url);
 }
 
-// Stage 2: the benchmark. In the browser preview these use sample data and a fake session.
+// The benchmark. In the browser preview these use sample data and a fake session.
 export const benchProfiles = (): Promise<GameProfile[]> => (inTauri() ? call('bench_profiles') : Promise.resolve([sampleProfile]));
 export const benchState = (): Promise<BenchState | null> => (inTauri() ? call('bench_state') : Promise.resolve(fakeSession.state()));
 export const benchStart = (profile: string): Promise<BenchState> => (inTauri() ? call('bench_start', { profile }) : later(fakeSession.start(), 300));

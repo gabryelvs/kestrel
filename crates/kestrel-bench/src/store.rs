@@ -95,6 +95,14 @@ impl Store {
             .collect()
     }
 
+    /// The saved benchmarks' ids, newest first. They come from the index, so no benchmark file is opened (a lost or
+    /// damaged index is first rebuilt from the folders): a caller that wants the benchmarks reads each one once with
+    /// `get`, where `list` has already read them all. A benchmark whose files can't be read is still named here, and
+    /// `get` returns None for it.
+    pub fn ids(&self) -> Vec<String> {
+        self.index().ids.into_iter().rev().collect()
+    }
+
     pub fn get(&self, id: &str) -> Option<Benchmark> {
         if !safe_id(id) {
             return None;
@@ -280,7 +288,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BenchResult, RunMetrics};
+    use crate::model::{BenchResult, GpuLink, RunMetrics};
 
     fn bench(created_at: &str, avg: f64) -> Benchmark {
         Benchmark {
@@ -360,6 +368,153 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "no temporary files stay behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn ids_are_newest_first_and_come_from_the_index_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        assert!(store.ids().is_empty(), "nothing saved yet");
+        let a = store
+            .save(&mut bench("2026-10-12T21:30:05Z", 1.0), &[])
+            .unwrap();
+        let b = store
+            .save(&mut bench("2026-10-13T08:00:00Z", 2.0), &[])
+            .unwrap();
+        let c = store
+            .save(&mut bench("2026-10-14T08:00:00Z", 3.0), &[])
+            .unwrap();
+        assert_eq!(store.ids(), vec![c.clone(), b.clone(), a.clone()]);
+        // No benchmark file is opened: a damaged one is still named (`get` says it can't be read), where `list`
+        // leaves it out.
+        std::fs::write(dir.path().join(&b).join("summary.json"), "{not json").unwrap();
+        assert_eq!(store.ids(), vec![c.clone(), b.clone(), a.clone()]);
+        assert!(store.get(&b).is_none());
+        assert_eq!(store.list().len(), 2);
+        store.delete(&c).unwrap();
+        assert_eq!(store.ids(), vec![b, a]);
+    }
+
+    /// A summary.json as v0.2.0 wrote it: its context has no `gpuPnpDeviceId` and no `gpuLink`.
+    const SAVED_BY_0_2_0: &str = r#"{
+  "id": "20261013-191500",
+  "name": "Starting point",
+  "createdAt": "2026-10-13T19:15:00Z",
+  "profileId": "valorant",
+  "routeVersion": 1,
+  "kestrelVersion": "0.2.0",
+  "presentmonVersion": "2.6.0",
+  "runs": [
+    {
+      "metrics": {
+        "frames": 36000,
+        "durationS": 90.0,
+        "avgFps": 400.0,
+        "low1Fps": 280.0,
+        "low01Fps": 200.0,
+        "stuttersPerMin": 0.4,
+        "pcLatencyMs": 9.8,
+        "gpuBusyRatio": 0.82,
+        "bottleneck": "gpu"
+      },
+      "flags": [],
+      "kept": false
+    }
+  ],
+  "result": {
+    "metrics": {
+      "frames": 36000,
+      "durationS": 90.0,
+      "avgFps": 400.0,
+      "low1Fps": 280.0,
+      "low01Fps": 200.0,
+      "stuttersPerMin": 0.4,
+      "pcLatencyMs": 9.8,
+      "gpuBusyRatio": 0.82,
+      "bottleneck": "gpu"
+    },
+    "spread": {
+      "avgFps": 0.0,
+      "low1Fps": 0.0,
+      "low01Fps": 0.0
+    }
+  },
+  "context": {
+    "powerPlan": "EXM Free Power Plan V8",
+    "ramMts": 3600,
+    "gpu": "NVIDIA GeForce RTX 3060 Ti",
+    "gpuDriver": "610.74",
+    "windowsBuild": 26200,
+    "displayHz": 360,
+    "gameSettings": {
+      "resolution": [1920, 1080],
+      "fullscreenMode": 0,
+      "vsync": false,
+      "frameRateLimit": 0.0,
+      "reflex": 1,
+      "multithreadedRendering": true,
+      "quality": {
+        "sg.ShadowQuality": "0"
+      },
+      "limits": {},
+      "riotSettingsRead": true
+    }
+  }
+}"#;
+
+    #[test]
+    fn a_benchmark_saved_by_v0_2_0_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("20261013-191500");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("summary.json"), SAVED_BY_0_2_0).unwrap();
+        std::fs::write(
+            dir.path().join("index.json"),
+            r#"{"ids": ["20261013-191500"], "baseline": "20261013-191500"}"#,
+        )
+        .unwrap();
+        let store = Store::new(dir.path());
+        let old = store
+            .get("20261013-191500")
+            .expect("a v0.2.0 benchmark loads");
+        assert_eq!(
+            old.context.gpu.as_deref(),
+            Some("NVIDIA GeForce RTX 3060 Ti")
+        );
+        assert_eq!(old.context.windows_build, 26200);
+        assert_eq!(
+            (old.context.gpu_pnp_device_id, old.context.gpu_link),
+            (None, None),
+            "the new fields are simply missing"
+        );
+        let list = store.list();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].is_baseline);
+        assert_eq!(list[0].result.metrics.avg_fps, 400.0);
+    }
+
+    #[test]
+    fn the_card_and_its_link_survive_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let card = "PCI\\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\\4&1A2B3C4D&0&0008";
+        let mut linked = bench("2026-10-13T20:00:00Z", 410.0);
+        linked.context.gpu_pnp_device_id = Some(card.into());
+        linked.context.gpu_link = Some(GpuLink { gen: 4, width: 16 });
+        let id = store.save(&mut linked, &[]).unwrap();
+        let back = store.get(&id).unwrap();
+        assert_eq!(back, linked);
+        assert_eq!(back.context.gpu_link, Some(GpuLink { gen: 4, width: 16 }));
+        // The UI reads these names (camelCase, like every other field).
+        let json: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join(&id).join("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["context"]["gpuPnpDeviceId"], serde_json::json!(card));
+        assert_eq!(
+            json["context"]["gpuLink"],
+            serde_json::json!({"gen": 4, "width": 16})
         );
     }
 

@@ -1,6 +1,7 @@
 //! The Health Check: one finding per check, in plain words, each with a way to fix it.
 use crate::bios_guide::memory_profile_name;
 use crate::gpu;
+use crate::pcie;
 use crate::ram::{self, ChannelLayout};
 use crate::snapshot::*;
 use chrono::NaiveDate;
@@ -45,6 +46,8 @@ pub enum BiosTopic {
     Iommu,
     ResizableBar,
     UpdateBios,
+    PcieSlot,
+    Virtualization,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -56,6 +59,11 @@ pub enum Fix {
     Link { label: String, url: String },
     Nothing,
 }
+
+/// The stage that brings the tweak engine: Kestrel's own power plan, Game Mode and background recording.
+pub const TWEAKS_STAGE: u8 = 5;
+/// The stage that brings the Competitive tier: startup apps, adapter power saving and Delivery Optimization.
+pub const COMPETITIVE_STAGE: u8 = 6;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +133,9 @@ pub fn run_health_check(s: &SystemSnapshot, today: NaiveDate) -> Vec<Finding> {
         ram_speed(s),
         ram_channels(s),
         bios_age(s),
+        pcie_lanes(s),
+        pcie_speed(s),
+        resizable_bar(s),
         display_refresh(s),
         virtual_display(s),
         gpu_driver_age(s, today),
@@ -142,6 +153,7 @@ pub fn run_health_check(s: &SystemSnapshot, today: NaiveDate) -> Vec<Finding> {
         tpm(s),
         secure_boot(s),
         memory_integrity(s),
+        virtualization(s),
         iommu(s),
         vanguard(s),
         on_demand(s),
@@ -214,6 +226,178 @@ fn bios_age(s: &SystemSnapshot) -> Finding {
         ),
         Some(date) => c.pass(format!("BIOS is from {date}"), "Recent enough for Riot's December 2025 security fix."),
         None => c.unknown("Couldn't read your BIOS date", "Windows didn't report when your BIOS was released."),
+    }
+}
+
+/// The main graphics card when it is a separate one: None when there is no GPU, or the main one is built into the
+/// processor or virtual.
+fn separate_card(s: &SystemSnapshot) -> Option<&GpuInfo> {
+    gpu::main_gpu(&s.gpus).filter(|g| !g.is_integrated && g.vendor != GpuVendor::Virtual)
+}
+
+/// What a graphics check says without a separate card: Info, so it never counts.
+fn no_separate_card(c: Check) -> Finding {
+    Check {
+        severity: Severity::Info,
+        ..c
+    }
+    .info("No separate graphics card to check", "")
+}
+
+fn pcie_lanes(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "pcie-lanes",
+        category: Category::Hardware,
+        severity: Severity::Medium,
+    };
+    let Some(card) = separate_card(s) else {
+        return no_separate_card(c);
+    };
+    let pcie_info = card.pcie.as_ref();
+    match (
+        pcie_info.and_then(|p| p.now.as_ref()),
+        pcie_info.and_then(|p| p.card_max.as_ref()),
+    ) {
+        (Some(now), Some(max)) if now.width >= max.width => c.pass(
+            "Graphics card uses all its PCIe lanes",
+            format!("x{}, as the card supports.", now.width),
+        ),
+        // Many gaming laptops wire an x16 card with x8 or x4 lanes: there is no slot to change.
+        (Some(now), Some(max)) if s.machine.form_factor == FormFactor::Laptop => Check {
+            severity: Severity::Info,
+            ..c
+        }
+        .info(
+            format!(
+                "Graphics card runs at x{} of its x{} lanes",
+                now.width, max.width
+            ),
+            "Laptops wire their graphics card this way, so there's nothing to change.",
+        ),
+        (Some(now), Some(max)) => {
+            let severity = if now.width <= 4 {
+                Severity::High
+            } else {
+                Severity::Medium
+            };
+            Check { severity, ..c }.problem(
+                format!("Graphics card runs at x{} instead of x{}", now.width, max.width),
+                "It loses some FPS, more at x4. Usual causes: the card sits in a lower slot, an M.2 drive or second card shares its lanes, or it isn't pushed fully in. In an external (Thunderbolt) enclosure x4 is normal.",
+                Fix::BiosGuide { topic: BiosTopic::PcieSlot },
+            )
+        }
+        _ => c.unknown(
+            "Couldn't read the graphics card's PCIe link",
+            "Windows didn't report it for this card.",
+        ),
+    }
+}
+
+/// Cards slow their link when idle, so the generation is judged from the link measured during a benchmark on this
+/// card, against the lower of what the card and the slot support.
+fn pcie_speed(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "pcie-speed",
+        category: Category::Hardware,
+        severity: Severity::Low,
+    };
+    let Some(card) = separate_card(s) else {
+        return no_separate_card(c);
+    };
+    let Some(load) = &card.link_under_load else {
+        return Check {
+            severity: Severity::Info,
+            ..c
+        }
+        .info(
+            "Run a benchmark to check the PCIe link under load",
+            "Graphics cards slow their link when idle, so Kestrel checks it during a benchmark.",
+        );
+    };
+    let pcie_info = card.pcie.as_ref();
+    let (Some(card_max), Some(slot_max)) = (
+        pcie_info.and_then(|p| p.card_max.as_ref()),
+        pcie_info.and_then(|p| p.slot_max.as_ref()),
+    ) else {
+        return c.unknown(
+            "Couldn't read the slot's PCIe speed",
+            "Windows didn't report what the slot supports.",
+        );
+    };
+    let expected = card_max.gen.min(slot_max.gen);
+    let got = load.link.gen;
+    if got >= expected {
+        return c.pass(
+            "PCIe link runs at full speed under load",
+            format!(
+                "PCIe {} during your latest benchmark.",
+                pcie::gen_label(got)
+            ),
+        );
+    }
+    let severity = if got <= 2 {
+        Severity::High
+    } else {
+        Severity::Low
+    };
+    Check { severity, ..c }.problem(
+        format!(
+            "PCIe link runs at {} under load instead of {}",
+            pcie::gen_label(got),
+            pcie::gen_label(expected)
+        ),
+        "Measured during your latest benchmark. Set the slot's PCIe speed to Auto in the BIOS, and check the card sits in the top slot.",
+        Fix::BiosGuide { topic: BiosTopic::PcieSlot },
+    )
+}
+
+/// How much Resizable BAR matters depends on the card: a lot on Intel Arc, a little on AMD (Smart Access Memory),
+/// next to nothing on NVIDIA, and not at all on cards that don't use it.
+fn resizable_bar(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "resizable-bar",
+        category: Category::Hardware,
+        severity: Severity::Low,
+    };
+    let Some(card) = separate_card(s) else {
+        return no_separate_card(c);
+    };
+    let off = "Resizable BAR is off";
+    let guide = Fix::BiosGuide {
+        topic: BiosTopic::ResizableBar,
+    };
+    let info = Check {
+        severity: Severity::Info,
+        ..c
+    };
+    let uses_it = pcie::uses_resizable_bar(card.vendor, &card.name);
+    match (card.resizable_bar, card.vendor, uses_it) {
+        (None, ..) => c.unknown("Windows doesn't report Resizable BAR for this card", ""),
+        (Some(true), ..) => c.pass("Resizable BAR is on", ""),
+        (Some(false), GpuVendor::Intel, true) => Check {
+            severity: Severity::High,
+            ..c
+        }
+        .problem(
+            off,
+            "Intel Arc cards lose a lot of FPS without it. Turn on Above 4G Decoding and Re-Size BAR in the BIOS; Windows must start in UEFI mode (CSM off).",
+            guide,
+        ),
+        (Some(false), GpuVendor::Amd, true) => c.problem(
+            off,
+            "AMD calls it Smart Access Memory. It adds a few FPS in some games. Windows must start in UEFI mode (CSM off).",
+            guide,
+        ),
+        (Some(false), GpuVendor::Nvidia, true) => info.result(
+            Status::Info,
+            off,
+            "NVIDIA only uses it in games on its own list, so most games, VALORANT included, gain little. Turning it on is optional.",
+            guide,
+        ),
+        (Some(false), ..) => info.info(
+            off,
+            "Only newer cards use it: NVIDIA RTX 30 series and newer, AMD RX 6000 and newer, and Intel Arc.",
+        ),
     }
 }
 
@@ -431,8 +615,8 @@ fn power_plan(s: &SystemSnapshot) -> Finding {
     } else if guid == BALANCED || guid == POWER_SAVER {
         c.problem(
             format!("Power plan is {}", plan.name),
-            "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 3. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead.",
-            Fix::LaterStage { stage: 3 },
+            format!("This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage {TWEAKS_STAGE}. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead."),
+            Fix::LaterStage { stage: TWEAKS_STAGE },
         )
     } else {
         c.info(
@@ -450,7 +634,7 @@ fn game_mode(s: &SystemSnapshot) -> Finding {
     };
     match s.windows.game_mode {
         Some(true) => c.pass("Game Mode is on", ""),
-        Some(false) => c.problem("Game Mode is off", "Game Mode tells Windows to favour the game you're playing. Ryzen X3D chips also need it to pick the right cores.", Fix::LaterStage { stage: 3 }),
+        Some(false) => c.problem("Game Mode is off", "Game Mode tells Windows to favour the game you're playing. Ryzen X3D chips also need it to pick the right cores.", Fix::LaterStage { stage: TWEAKS_STAGE }),
         None => c.unknown("Couldn't read the Game Mode setting", ""),
     }
 }
@@ -462,7 +646,7 @@ fn background_recording(s: &SystemSnapshot) -> Finding {
         severity: Severity::Medium,
     };
     match s.windows.background_recording {
-        Some(true) => c.problem("Background recording is on", "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS.", Fix::LaterStage { stage: 3 }),
+        Some(true) => c.problem("Background recording is on", "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS.", Fix::LaterStage { stage: TWEAKS_STAGE }),
         Some(false) => c.pass("Background recording is off", ""),
         None => c.unknown("Couldn't read the background recording setting", ""),
     }
@@ -612,8 +796,8 @@ fn startup_apps(s: &SystemSnapshot) -> Finding {
     match s.windows.startup_app_count {
         Some(n) if n > 10 => c.problem(
             title(n),
-            "Each one uses memory and CPU in the background. Kestrel's startup manager arrives in stage 4; until then, turn off what you don't need in Task Manager → Startup apps.",
-            Fix::LaterStage { stage: 4 },
+            format!("Each one uses memory and CPU in the background. Kestrel's startup manager arrives in stage {COMPETITIVE_STAGE}; until then, turn off what you don't need in Task Manager → Startup apps."),
+            Fix::LaterStage { stage: COMPETITIVE_STAGE },
         ),
         Some(n) => c.pass(title(n), ""),
         None => c.unknown("Couldn't count startup apps", ""),
@@ -674,6 +858,24 @@ fn memory_integrity(s: &SystemSnapshot) -> Finding {
         Some(true) => c.info("Memory Integrity is on", "Good for security, and needed for Vanguard's On-Demand mode. It can cost a few percent of FPS; Kestrel's Extreme tier will offer to turn it off, with a warning."),
         Some(false) => c.info("Memory Integrity is off", "VALORANT works fine like this. Riot can require it on for flagged accounts, and Vanguard's On-Demand mode needs it."),
         None => c.unknown("Couldn't check Memory Integrity", ""),
+    }
+}
+
+fn virtualization(s: &SystemSnapshot) -> Finding {
+    let c = Check {
+        id: "virtualization",
+        category: Category::Vanguard,
+        severity: Severity::Info,
+    };
+    match s.cpu.virtualization {
+        Some(true) => c.pass("Virtualization is on", ""),
+        Some(false) => c.result(
+            Status::Info,
+            "Virtualization is off",
+            "VALORANT works fine like this. Windows needs it for Memory Integrity, which Riot can require on flagged accounts. It's called Intel Virtualization Technology (VT-x) or SVM on AMD.",
+            Fix::BiosGuide { topic: BiosTopic::Virtualization },
+        ),
+        None => c.unknown("Couldn't tell whether virtualization is on", ""),
     }
 }
 
@@ -809,7 +1011,7 @@ fn adapter_power(s: &SystemSnapshot) -> Finding {
     };
     let active: Vec<&NetAdapter> = s.network.adapters.iter().filter(|a| a.connected).collect();
     if active.iter().any(|a| a.power_saving == Some(true)) {
-        c.problem("Network adapter power saving is on", "Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage 4.", Fix::LaterStage { stage: 4 })
+        c.problem("Network adapter power saving is on", format!("Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage {COMPETITIVE_STAGE}."), Fix::LaterStage { stage: COMPETITIVE_STAGE })
     } else if !active.is_empty() && active.iter().all(|a| a.power_saving == Some(false)) {
         c.pass("Network adapter power saving is off", "")
     } else {
@@ -827,7 +1029,9 @@ fn delivery_optimization(s: &SystemSnapshot) -> Finding {
         Some(true) => c.problem(
             "Windows Update uploads to other PCs over the internet",
             "Your PC shares updates with strangers, which uses upload bandwidth while you play.",
-            Fix::LaterStage { stage: 4 },
+            Fix::LaterStage {
+                stage: COMPETITIVE_STAGE,
+            },
         ),
         Some(false) => c.pass("Windows Update doesn't upload to the internet", ""),
         None => c.unknown("Couldn't read the Windows Update sharing setting", ""),
@@ -867,6 +1071,7 @@ mod tests {
             height: 1080,
             is_primary: primary,
             is_virtual,
+            ..Default::default()
         }
     }
 
@@ -878,6 +1083,7 @@ mod tests {
             driver_date: date.map(Into::into),
             vram_mb: Some(if integrated { 128 } else { 8192 }),
             is_integrated: integrated,
+            ..Default::default()
         }
     }
 
@@ -1231,7 +1437,12 @@ mod tests {
                 "{name}"
             );
             assert_eq!(plan.title, format!("Power plan is {name}"));
-            assert_eq!(plan.fix, Fix::LaterStage { stage: 3 });
+            assert_eq!(
+                plan.fix,
+                Fix::LaterStage {
+                    stage: TWEAKS_STAGE
+                }
+            );
             // Laptops with Modern Standby only offer Balanced, so the detail names the Power mode setting too.
             assert!(
                 plan.detail
@@ -1360,7 +1571,7 @@ mod tests {
     #[test]
     fn owner_pc_full_results() {
         let f = run_health_check(&owner_pc_fixture(), today());
-        assert_eq!(f.len(), 27);
+        assert_eq!(f.len(), 31);
         let with = |status: Status| -> Vec<&str> {
             f.iter()
                 .filter(|x| x.status == status)
@@ -1373,7 +1584,7 @@ mod tests {
         );
         assert_eq!(
             with(Status::Info),
-            vec!["memory-integrity", "iommu", "on-demand"]
+            vec!["pcie-speed", "memory-integrity", "iommu", "on-demand"]
         );
         assert!(with(Status::Unknown).is_empty());
     }
@@ -1610,5 +1821,721 @@ mod tests {
             get(&run_health_check(&s, today()), "tpm").severity,
             Severity::Low
         );
+    }
+
+    // The four BIOS-related checks: pcie-lanes, pcie-speed, resizable-bar and virtualization.
+
+    /// A finding as the contract table spells it out.
+    fn expected(
+        id: &str,
+        category: Category,
+        status: Status,
+        severity: Severity,
+        title: &str,
+        detail: &str,
+        fix: Fix,
+    ) -> Finding {
+        Finding {
+            id: id.into(),
+            category,
+            severity,
+            status,
+            title: title.into(),
+            detail: detail.into(),
+            fix,
+        }
+    }
+
+    fn finding(s: &SystemSnapshot, id: &str) -> Finding {
+        get(&run_health_check(s, today()), id).clone()
+    }
+
+    /// The owner's PC with its graphics card (the RTX 3060 Ti: 4.0 x16 card in a 4.0 x16 slot, running x16,
+    /// Resizable BAR on, no benchmark yet) changed by `change`.
+    fn with_card(change: impl FnOnce(&mut GpuInfo)) -> SystemSnapshot {
+        let mut s = owner_pc_fixture();
+        let card = s
+            .gpus
+            .iter_mut()
+            .find(|g| g.vendor == GpuVendor::Nvidia)
+            .expect("the owner's RTX 3060 Ti");
+        change(card);
+        s
+    }
+
+    fn link(gen: u8, width: u8) -> Option<PcieLink> {
+        Some(PcieLink { gen, width })
+    }
+
+    /// A link measured during a benchmark on 13 October 2026.
+    fn under_load(gen: u8, width: u8) -> Option<LinkUnderLoad> {
+        Some(LinkUnderLoad {
+            link: PcieLink { gen, width },
+            measured_at: "2026-10-13T18:42:07+01:00".into(),
+            benchmark_id: "2026-10-13-184207".into(),
+        })
+    }
+
+    const LANES_DETAIL: &str = "It loses some FPS, more at x4. Usual causes: the card sits in a lower slot, an M.2 drive or second card shares its lanes, or it isn't pushed fully in. In an external (Thunderbolt) enclosure x4 is normal.";
+    const SPEED_PROBLEM_DETAIL: &str = "Measured during your latest benchmark. Set the slot's PCIe speed to Auto in the BIOS, and check the card sits in the top slot.";
+    const RUN_A_BENCHMARK: &str =
+        "Graphics cards slow their link when idle, so Kestrel checks it during a benchmark.";
+
+    #[test]
+    fn the_31_checks_run_in_a_fixed_order() {
+        let ids: Vec<String> = run_health_check(&owner_pc_fixture(), today())
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "ram-speed",
+                "ram-channels",
+                "bios-age",
+                "pcie-lanes",
+                "pcie-speed",
+                "resizable-bar",
+                "display-refresh",
+                "virtual-display",
+                "gpu-driver-age",
+                "valorant-gpu",
+                "on-battery",
+                "power-plan",
+                "game-mode",
+                "background-recording",
+                "pending-restart",
+                "windows-build",
+                "valorant-drive",
+                "drive-space",
+                "background-cpu",
+                "startup-apps",
+                "tpm",
+                "secure-boot",
+                "memory-integrity",
+                "virtualization",
+                "iommu",
+                "vanguard",
+                "on-demand",
+                "wired",
+                "link-speed",
+                "adapter-power",
+                "delivery-optimization",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_owners_pc_passes_the_new_checks_asks_for_a_benchmark_and_still_scores_86() {
+        let s = owner_pc_fixture();
+        assert_eq!(
+            finding(&s, "pcie-lanes"),
+            expected(
+                "pcie-lanes",
+                Category::Hardware,
+                Status::Pass,
+                Severity::Medium,
+                "Graphics card uses all its PCIe lanes",
+                "x16, as the card supports.",
+                Fix::Nothing
+            )
+        );
+        assert_eq!(
+            finding(&s, "pcie-speed"),
+            expected(
+                "pcie-speed",
+                Category::Hardware,
+                Status::Info,
+                Severity::Info,
+                "Run a benchmark to check the PCIe link under load",
+                RUN_A_BENCHMARK,
+                Fix::Nothing
+            )
+        );
+        assert_eq!(
+            finding(&s, "resizable-bar"),
+            expected(
+                "resizable-bar",
+                Category::Hardware,
+                Status::Pass,
+                Severity::Low,
+                "Resizable BAR is on",
+                "",
+                Fix::Nothing
+            )
+        );
+        assert_eq!(
+            finding(&s, "virtualization"),
+            expected(
+                "virtualization",
+                Category::Vanguard,
+                Status::Pass,
+                Severity::Info,
+                "Virtualization is on",
+                "",
+                Fix::Nothing
+            )
+        );
+        let score = crate::score::score(&run_health_check(&s, today()));
+        assert_eq!((score.value, score.problems), (86, 3));
+    }
+
+    #[test]
+    fn without_a_separate_card_the_graphics_checks_have_nothing_to_check() {
+        // The integrated GPU's own values would be problems if they counted.
+        let integrated = GpuInfo {
+            pcie: Some(PcieInfo {
+                card_max: link(4, 16),
+                slot_max: link(4, 16),
+                now: link(1, 1),
+            }),
+            link_under_load: under_load(1, 1),
+            resizable_bar: Some(false),
+            ..gpu(
+                "Intel(R) UHD Graphics 750",
+                GpuVendor::Intel,
+                true,
+                Some("2026-09-01"),
+            )
+        };
+        let parsec = gpu(
+            "Parsec Virtual Display Adapter",
+            GpuVendor::Virtual,
+            false,
+            None,
+        );
+        for (case, gpus) in [
+            ("no GPUs", vec![]),
+            ("integrated only", vec![integrated]),
+            ("virtual only", vec![parsec]),
+        ] {
+            let mut s = owner_pc_fixture();
+            s.gpus = gpus;
+            for id in ["pcie-lanes", "pcie-speed", "resizable-bar"] {
+                assert_eq!(
+                    finding(&s, id),
+                    expected(
+                        id,
+                        Category::Hardware,
+                        Status::Info,
+                        Severity::Info,
+                        "No separate graphics card to check",
+                        "",
+                        Fix::Nothing
+                    ),
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_graphics_checks_look_at_the_main_card_only() {
+        // Integrated + Parsec + the RTX 3060 Ti at x8: only the RTX counts.
+        let mut s = with_card(|card| card.pcie.as_mut().unwrap().now = link(4, 8));
+        s.gpus.insert(
+            0,
+            GpuInfo {
+                pcie: Some(PcieInfo {
+                    card_max: link(4, 16),
+                    slot_max: link(4, 16),
+                    now: link(4, 16),
+                }),
+                resizable_bar: Some(false),
+                ..gpu(
+                    "Intel(R) UHD Graphics 750",
+                    GpuVendor::Intel,
+                    true,
+                    Some("2026-09-01"),
+                )
+            },
+        );
+        let f = run_health_check(&s, today());
+        assert_eq!(
+            get(&f, "pcie-lanes").title,
+            "Graphics card runs at x8 instead of x16"
+        );
+        assert_eq!(get(&f, "resizable-bar").status, Status::Pass);
+    }
+
+    #[test]
+    fn an_unreadable_link_is_unknown_never_x0() {
+        let unknown = expected(
+            "pcie-lanes",
+            Category::Hardware,
+            Status::Unknown,
+            Severity::Medium,
+            "Couldn't read the graphics card's PCIe link",
+            "Windows didn't report it for this card.",
+            Fix::Nothing,
+        );
+        for (case, s) in [
+            ("no PCIe info", with_card(|card| card.pcie = None)),
+            (
+                "no link now",
+                with_card(|card| card.pcie.as_mut().unwrap().now = None),
+            ),
+            (
+                "no card maximum",
+                with_card(|card| card.pcie.as_mut().unwrap().card_max = None),
+            ),
+        ] {
+            assert_eq!(finding(&s, "pcie-lanes"), unknown, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_card_using_all_its_lanes_passes_without_the_slot_maximum() {
+        // An x8 card (RX 6600 class) running x8 uses all its lanes, whatever the slot reports.
+        let s = with_card(|card| {
+            let pcie = card.pcie.as_mut().unwrap();
+            pcie.card_max = link(4, 8);
+            pcie.now = link(4, 8);
+            pcie.slot_max = None;
+        });
+        assert_eq!(
+            finding(&s, "pcie-lanes"),
+            expected(
+                "pcie-lanes",
+                Category::Hardware,
+                Status::Pass,
+                Severity::Medium,
+                "Graphics card uses all its PCIe lanes",
+                "x8, as the card supports.",
+                Fix::Nothing
+            )
+        );
+    }
+
+    #[test]
+    fn fewer_lanes_than_the_card_supports_is_a_problem_high_at_x4_or_fewer() {
+        for (width, severity) in [
+            (8, Severity::Medium),
+            (4, Severity::High),
+            (2, Severity::High),
+            (1, Severity::High),
+        ] {
+            let s = with_card(|card| card.pcie.as_mut().unwrap().now = link(4, width));
+            assert_eq!(
+                finding(&s, "pcie-lanes"),
+                expected(
+                    "pcie-lanes",
+                    Category::Hardware,
+                    Status::Problem,
+                    severity,
+                    &format!("Graphics card runs at x{width} instead of x16"),
+                    LANES_DETAIL,
+                    Fix::BiosGuide {
+                        topic: BiosTopic::PcieSlot
+                    }
+                ),
+                "x{width}"
+            );
+        }
+    }
+
+    /// The owner's PC as a laptop whose RTX 3060 Ti (an x16 card) runs at `now`.
+    fn laptop_at(now: Option<PcieLink>) -> SystemSnapshot {
+        let mut s = with_card(|card| card.pcie.as_mut().unwrap().now = now);
+        s.machine.form_factor = FormFactor::Laptop;
+        s
+    }
+
+    #[test]
+    fn a_laptop_short_of_lanes_is_info_because_its_design_sets_them() {
+        // Gaming laptops often wire an x16 card with x8 or x4: no slot to change, so no fix and no points off.
+        for width in [8, 4, 1] {
+            assert_eq!(
+                finding(&laptop_at(link(4, width)), "pcie-lanes"),
+                expected(
+                    "pcie-lanes",
+                    Category::Hardware,
+                    Status::Info,
+                    Severity::Info,
+                    &format!("Graphics card runs at x{width} of its x16 lanes"),
+                    "Laptops wire their graphics card this way, so there's nothing to change.",
+                    Fix::Nothing
+                ),
+                "x{width}"
+            );
+        }
+        let score = |s: &SystemSnapshot| crate::score::score(&run_health_check(s, today()));
+        assert_eq!(
+            score(&laptop_at(link(4, 8))),
+            score(&laptop_at(link(4, 16)))
+        );
+        // A laptop using all its lanes still passes, and one whose link can't be read is still Unknown.
+        assert_eq!(
+            finding(&laptop_at(link(4, 16)), "pcie-lanes").status,
+            Status::Pass
+        );
+        assert_eq!(
+            finding(&laptop_at(None), "pcie-lanes").status,
+            Status::Unknown
+        );
+    }
+
+    #[test]
+    fn a_desktop_or_a_pc_of_unknown_form_short_of_lanes_is_still_a_problem() {
+        for form_factor in [FormFactor::Desktop, FormFactor::Unknown] {
+            let mut s = laptop_at(link(4, 8));
+            s.machine.form_factor = form_factor;
+            assert_eq!(
+                finding(&s, "pcie-lanes"),
+                expected(
+                    "pcie-lanes",
+                    Category::Hardware,
+                    Status::Problem,
+                    Severity::Medium,
+                    "Graphics card runs at x8 instead of x16",
+                    LANES_DETAIL,
+                    Fix::BiosGuide {
+                        topic: BiosTopic::PcieSlot
+                    }
+                ),
+                "{form_factor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pcie_speed_asks_for_a_benchmark_until_one_measured_the_link() {
+        let info = expected(
+            "pcie-speed",
+            Category::Hardware,
+            Status::Info,
+            Severity::Info,
+            "Run a benchmark to check the PCIe link under load",
+            RUN_A_BENCHMARK,
+            Fix::Nothing,
+        );
+        assert_eq!(finding(&owner_pc_fixture(), "pcie-speed"), info);
+        // No benchmark comes before an unreadable slot.
+        assert_eq!(
+            finding(&with_card(|card| card.pcie = None), "pcie-speed"),
+            info
+        );
+    }
+
+    #[test]
+    fn pcie_speed_is_unknown_without_the_card_and_slot_maximum() {
+        let unknown = expected(
+            "pcie-speed",
+            Category::Hardware,
+            Status::Unknown,
+            Severity::Low,
+            "Couldn't read the slot's PCIe speed",
+            "Windows didn't report what the slot supports.",
+            Fix::Nothing,
+        );
+        let measured = |change: fn(&mut GpuInfo)| {
+            with_card(|card| {
+                card.link_under_load = under_load(3, 16);
+                change(card);
+            })
+        };
+        for (case, s) in [
+            ("no PCIe info", measured(|card| card.pcie = None)),
+            (
+                "no card maximum",
+                measured(|card| card.pcie.as_mut().unwrap().card_max = None),
+            ),
+            (
+                "no slot maximum",
+                measured(|card| card.pcie.as_mut().unwrap().slot_max = None),
+            ),
+        ] {
+            assert_eq!(finding(&s, "pcie-speed"), unknown, "{case}");
+        }
+    }
+
+    /// pcie-speed with the card and slot maxima at `card_gen` and `slot_gen` (x16) and `got` measured under load.
+    fn speed(got: u8, card_gen: u8, slot_gen: u8) -> Finding {
+        let s = with_card(|card| {
+            let pcie = card.pcie.as_mut().unwrap();
+            pcie.card_max = link(card_gen, 16);
+            pcie.slot_max = link(slot_gen, 16);
+            card.link_under_load = under_load(got, 16);
+        });
+        finding(&s, "pcie-speed")
+    }
+
+    #[test]
+    fn a_link_at_the_lower_of_card_and_slot_passes() {
+        assert_eq!(
+            speed(4, 4, 4),
+            expected(
+                "pcie-speed",
+                Category::Hardware,
+                Status::Pass,
+                Severity::Low,
+                "PCIe link runs at full speed under load",
+                "PCIe 4.0 during your latest benchmark.",
+                Fix::Nothing
+            )
+        );
+        // A 4.0 card on a 3.0 board, and a 3.0 card on a 4.0 board, are at full speed at 3.0.
+        for (card_gen, slot_gen) in [(4, 3), (3, 4)] {
+            let f = speed(3, card_gen, slot_gen);
+            assert_eq!(
+                (f.status, f.detail.as_str()),
+                (Status::Pass, "PCIe 3.0 during your latest benchmark."),
+                "card {card_gen}, slot {slot_gen}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_slower_link_under_load_is_a_problem_high_at_2_0_or_below() {
+        for (got, severity) in [(3, Severity::Low), (2, Severity::High), (1, Severity::High)] {
+            assert_eq!(
+                speed(got, 4, 4),
+                expected(
+                    "pcie-speed",
+                    Category::Hardware,
+                    Status::Problem,
+                    severity,
+                    &format!("PCIe link runs at {got}.0 under load instead of 4.0"),
+                    SPEED_PROBLEM_DETAIL,
+                    Fix::BiosGuide {
+                        topic: BiosTopic::PcieSlot
+                    }
+                ),
+                "PCIe {got}.0"
+            );
+        }
+        let five = speed(4, 5, 5);
+        assert_eq!(
+            (five.status, five.severity, five.title.as_str()),
+            (
+                Status::Problem,
+                Severity::Low,
+                "PCIe link runs at 4.0 under load instead of 5.0"
+            )
+        );
+    }
+
+    #[test]
+    fn unreported_resizable_bar_is_unknown() {
+        assert_eq!(
+            finding(
+                &with_card(|card| card.resizable_bar = None),
+                "resizable-bar"
+            ),
+            expected(
+                "resizable-bar",
+                Category::Hardware,
+                Status::Unknown,
+                Severity::Low,
+                "Windows doesn't report Resizable BAR for this card",
+                "",
+                Fix::Nothing
+            )
+        );
+    }
+
+    /// resizable-bar with the owner's card replaced by `name` from `vendor`, Resizable BAR off.
+    fn bar_off(vendor: GpuVendor, name: &str) -> Finding {
+        let s = with_card(|card| {
+            card.vendor = vendor;
+            card.name = name.into();
+            card.resizable_bar = Some(false);
+        });
+        finding(&s, "resizable-bar")
+    }
+
+    #[test]
+    fn resizable_bar_off_weighs_by_who_made_the_card() {
+        let guide = || Fix::BiosGuide {
+            topic: BiosTopic::ResizableBar,
+        };
+        assert_eq!(
+            bar_off(GpuVendor::Intel, "Intel(R) Arc(TM) A770 Graphics"),
+            expected(
+                "resizable-bar",
+                Category::Hardware,
+                Status::Problem,
+                Severity::High,
+                "Resizable BAR is off",
+                "Intel Arc cards lose a lot of FPS without it. Turn on Above 4G Decoding and Re-Size BAR in the BIOS; Windows must start in UEFI mode (CSM off).",
+                guide()
+            )
+        );
+        assert_eq!(
+            bar_off(GpuVendor::Amd, "AMD Radeon RX 6800 XT"),
+            expected(
+                "resizable-bar",
+                Category::Hardware,
+                Status::Problem,
+                Severity::Low,
+                "Resizable BAR is off",
+                "AMD calls it Smart Access Memory. It adds a few FPS in some games. Windows must start in UEFI mode (CSM off).",
+                guide()
+            )
+        );
+        assert_eq!(
+            bar_off(GpuVendor::Nvidia, "NVIDIA GeForce RTX 3060 Ti"),
+            expected(
+                "resizable-bar",
+                Category::Hardware,
+                Status::Info,
+                Severity::Info,
+                "Resizable BAR is off",
+                "NVIDIA only uses it in games on its own list, so most games, VALORANT included, gain little. Turning it on is optional.",
+                guide()
+            )
+        );
+    }
+
+    #[test]
+    fn resizable_bar_off_on_a_card_that_doesnt_use_it_is_info_without_a_fix() {
+        for (vendor, name) in [
+            (GpuVendor::Nvidia, "NVIDIA GeForce GTX 1660 SUPER"),
+            (GpuVendor::Amd, "AMD Radeon RX 580"),
+        ] {
+            assert_eq!(
+                bar_off(vendor, name),
+                expected(
+                    "resizable-bar",
+                    Category::Hardware,
+                    Status::Info,
+                    Severity::Info,
+                    "Resizable BAR is off",
+                    "Only newer cards use it: NVIDIA RTX 30 series and newer, AMD RX 6000 and newer, and Intel Arc.",
+                    Fix::Nothing
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn virtualization_is_never_a_problem() {
+        let with = |on: Option<bool>| {
+            let mut s = owner_pc_fixture();
+            s.cpu.virtualization = on;
+            finding(&s, "virtualization")
+        };
+        assert_eq!(
+            with(Some(true)),
+            expected(
+                "virtualization",
+                Category::Vanguard,
+                Status::Pass,
+                Severity::Info,
+                "Virtualization is on",
+                "",
+                Fix::Nothing
+            )
+        );
+        assert_eq!(
+            with(Some(false)),
+            expected(
+                "virtualization",
+                Category::Vanguard,
+                Status::Info,
+                Severity::Info,
+                "Virtualization is off",
+                "VALORANT works fine like this. Windows needs it for Memory Integrity, which Riot can require on flagged accounts. It's called Intel Virtualization Technology (VT-x) or SVM on AMD.",
+                Fix::BiosGuide {
+                    topic: BiosTopic::Virtualization
+                }
+            )
+        );
+        assert_eq!(
+            with(None),
+            expected(
+                "virtualization",
+                Category::Vanguard,
+                Status::Unknown,
+                Severity::Info,
+                "Couldn't tell whether virtualization is on",
+                "",
+                Fix::Nothing
+            )
+        );
+    }
+
+    #[test]
+    fn the_new_bios_topics_serialize_in_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&BiosTopic::PcieSlot).unwrap(),
+            r#""pcie-slot""#
+        );
+        assert_eq!(
+            serde_json::to_string(&BiosTopic::Virtualization).unwrap(),
+            r#""virtualization""#
+        );
+    }
+
+    #[test]
+    fn later_stage_fixes_follow_the_current_stage_order() {
+        let mut s = owner_pc_fixture();
+        // The owner's PC already has Balanced and adapter power saving; make the other four problems too.
+        s.windows.game_mode = Some(false);
+        s.windows.background_recording = Some(true);
+        s.windows.startup_app_count = Some(11);
+        s.network.delivery_optimization_internet = Some(true);
+        let f = run_health_check(&s, today());
+        for (id, stage) in [
+            ("power-plan", TWEAKS_STAGE),
+            ("game-mode", TWEAKS_STAGE),
+            ("background-recording", TWEAKS_STAGE),
+            ("startup-apps", COMPETITIVE_STAGE),
+            ("adapter-power", COMPETITIVE_STAGE),
+            ("delivery-optimization", COMPETITIVE_STAGE),
+        ] {
+            let finding = get(&f, id);
+            assert_eq!(
+                (finding.status, finding.fix.clone()),
+                (Status::Problem, Fix::LaterStage { stage }),
+                "{id}"
+            );
+        }
+        assert_eq!(get(&f, "power-plan").detail, "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 5. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead.");
+        assert_eq!(get(&f, "startup-apps").detail, "Each one uses memory and CPU in the background. Kestrel's startup manager arrives in stage 6; until then, turn off what you don't need in Task Manager → Startup apps.");
+        assert_eq!(get(&f, "adapter-power").detail, "Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage 6.");
+        for finding in &f {
+            for old in ["stage 3", "stage 4"] {
+                assert!(
+                    !finding.title.contains(old) && !finding.detail.contains(old),
+                    "{} still says {old}",
+                    finding.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ram_speed_passes_normalised_mhz_clocks_and_flags_slow_kits() {
+        // The owner's PC with both sticks of `part` reporting `configured`, normalised as the probe does.
+        let ram_at = |part: &str, configured: u32| {
+            let mut s = owner_pc_fixture();
+            for m in &mut s.memory.modules {
+                m.part_number = part.into();
+                m.configured_mts = Some(configured);
+            }
+            ram::normalize_configured(&mut s.memory.modules, s.memory.ddr_generation);
+            get(&run_health_check(&s, today()), "ram-speed").clone()
+        };
+        // The owner's DDR4-3600 kit on a board that reports 1800 MHz.
+        let mhz = ram_at("CMG32GX4M2D3600C18", 1800);
+        assert_eq!(
+            (mhz.status, mhz.title.as_str()),
+            (Status::Pass, "RAM runs at 3600 MT/s, its rated speed")
+        );
+        // A DDR4-4266 kit really running at 2133 (XMP off), and a 3600 kit at 2133, stay problems.
+        for (part, rated) in [("F4-4266C17D-16GTZR", 4266), ("CMG32GX4M2D3600C18", 3600)] {
+            let slow = ram_at(part, 2133);
+            assert_eq!(
+                (slow.status, slow.severity, slow.title),
+                (
+                    Status::Problem,
+                    Severity::High,
+                    format!("RAM runs at 2133 MT/s, but the kit is rated {rated}")
+                ),
+                "{part}"
+            );
+        }
     }
 }
