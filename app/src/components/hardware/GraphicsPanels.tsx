@@ -5,16 +5,16 @@ import { graphicsView } from './view';
 
 const h = strings.hardwarePage;
 
-/** One panel per real graphics card, the main one first; virtual adapters (Parsec…) on one dim line at the end. */
+/** One panel per real graphics card, the main one first; the other adapters (Parsec, DisplayLink…) on one dim line at the end. */
 export function GraphicsPanels({ report, failed, onGuide }: { report: Report; failed: boolean; onGuide: (topic: BiosTopic) => void }) {
-  const { cards, virtual } = graphicsView(report);
+  const { cards, others } = graphicsView(report);
   return (
     <CardPanels
       title={h.panels.graphics}
       cards={cards}
       failed={failed}
       body={(card) => <Facts facts={card.facts} onGuide={onGuide} />}
-      footer={virtual.length > 0 && <p className="muted small">{h.graphics.virtual(virtual.join(', '))}</p>}
+      footer={others.length > 0 && <p className="muted small">{h.graphics.others(others.join(', '))}</p>}
     />
   );
 }

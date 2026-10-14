@@ -65,7 +65,7 @@ describe('Hardware panels', () => {
     expect(view.chips).toBeNull();
   });
 
-  it('shows each real graphics card with its PCIe link, and the virtual ones by name', () => {
+  it('shows each real graphics card with its PCIe link, and the other adapters by name', () => {
     const view = graphicsView(ownerReport());
     expect(view.cards.map((c) => c.name)).toEqual(['NVIDIA GeForce RTX 3060 Ti']);
     expect(lines(view.cards[0].facts)).toEqual([
@@ -73,7 +73,7 @@ describe('Hardware panels', () => {
       ['Under load', '4.0 x16 · from your benchmark on 13 Oct'], ['Resizable BAR', 'On', 'good'],
     ]);
     expect(view.cards[0].facts[3].note).toBe('The card slows its link when idle.');
-    expect(view.virtual).toEqual(['Parsec Virtual Display Adapter']);
+    expect(view.others).toEqual(['Parsec Virtual Display Adapter']);
   });
 
   it('asks for a benchmark before any, and flags only the main card’s PCIe problems', () => {

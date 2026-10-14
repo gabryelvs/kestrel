@@ -54,7 +54,7 @@ export const strings = {
       idle: 'The card slows its link when idle.',
       fromBenchmark: (link: string, day: string) => `${link} · from your benchmark on ${day}`,
       runBenchmark: 'Run a benchmark to check the link under load.',
-      virtual: (names: string) => `Virtual adapters: ${names}`,
+      others: (names: string) => `Other adapters: ${names}`,
     },
     memory: {
       channels: 'Channels', dual: 'Dual channel', single: 'Single channel', slots: 'Slots', speed: 'Speed now', kit: 'Kit rated',

@@ -57,7 +57,7 @@ type CardPanelsProps<C extends Card> = {
   body: (card: C) => ReactNode;
   /** Sits beside a device's name (the Primary tag). */
   badge?: (card: C) => ReactNode;
-  /** Goes under the last panel: the dim line naming the virtual adapters. */
+  /** Goes under the last panel: the dim line naming the other adapters or the virtual displays. */
   footer?: ReactNode;
 };
 

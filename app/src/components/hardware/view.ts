@@ -118,15 +118,18 @@ function gpuFacts(report: Report, gpu: GpuInfo, separate: boolean): Fact[] {
   return facts;
 }
 
-/** One card per real graphics card, the main one first; virtual adapters (Parsec…) only by name, for the dim line. */
-export function graphicsView(report: Report): { cards: Card[]; virtual: string[] } {
+/**
+ * One card per real graphics card, the main one first; the other adapters only by name, for the dim line: virtual ones
+ * (Parsec…), DisplayLink docks and a card without its driver (Microsoft Basic Display Adapter).
+ */
+export function graphicsView(report: Report): { cards: Card[]; others: string[] } {
   const { gpus } = report.snapshot;
   const main = mainGpu(gpus);
   const separate = separateGpu(gpus);
   const real = gpus.filter((g) => g.vendor !== 'virtual').sort((a, b) => Number(b === main) - Number(a === main));
   return {
     cards: real.map((gpu) => ({ name: cleanName(gpu.name) || null, facts: gpuFacts(report, gpu, gpu === separate) })),
-    virtual: gpus.filter((g) => g.vendor === 'virtual').map((g) => cleanName(g.name)),
+    others: gpus.filter((g) => g.vendor === 'virtual').map((g) => cleanName(g.name)),
   };
 }
 
