@@ -1,5 +1,8 @@
 //! Pure helpers that turn raw Windows values into Kestrel's model. No OS calls, so they're tested anywhere.
-use kestrel_core::{BusyProcess, CpuVendor, DriveMedia, FormFactor, NetKind};
+use kestrel_core::topology::PhysicalCore;
+use kestrel_core::{
+    BootMode, BusyProcess, CacheKind, CpuInfo, CpuVendor, DriveMedia, FormFactor, NetKind,
+};
 use std::collections::HashMap;
 
 /// CIM datetime "20240520000000.000000+000" → "2024-05-20".
@@ -204,6 +207,152 @@ pub fn exe_name(buffer: &[u16]) -> String {
         .position(|&unit| unit == 0)
         .unwrap_or(buffer.len());
     String::from_utf16_lossy(&buffer[..end])
+}
+
+/// CPUID registers that spell text → the text. Each register holds four characters, lowest byte first (the vendor
+/// is leaf 0's EBX, EDX, ECX; the brand is EAX to EDX of leaves 0x80000002–4). NULs are dropped and the ends trimmed:
+/// older Intel processors pad the brand with spaces.
+pub fn cpuid_text(registers: &[u32]) -> String {
+    let bytes: Vec<u8> = registers
+        .iter()
+        .flat_map(|register| register.to_le_bytes())
+        .filter(|&byte| byte != 0)
+        .collect();
+    String::from_utf8_lossy(&bytes).trim().to_string()
+}
+
+/// The two LOGICAL_PROCESSOR_RELATIONSHIP values Kestrel reads (winnt.h).
+const RELATION_PROCESSOR_CORE: u32 = 0;
+const RELATION_CACHE: u32 = 2;
+
+/// What `GetLogicalProcessorInformationEx(RelationAll)` wrote: SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX records one
+/// after another, each starting with its relationship (u32) and its size in bytes (u32) → the physical cores and one
+/// (level, kind, size in KB) per cache, in Windows' order. Other relationships (packages, NUMA nodes, groups, dies)
+/// are skipped. Offsets are those of 64-bit Windows (8-byte affinity masks). Nothing is read past the buffer: a
+/// record that claims more room than is left, or no room at all, ends the list.
+pub fn logical_processors(buffer: &[u8]) -> (Vec<PhysicalCore>, Vec<(u8, CacheKind, u32)>) {
+    let (mut cores, mut caches) = (Vec::new(), Vec::new());
+    let mut at = 0;
+    while let (Some(relationship), Some(size)) = (le_u32(buffer, at), le_u32(buffer, at + 4)) {
+        let size = size as usize;
+        let Some(record) = at
+            .checked_add(size)
+            .and_then(|end| buffer.get(at..end))
+            .filter(|_| size >= 8)
+        else {
+            break;
+        };
+        match relationship {
+            RELATION_PROCESSOR_CORE => cores.extend(processor_core(record)),
+            RELATION_CACHE => caches.extend(cache(record)),
+            _ => {}
+        }
+        at += size;
+    }
+    (cores, caches)
+}
+
+/// A RelationProcessorCore record: EfficiencyClass (u8) at 9, GroupCount (u16) at 30, then GroupCount
+/// GROUP_AFFINITY of 16 bytes from 32, each a Mask (u64) and its Group (u16). Every mask bit is a logical processor.
+fn processor_core(record: &[u8]) -> Option<PhysicalCore> {
+    let efficiency_class = *record.get(9)?;
+    let mut logical = Vec::new();
+    for index in 0..usize::from(le_u16(record, 30)?) {
+        let affinity = 32 + 16 * index;
+        let (Some(mask), Some(group)) = (le_u64(record, affinity), le_u16(record, affinity + 8))
+        else {
+            break;
+        };
+        logical.extend(
+            (0..64u8)
+                .filter(|bit| mask & (1u64 << bit) != 0)
+                .map(|bit| (group, bit)),
+        );
+    }
+    (!logical.is_empty()).then_some(PhysicalCore {
+        efficiency_class,
+        logical,
+    })
+}
+
+/// A RelationCache record: Level (u8) at 8, CacheSize (u32, bytes) at 12, Type (u32) at 16: 0 unified,
+/// 1 instruction, 2 data. 3 is a Pentium 4 trace cache, which the model has no kind for.
+fn cache(record: &[u8]) -> Option<(u8, CacheKind, u32)> {
+    let kind = match le_u32(record, 16)? {
+        0 => CacheKind::Unified,
+        1 => CacheKind::Instruction,
+        2 => CacheKind::Data,
+        _ => CacheKind::Unknown,
+    };
+    Some((*record.get(8)?, kind, le_u32(record, 12)? / 1024))
+}
+
+fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn le_u64(bytes: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+}
+
+/// `GetFirmwareType`'s FIRMWARE_TYPE: 1 is BIOS (legacy boot, CSM), 2 is UEFI; 0 (unknown) and anything else unknown.
+pub fn boot_mode(firmware_type: i32) -> BootMode {
+    match firmware_type {
+        1 => BootMode::Legacy,
+        2 => BootMode::Uefi,
+        _ => BootMode::Unknown,
+    }
+}
+
+/// Whether VT-x / SVM is on. A running hypervisor (CPUID's hypervisor bit, or VBS) uses it and hides the firmware
+/// flag, so either one means on; otherwise the firmware flag (`PF_VIRT_FIRMWARE_ENABLED`) says.
+pub fn virtualization(
+    hypervisor: bool,
+    vbs_running: Option<bool>,
+    firmware_enabled: Option<bool>,
+) -> Option<bool> {
+    if hypervisor || vbs_running == Some(true) {
+        Some(true)
+    } else {
+        firmware_enabled
+    }
+}
+
+/// The socket to show: the codename table names the desktop part's, and a laptop chip that shares the desktop's
+/// CPUID signature (Dragon Range shares Raphael's) is soldered to the board, so a laptop has none.
+pub fn cpu_socket(form_factor: FormFactor, table_socket: Option<&str>) -> Option<String> {
+    if form_factor == FormFactor::Laptop {
+        None
+    } else {
+        table_socket.map(str::to_string)
+    }
+}
+
+/// The CPU's name and maker. WMI's `Win32_Processor` stays primary: what it left empty (no name, or
+/// `CpuVendor::Other`, because its query failed or it didn't say) is filled from the processor itself, with CPUID's
+/// brand string and vendor.
+pub fn fill_missing_cpu_identity(cpu: &mut CpuInfo, brand: &str, vendor: CpuVendor) {
+    if cpu.name.is_empty() {
+        cpu.name = brand.to_string();
+    }
+    if cpu.vendor == CpuVendor::Other {
+        cpu.vendor = vendor;
+    }
+}
+
+/// The CPU's core and thread counts. WMI's stay primary: a count it left at 0 is filled from the cores Windows lists,
+/// one per physical core, and from the logical processors on them.
+pub fn fill_missing_cpu_counts(cpu: &mut CpuInfo, cores: &[PhysicalCore]) {
+    if cpu.cores == 0 {
+        cpu.cores = cores.len() as u32;
+    }
+    if cpu.threads == 0 {
+        cpu.threads = cores.iter().map(|core| core.logical.len() as u32).sum();
+    }
 }
 
 #[cfg(test)]
@@ -456,5 +605,324 @@ mod tests {
         let full: Vec<u16> = "abc".encode_utf16().collect();
         assert_eq!(exe_name(&full), "abc", "no NUL: the whole buffer");
         assert_eq!(exe_name(&[0, 65, 66]), "");
+    }
+
+    /// CPUID registers holding `text` the way the processor stores it: four bytes per register, little-endian,
+    /// padded with NULs to `count` registers.
+    fn registers(text: &str, count: usize) -> Vec<u32> {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.resize(count * 4, 0);
+        let (words, _) = bytes.as_chunks::<4>();
+        words.iter().map(|word| u32::from_le_bytes(*word)).collect()
+    }
+
+    #[test]
+    fn cpuid_registers_spell_the_vendor() {
+        // Leaf 0 spells it across EBX, EDX and ECX.
+        assert_eq!(
+            cpuid_text(&[0x756e_6547, 0x4965_6e69, 0x6c65_746e]),
+            "GenuineIntel"
+        );
+        assert_eq!(
+            cpuid_text(&[0x6874_7541, 0x6974_6e65, 0x444d_4163]),
+            "AuthenticAMD"
+        );
+    }
+
+    #[test]
+    fn cpuid_brands_lose_their_nuls_and_padding() {
+        let brand = registers("11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz", 12);
+        assert_eq!(
+            cpuid_text(&brand),
+            "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz"
+        );
+        // Older Intel processors right-align the brand with spaces.
+        let padded = registers("       Intel(R) Core(TM) i7-4790K CPU @ 4.00GHz", 12);
+        assert_eq!(
+            cpuid_text(&padded),
+            "Intel(R) Core(TM) i7-4790K CPU @ 4.00GHz"
+        );
+        assert_eq!(cpuid_text(&[0; 12]), "");
+    }
+
+    const KB: u32 = 1024;
+
+    /// A RelationProcessorCore record as 64-bit Windows writes it: the header (relationship, size), Flags,
+    /// EfficiencyClass, 20 reserved bytes, GroupCount at 30, then a 16-byte GROUP_AFFINITY (Mask, Group) per group.
+    fn core_record(efficiency_class: u8, groups: &[(u16, u64)]) -> Vec<u8> {
+        let size = 32 + 16 * groups.len();
+        let mut record = vec![0u8; size];
+        record[4..8].copy_from_slice(&(size as u32).to_le_bytes());
+        let threads: u32 = groups.iter().map(|(_, mask)| mask.count_ones()).sum();
+        record[8] = u8::from(threads > 1); // LTP_PC_SMT
+        record[9] = efficiency_class;
+        record[30..32].copy_from_slice(&(groups.len() as u16).to_le_bytes());
+        for (index, (group, mask)) in groups.iter().enumerate() {
+            let at = 32 + 16 * index;
+            record[at..at + 8].copy_from_slice(&mask.to_le_bytes());
+            record[at + 8..at + 10].copy_from_slice(&group.to_le_bytes());
+        }
+        record
+    }
+
+    /// A RelationCache record (56 bytes, as Windows 11 writes it): Level at 8, CacheSize in bytes at 12, Type at 16.
+    fn cache_record(level: u8, size_bytes: u32, cache_type: u32) -> Vec<u8> {
+        let mut record = vec![0u8; 56];
+        record[0..4].copy_from_slice(&2u32.to_le_bytes());
+        record[4..8].copy_from_slice(&56u32.to_le_bytes());
+        record[8] = level;
+        record[12..16].copy_from_slice(&size_bytes.to_le_bytes());
+        record[16..20].copy_from_slice(&cache_type.to_le_bytes());
+        record
+    }
+
+    /// A record of a relationship Kestrel skips: 3 is a processor package, 4 a processor group.
+    fn other_record(relationship: u32, size: u32) -> Vec<u8> {
+        let mut record = vec![0u8; size as usize];
+        record[0..4].copy_from_slice(&relationship.to_le_bytes());
+        record[4..8].copy_from_slice(&size.to_le_bytes());
+        record
+    }
+
+    #[test]
+    fn an_eight_core_cpu_with_two_threads_per_core() {
+        // The i9-11900K: per core 48 KB L1 data, 32 KB L1 instruction and 512 KB L2; one 16 MB L3.
+        let mut buffer = other_record(3, 48);
+        for core in 0..8 {
+            buffer.extend(core_record(0, &[(0, 0b11 << (2 * core))]));
+            buffer.extend(cache_record(1, 48 * KB, 2));
+            buffer.extend(cache_record(1, 32 * KB, 1));
+            buffer.extend(cache_record(2, 512 * KB, 0));
+        }
+        buffer.extend(cache_record(3, 16 * 1024 * KB, 0));
+        buffer.extend(other_record(4, 80));
+        let (cores, caches) = logical_processors(&buffer);
+        assert_eq!(cores.len(), 8);
+        assert!(cores
+            .iter()
+            .all(|c| c.efficiency_class == 0 && c.logical.len() == 2));
+        assert_eq!(cores[3].logical, vec![(0, 6), (0, 7)]);
+        assert_eq!(caches.len(), 25);
+        assert_eq!(
+            caches[..3],
+            [
+                (1, CacheKind::Data, 48),
+                (1, CacheKind::Instruction, 32),
+                (2, CacheKind::Unified, 512)
+            ]
+        );
+        assert_eq!(caches[24], (3, CacheKind::Unified, 16384));
+    }
+
+    #[test]
+    fn a_hybrid_cpu_keeps_each_cores_efficiency_class() {
+        // 2 P-cores (class 1) with two threads each, then 4 E-cores (class 0) with one, sharing a 2 MB L2.
+        let mut buffer = core_record(1, &[(0, 0b0011)]);
+        buffer.extend(core_record(1, &[(0, 0b1100)]));
+        for thread in 4..8 {
+            buffer.extend(core_record(0, &[(0, 1 << thread)]));
+        }
+        buffer.extend(cache_record(2, 1280 * KB, 0));
+        buffer.extend(cache_record(2, 1280 * KB, 0));
+        buffer.extend(cache_record(2, 2048 * KB, 0));
+        let (cores, caches) = logical_processors(&buffer);
+        let classes: Vec<u8> = cores.iter().map(|c| c.efficiency_class).collect();
+        assert_eq!(classes, vec![1, 1, 0, 0, 0, 0]);
+        assert_eq!(cores[1].logical, vec![(0, 2), (0, 3)]);
+        assert_eq!(cores[5].logical, vec![(0, 7)]);
+        assert_eq!(
+            caches,
+            vec![
+                (2, CacheKind::Unified, 1280),
+                (2, CacheKind::Unified, 1280),
+                (2, CacheKind::Unified, 2048)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_core_in_the_second_processor_group_keeps_its_group() {
+        // Past 64 logical processors Windows makes more groups; this core's threads are 62 and 63 of group 1.
+        let (cores, _) = logical_processors(&core_record(0, &[(1, 0b11 << 62)]));
+        assert_eq!(
+            cores,
+            vec![PhysicalCore {
+                efficiency_class: 0,
+                logical: vec![(1, 62), (1, 63)],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_record_cut_short_ends_the_list() {
+        let mut buffer = core_record(0, &[(0, 0b11)]);
+        buffer.extend(&cache_record(1, 48 * KB, 2)[..30]);
+        let (cores, caches) = logical_processors(&buffer);
+        assert_eq!(cores.len(), 1);
+        assert!(caches.is_empty());
+        // A record that claims no size would never move the walk on, so it ends it.
+        let mut stuck = other_record(3, 8);
+        stuck[4..8].copy_from_slice(&0u32.to_le_bytes());
+        stuck.extend(core_record(0, &[(0, 0b1)]));
+        assert_eq!(logical_processors(&stuck), (Vec::new(), Vec::new()));
+        // A group count promising more masks than the record holds: only the masks inside it are read.
+        let mut short = core_record(0, &[(0, 0b11)]);
+        short[30..32].copy_from_slice(&3u16.to_le_bytes());
+        assert_eq!(
+            logical_processors(&short).0[0].logical,
+            vec![(0, 0), (0, 1)]
+        );
+        assert_eq!(logical_processors(&[]), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn cache_types_become_kinds() {
+        let mut buffer = Vec::new();
+        for cache_type in 0..4 {
+            buffer.extend(cache_record(1, 64 * KB, cache_type));
+        }
+        let kinds: Vec<CacheKind> = logical_processors(&buffer).1.iter().map(|c| c.1).collect();
+        // 3 is a trace cache (Pentium 4), which the model has no name for.
+        assert_eq!(
+            kinds,
+            vec![
+                CacheKind::Unified,
+                CacheKind::Instruction,
+                CacheKind::Data,
+                CacheKind::Unknown
+            ]
+        );
+    }
+
+    #[test]
+    fn firmware_types_are_boot_modes() {
+        assert_eq!(boot_mode(2), BootMode::Uefi);
+        assert_eq!(boot_mode(1), BootMode::Legacy);
+        assert_eq!(boot_mode(0), BootMode::Unknown);
+        assert_eq!(boot_mode(3), BootMode::Unknown);
+    }
+
+    #[test]
+    fn a_running_hypervisor_means_virtualization_is_on() {
+        // A hypervisor (seen by CPUID, or VBS) takes VT-x / SVM for itself and hides the firmware flag.
+        assert_eq!(virtualization(true, None, Some(false)), Some(true));
+        assert_eq!(virtualization(false, Some(true), Some(false)), Some(true));
+        // Otherwise the firmware flag says, and without it nothing is known.
+        assert_eq!(virtualization(false, Some(false), Some(true)), Some(true));
+        assert_eq!(virtualization(false, None, Some(false)), Some(false));
+        assert_eq!(virtualization(false, None, None), None);
+    }
+
+    #[test]
+    fn a_laptop_has_no_cpu_socket() {
+        // Dragon Range (laptop) shares Raphael's signature, so the table says AM5; its chip is soldered on.
+        assert_eq!(cpu_socket(FormFactor::Laptop, Some("AM5")), None);
+        assert_eq!(
+            cpu_socket(FormFactor::Desktop, Some("AM5")).as_deref(),
+            Some("AM5")
+        );
+        // An unknown form factor (WMI couldn't tell) keeps the table's socket.
+        assert_eq!(
+            cpu_socket(FormFactor::Unknown, Some("LGA1200")).as_deref(),
+            Some("LGA1200")
+        );
+        assert_eq!(cpu_socket(FormFactor::Desktop, None), None);
+    }
+
+    const INTEL_BRAND: &str = "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz";
+
+    /// 2 P-cores with two threads each and 4 E-cores with one: 6 physical cores, 8 logical processors.
+    fn hybrid_cores() -> Vec<PhysicalCore> {
+        let core = |efficiency_class, threads: &[u8]| PhysicalCore {
+            efficiency_class,
+            logical: threads.iter().map(|&thread| (0, thread)).collect(),
+        };
+        vec![
+            core(1, &[0, 1]),
+            core(1, &[2, 3]),
+            core(0, &[4]),
+            core(0, &[5]),
+            core(0, &[6]),
+            core(0, &[7]),
+        ]
+    }
+
+    #[test]
+    fn what_wmi_reported_about_the_cpu_is_kept() {
+        // WMI answered, so the processor's own brand, vendor and cores change nothing, even where they differ.
+        let wmi = CpuInfo {
+            name: "AMD Ryzen 7 7800X3D 8-Core Processor".into(),
+            vendor: CpuVendor::Amd,
+            cores: 8,
+            threads: 16,
+            ..Default::default()
+        };
+        let mut cpu = wmi.clone();
+        fill_missing_cpu_identity(&mut cpu, INTEL_BRAND, CpuVendor::Intel);
+        fill_missing_cpu_counts(&mut cpu, &hybrid_cores());
+        assert_eq!(cpu, wmi);
+    }
+
+    #[test]
+    fn cpuid_names_a_cpu_that_wmi_did_not() {
+        // WMI failed outright: the brand string is the name and CPUID's own vendor the vendor.
+        let mut cpu = CpuInfo::default();
+        fill_missing_cpu_identity(&mut cpu, INTEL_BRAND, CpuVendor::Intel);
+        assert_eq!(
+            (cpu.name.as_str(), cpu.vendor),
+            (INTEL_BRAND, CpuVendor::Intel)
+        );
+        // Each is a fallback on its own: WMI gave a name but no maker Kestrel knows...
+        let mut cpu = CpuInfo {
+            name: "Intel Core".into(),
+            ..Default::default()
+        };
+        fill_missing_cpu_identity(&mut cpu, INTEL_BRAND, CpuVendor::Intel);
+        assert_eq!(
+            (cpu.name.as_str(), cpu.vendor),
+            ("Intel Core", CpuVendor::Intel)
+        );
+        // ...or the maker but no name.
+        let mut cpu = CpuInfo {
+            vendor: CpuVendor::Amd,
+            ..Default::default()
+        };
+        fill_missing_cpu_identity(&mut cpu, INTEL_BRAND, CpuVendor::Intel);
+        assert_eq!(
+            (cpu.name.as_str(), cpu.vendor),
+            (INTEL_BRAND, CpuVendor::Amd)
+        );
+    }
+
+    #[test]
+    fn the_core_list_counts_cores_and_threads_that_wmi_did_not() {
+        // WMI failed outright: physical cores are the list's entries, logical processors their threads added up.
+        let mut cpu = CpuInfo::default();
+        fill_missing_cpu_counts(&mut cpu, &hybrid_cores());
+        assert_eq!((cpu.cores, cpu.threads), (6, 8));
+        // Each is a fallback on its own: WMI gave the threads but not the cores...
+        let mut cpu = CpuInfo {
+            threads: 12,
+            ..Default::default()
+        };
+        fill_missing_cpu_counts(&mut cpu, &hybrid_cores());
+        assert_eq!((cpu.cores, cpu.threads), (6, 12));
+        // ...or the cores but not the threads.
+        let mut cpu = CpuInfo {
+            cores: 4,
+            ..Default::default()
+        };
+        fill_missing_cpu_counts(&mut cpu, &hybrid_cores());
+        assert_eq!((cpu.cores, cpu.threads), (4, 8));
+    }
+
+    #[test]
+    fn nothing_is_made_up_when_the_processor_has_no_answer_either() {
+        // CPUID unreadable (no brand, a maker Kestrel doesn't know) and no core list: the CPU stays as empty as WMI
+        // left it, which the UI shows as Not reported.
+        let mut cpu = CpuInfo::default();
+        fill_missing_cpu_identity(&mut cpu, "", CpuVendor::Other);
+        fill_missing_cpu_counts(&mut cpu, &[]);
+        assert_eq!(cpu, CpuInfo::default());
     }
 }

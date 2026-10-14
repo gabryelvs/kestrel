@@ -1,4 +1,5 @@
 //! Real probes for Windows. Each one is independent: a failure becomes `None` plus a ProbeError.
+mod cpu;
 mod display;
 mod firmware;
 pub(crate) mod gpu_usage;
@@ -38,6 +39,8 @@ fn collect_here() -> SystemSnapshot {
         Ok(wmi) => wmi.fill(&mut s, &mut errors),
         Err(e) => errors.push(problem("wmi", e)),
     }
+    // After WMI: the socket depends on the form factor (machine query), virtualization on VBS (device-guard query).
+    cpu::fill(&mut s, &mut errors);
     registry_probe::fill(&mut s, &mut errors);
     display::fill(&mut s);
     s.security.iommu = Some(firmware::iommu_enabled());
