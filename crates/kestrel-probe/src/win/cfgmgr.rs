@@ -2,7 +2,7 @@
 //! ranges Windows gave the card (Resizable BAR), and the Intel LPC/eSPI controller's name (the chipset). Read-only:
 //! every call reads a device property or a list Windows keeps; nothing is changed and no driver is involved.
 use super::problem;
-use crate::parse;
+use crate::parse::{self, WalkStep};
 use kestrel_core::pcie::{self, PciNode};
 use kestrel_core::{hardware, PcieLink, ProbeError, SystemSnapshot};
 use windows_sys::core::GUID;
@@ -12,8 +12,8 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_Next_Res_Des, CM_Get_Parent, CM_Get_Res_Des_Data, CM_Get_Res_Des_Data_Size,
     CM_Locate_DevNodeW, ResType_Mem, ResType_MemLarge, ALLOC_LOG_CONF,
     CM_GETIDLIST_FILTER_ENUMERATOR, CM_GETIDLIST_FILTER_PRESENT, CM_LOCATE_DEVNODE_NORMAL,
-    CM_RESTYPE, CR_BUFFER_SMALL, CR_NO_MORE_LOG_CONF, CR_SUCCESS, MAX_DEVICE_ID_LEN, MEM_DES,
-    MEM_LARGE_DES,
+    CM_RESTYPE, CR_BUFFER_SMALL, CR_NO_MORE_LOG_CONF, CR_NO_MORE_RES_DES, CR_SUCCESS,
+    MAX_DEVICE_ID_LEN, MEM_DES, MEM_LARGE_DES,
 };
 use windows_sys::Win32::Devices::Properties::{
     DEVPKEY_Device_DeviceDesc, DEVPROPTYPE, DEVPROP_TYPE_BYTE, DEVPROP_TYPE_STRING,
@@ -132,6 +132,10 @@ fn chain(card: u32, card_id: &str) -> Vec<PciNode> {
 
 /// The device node of a device instance id, if that device is present.
 fn locate(instance_id: &str) -> Option<u32> {
+    // Windows doesn't refuse an empty id: it answers with the root of the device tree, which is no device to ask about.
+    if instance_id.is_empty() {
+        return None;
+    }
     let id = wide(instance_id);
     let mut node = 0u32;
     // SAFETY: `id` is NUL-terminated and outlives the call; `node` is a valid place for the handle.
@@ -216,7 +220,8 @@ fn property_text(node: u32, key: &DEVPROPKEY) -> Option<String> {
 }
 
 /// The size in bytes of every memory range Windows allocated to the device (its allocated configuration's memory and
-/// large-memory descriptors). Empty when it has none; None when they can't be read.
+/// large-memory descriptors). Empty when it has none; None when any of them can't be read, because a card shown with
+/// fewer ranges than it has could look as if Resizable BAR were off.
 fn memory_ranges(node: u32) -> Option<Vec<u64>> {
     let mut config = 0usize;
     // SAFETY: `config` is a valid place for the configuration's handle.
@@ -225,44 +230,53 @@ fn memory_ranges(node: u32) -> Option<Vec<u64>> {
         CR_NO_MORE_LOG_CONF => return Some(Vec::new()), // nothing allocated
         _ => return None,
     }
-    let mut ranges = descriptor_sizes(config, ResType_Mem);
-    ranges.extend(descriptor_sizes(config, ResType_MemLarge));
-    // SAFETY: `config` came from CM_Get_First_Log_Conf above and is freed once.
+    // Both walks run and the configuration is freed before either result is looked at.
+    let memory = descriptor_sizes(config, ResType_Mem);
+    let large = descriptor_sizes(config, ResType_MemLarge);
+    // SAFETY: `config` came from CM_Get_First_Log_Conf above and is freed once. Each walk has freed its descriptors.
     unsafe { CM_Free_Log_Conf_Handle(config) };
+    let mut ranges = memory?;
+    ranges.extend(large?);
     Some(ranges)
 }
 
-/// The allocated size of each descriptor of resource type `kind` in the configuration `config`.
-fn descriptor_sizes(config: usize, kind: CM_RESTYPE) -> Vec<u64> {
-    let mut sizes = Vec::new();
-    let mut last: Option<usize> = None;
-    loop {
-        let mut next = 0usize;
-        // SAFETY: the walk starts at the open configuration and goes on from the descriptor read last, which is still
-        // open; `next` is a valid place for the next handle, and the resource type isn't asked for (null).
-        let status = unsafe {
-            CM_Get_Next_Res_Des(
-                &mut next,
-                last.unwrap_or(config),
-                kind,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if let Some(done) = last.take() {
-            // SAFETY: `done` came from CM_Get_Next_Res_Des, the call above was its last use, and it is freed once.
-            unsafe { CM_Free_Res_Des_Handle(done) };
-        }
-        if status != CR_SUCCESS {
-            return sizes;
-        }
-        sizes.extend(
-            descriptor_data(next)
-                .as_deref()
-                .and_then(parse::allocated_range_bytes),
-        );
-        last = Some(next);
+/// The allocated size of each descriptor of resource type `kind` in the configuration `config`. None unless Windows
+/// ended the list itself and every descriptor could be read (`parse::allocated_ranges` decides).
+fn descriptor_sizes(config: usize, kind: CM_RESTYPE) -> Option<Vec<u64>> {
+    // The descriptor read last stays open, because the walk goes on from it: the next one replaces and frees it, and
+    // whatever is open when the walk ends, however it ends, is freed when `last` goes out of scope.
+    let mut last = None;
+    parse::allocated_ranges(std::iter::repeat_with(|| {
+        next_descriptor(config, kind, &mut last)
+    }))
+}
+
+/// A resource descriptor handle from `CM_Get_Next_Res_Des`, freed when dropped.
+struct OpenDescriptor(usize);
+
+impl Drop for OpenDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CM_Get_Next_Res_Des and is freed only here.
+        unsafe { CM_Free_Res_Des_Handle(self.0) };
     }
+}
+
+/// One step of the walk: the descriptor after `last` (the configuration's first when there is none) and its data.
+/// The new descriptor takes `last`'s place, which frees the one Windows has just moved on from.
+fn next_descriptor(config: usize, kind: CM_RESTYPE, last: &mut Option<OpenDescriptor>) -> WalkStep {
+    let mut next = 0usize;
+    let from = last.as_ref().map_or(config, |descriptor| descriptor.0);
+    // SAFETY: `from` is the open configuration or the descriptor read last, which is still open; `next` is a valid
+    // place for the next handle, and the resource type isn't asked for (null).
+    let status = unsafe { CM_Get_Next_Res_Des(&mut next, from, kind, std::ptr::null_mut(), 0) };
+    match status {
+        CR_SUCCESS => {}
+        // Only this ends a list; any other status is a walk that went wrong, not the end.
+        CR_NO_MORE_RES_DES => return WalkStep::End,
+        _ => return WalkStep::Failed,
+    }
+    let descriptor = last.insert(OpenDescriptor(next));
+    descriptor_data(descriptor.0).map_or(WalkStep::Failed, WalkStep::Data)
 }
 
 fn descriptor_data(descriptor: usize) -> Option<Vec<u8>> {
@@ -318,4 +332,15 @@ fn present_pci_devices() -> Option<Vec<String>> {
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_instance_id_is_no_device() {
+        // Without the check Windows would answer it with the root of the device tree.
+        assert_eq!(locate(""), None);
+    }
 }

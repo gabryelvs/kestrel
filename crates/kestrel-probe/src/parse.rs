@@ -412,6 +412,39 @@ pub fn allocated_range_bytes(data: &[u8]) -> Option<u64> {
     end.checked_sub(base)?.checked_add(1)
 }
 
+/// The most memory descriptors of one resource type `allocated_ranges` accepts: a card has a handful (six BARs and a
+/// ROM), so a longer list is a walk gone wrong.
+pub const MAX_DESCRIPTORS: usize = 64;
+
+/// What Windows answered at one step of a walk over a configuration's memory descriptors (`win::cfgmgr`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WalkStep {
+    /// The next descriptor, with the data read from it.
+    Data(Vec<u8>),
+    /// "No more descriptors" (CR_NO_MORE_RES_DES): the list is complete. Nothing else ends a list.
+    End,
+    /// Any other answer, or a descriptor whose data couldn't be read.
+    Failed,
+}
+
+/// The size in bytes of each allocated range in a walk over the memory descriptors of one resource type, in the order
+/// Windows lists them; `steps` are Windows' answers one after another. Some only when Windows ended the list itself
+/// (`End`) after at most MAX_DESCRIPTORS descriptors. A failed step, a walk that stops without `End` and a longer list
+/// give None: a range left out could be the card's big window, and the rest would read as Resizable BAR off. A
+/// descriptor with no usable range (see `allocated_range_bytes`) adds nothing and is skipped.
+pub fn allocated_ranges(steps: impl IntoIterator<Item = WalkStep>) -> Option<Vec<u64>> {
+    let mut sizes = Vec::new();
+    // The descriptors, then the End that shows the list is complete.
+    for step in steps.into_iter().take(MAX_DESCRIPTORS + 1) {
+        match step {
+            WalkStep::Data(data) => sizes.extend(allocated_range_bytes(&data)),
+            WalkStep::End => return Some(sizes),
+            WalkStep::Failed => return None,
+        }
+    }
+    None
+}
+
 /// NUL-terminated UTF-16 strings one after another, ended by an empty one (what `CM_Get_Device_ID_ListW` writes) →
 /// the strings.
 pub fn multi_sz(units: &[u16]) -> Vec<String> {
@@ -1162,5 +1195,67 @@ mod tests {
         ] {
             assert!(!is_pci_instance(id), "{id}");
         }
+    }
+
+    /// The step of a walk that reads a descriptor whose allocated range runs from `base` to `end` (inclusive).
+    fn descriptor(base: u64, end: u64) -> WalkStep {
+        WalkStep::Data(memory_header(base, end))
+    }
+
+    #[test]
+    fn a_list_windows_ends_gives_every_range_in_its_order() {
+        // A card's registers, then its big window with Resizable BAR.
+        let walk = [
+            descriptor(0xF600_0000, 0xF6FF_FFFF),
+            descriptor(0x40_0000_0000, 0x41_FFFF_FFFF),
+            WalkStep::End,
+        ];
+        assert_eq!(allocated_ranges(walk), Some(vec![16 << 20, 8 << 30]));
+        // A configuration with no descriptor of the type is an empty list, not a failure.
+        assert_eq!(allocated_ranges([WalkStep::End]), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_walk_that_goes_wrong_gives_no_ranges_at_all() {
+        let registers = descriptor(0xF600_0000, 0xF6FF_FFFF);
+        let window = descriptor(0x40_0000_0000, 0x41_FFFF_FFFF);
+        // The step that failed may have been the card's big window: the ranges before it alone would read as
+        // Resizable BAR off.
+        let walk = [
+            registers.clone(),
+            WalkStep::Failed,
+            window.clone(),
+            WalkStep::End,
+        ];
+        assert_eq!(allocated_ranges(walk), None);
+        assert_eq!(allocated_ranges([WalkStep::Failed]), None);
+        // Only Windows saying there are no more descriptors ends a list; a walk that merely stops is not a whole one.
+        assert_eq!(allocated_ranges([registers, window]), None);
+        assert_eq!(allocated_ranges([]), None);
+    }
+
+    #[test]
+    fn a_descriptor_with_an_impossible_range_is_skipped_not_failed() {
+        // These add nothing (see `allocated_range_bytes`), but the walk is still a whole one.
+        let walk = [
+            descriptor(0x2000, 0x1FFF),
+            descriptor(0, u64::MAX),
+            descriptor(0xE000_0000, 0xEFFF_FFFF),
+            WalkStep::End,
+        ];
+        assert_eq!(allocated_ranges(walk), Some(vec![256 << 20]));
+    }
+
+    #[test]
+    fn a_walk_is_cut_off_after_the_most_descriptors() {
+        let registers = descriptor(0xF600_0000, 0xF6FF_FFFF);
+        let list =
+            |count: usize| std::iter::repeat_n(registers.clone(), count).chain([WalkStep::End]);
+        let full =
+            allocated_ranges(list(MAX_DESCRIPTORS)).expect("a list of the most is still a list");
+        assert_eq!(full.len(), MAX_DESCRIPTORS);
+        assert_eq!(allocated_ranges(list(MAX_DESCRIPTORS + 1)), None);
+        // A walk that never ends is not followed forever.
+        assert_eq!(allocated_ranges(std::iter::repeat(registers)), None);
     }
 }
