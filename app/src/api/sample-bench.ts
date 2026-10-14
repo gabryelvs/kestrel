@@ -15,6 +15,7 @@ const run = (avg: number, low1: number, low01: number, latency: number): RunReco
 const context = {
   powerPlan: 'EXM Free Power Plan V8', ramMts: 3600, gpu: 'NVIDIA GeForce RTX 3060 Ti', gpuDriver: '610.74',
   windowsBuild: 26200, displayHz: 360, gameSettings: null,
+  gpuPnpDeviceId: 'PCI\\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\\4&2B0D3A0E&0&0008', gpuLink: { gen: 4, width: 16 },
 };
 
 const benchmarks: Benchmark[] = [

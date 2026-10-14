@@ -1,6 +1,7 @@
 import { Fragment } from 'react';
 import { cpuLabel, displayLabel, driverLabel, mainGpu, ramLabel } from '../api/findings';
 import { osLabel } from '../api/format';
+import { gpuShortName } from '../api/hardware';
 import type { SystemSnapshot } from '../api/types';
 import { strings } from '../strings';
 
@@ -8,7 +9,7 @@ export function HardwarePanel({ snapshot: s }: { snapshot: SystemSnapshot }) {
   const gpu = mainGpu(s.gpus);
   const rows: [string, string][] = [
     [strings.hardware.cpu, cpuLabel(s)],
-    [strings.hardware.gpu, gpu ? `${gpu.name.replace(/^(NVIDIA GeForce|AMD Radeon) /, '')} · ${driverLabel(gpu)}` : '—'],
+    [strings.hardware.gpu, gpu ? `${gpuShortName(gpu.name)} · ${driverLabel(gpu)}` : '—'],
     [strings.hardware.ram, ramLabel(s)],
     [strings.hardware.display, displayLabel(s)],
     [strings.hardware.os, osLabel(s)],
