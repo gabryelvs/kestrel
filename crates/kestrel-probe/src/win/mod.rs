@@ -1,11 +1,11 @@
 //! Real probes for Windows. Each one is independent: a failure becomes `None` plus a ProbeError.
 pub(crate) mod cfgmgr;
-mod cpu;
+pub(crate) mod cpu;
 mod display;
 mod displayconfig;
 mod firmware;
 pub(crate) mod gpu_usage;
-mod pdh;
+pub(crate) mod pdh;
 mod registry_probe;
 pub(crate) mod system_info;
 mod wmi_probe;
