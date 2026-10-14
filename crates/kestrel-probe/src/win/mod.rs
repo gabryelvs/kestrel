@@ -2,6 +2,7 @@
 pub(crate) mod cfgmgr;
 mod cpu;
 mod display;
+mod displayconfig;
 mod firmware;
 pub(crate) mod gpu_usage;
 mod pdh;
@@ -36,18 +37,24 @@ fn collect_here() -> SystemSnapshot {
         path,
         ..Default::default()
     });
+    // Each volume's free and total space, read once per scan for everything that needs it: VALORANT's drive and the
+    // volumes of the drive list (WMI).
+    let space = system_info::volume_space();
     match wmi_probe::Wmi::connect() {
-        Ok(wmi) => wmi.fill(&mut s, &mut errors),
+        Ok(wmi) => wmi.fill(&mut s, &mut errors, &space),
         Err(e) => errors.push(problem("wmi", e)),
     }
     // After WMI: the socket depends on the form factor (machine query), virtualization on VBS (device-guard query).
     cpu::fill(&mut s, &mut errors);
-    // After WMI too: the PCIe reads start from each card's PNPDeviceID, and the chipset from the board's name.
+    // After WMI too: the PCIe reads start from each card's PNPDeviceID, and the chipset from the board's name, which
+    // the form factor (machine query) decides whether to read.
     cfgmgr::fill(&mut s, &mut errors);
     registry_probe::fill(&mut s, &mut errors);
     display::fill(&mut s);
+    // After `display`: monitor names join the displays it listed by their GDI name.
+    displayconfig::fill(&mut s, &mut errors);
     s.security.iommu = Some(firmware::iommu_enabled());
-    system_info::fill(&mut s, &mut errors);
+    system_info::fill(&mut s, &mut errors, &space);
     s.probe_errors = errors;
     s
 }

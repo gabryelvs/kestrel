@@ -1,8 +1,9 @@
 //! WMI queries. Each query is independent; a failing one adds a ProbeError and leaves its fields as None.
-use super::{problem, registry_probe};
+use super::{problem, registry_probe, system_info};
 use crate::parse;
+use kestrel_core::hardware::{self, DiskRecord};
 use kestrel_core::{
-    gpu, GpuInfo, MemoryModule, NetAdapter, ProbeError, ServiceState, SystemSnapshot,
+    gpu, ram, GpuInfo, MemoryModule, NetAdapter, ProbeError, ServiceState, SystemSnapshot,
 };
 use std::collections::HashMap;
 use wmi::{Variant, WMIConnection};
@@ -32,7 +33,13 @@ impl Wmi {
         WMIConnection::with_namespace_path(namespace)?.raw_query(query)
     }
 
-    pub fn fill(&self, s: &mut SystemSnapshot, errors: &mut Vec<ProbeError>) {
+    /// `space` is each volume's (letter, free GiB, total GiB), which the scan reads once for everything that needs it.
+    pub fn fill(
+        &self,
+        s: &mut SystemSnapshot,
+        errors: &mut Vec<ProbeError>,
+        space: &[(char, f64, f64)],
+    ) {
         let mut attempt = |name: &str, result: Outcome| {
             if let Err(e) = result {
                 errors.push(problem(name, e));
@@ -48,7 +55,8 @@ impl Wmi {
         attempt("device-guard", self.device_guard(s));
         attempt("vanguard", self.vanguard(s));
         attempt("network", self.network(s));
-        attempt("storage", self.storage(s));
+        attempt("drives", self.drives(s, space));
+        attempt("storage", valorant_media(s));
     }
 
     fn os(&self, s: &mut SystemSnapshot) -> Outcome {
@@ -80,8 +88,8 @@ impl Wmi {
         let row = first(
             self.rows("SELECT Manufacturer, Model, PCSystemType FROM Win32_ComputerSystem")?,
         )?;
-        s.machine.manufacturer = text(&row, "Manufacturer");
-        s.machine.model = text(&row, "Model");
+        s.machine.manufacturer = real_name(&row, "Manufacturer");
+        s.machine.model = real_name(&row, "Model");
         // The battery query can fail on its own. It is reported at the end, after everything the other query told
         // us is kept; meanwhile the PC counts as having no battery, and on_battery stays None.
         let batteries = self.rows("SELECT BatteryStatus FROM Win32_Battery");
@@ -126,7 +134,7 @@ impl Wmi {
 
     fn memory(&self, s: &mut SystemSnapshot) -> Outcome {
         let rows = self.rows(
-            "SELECT Capacity, ConfiguredClockSpeed, Speed, PartNumber, Manufacturer, BankLabel, DeviceLocator, SMBIOSMemoryType FROM Win32_PhysicalMemory",
+            "SELECT Capacity, ConfiguredClockSpeed, Speed, PartNumber, Manufacturer, BankLabel, DeviceLocator, SMBIOSMemoryType, Attributes FROM Win32_PhysicalMemory",
         )?;
         s.memory.modules = rows
             .iter()
@@ -138,7 +146,7 @@ impl Wmi {
                 manufacturer: text(row, "Manufacturer"),
                 bank_label: text(row, "BankLabel"),
                 device_locator: text(row, "DeviceLocator"),
-                ..Default::default()
+                rank: num(row, "Attributes").and_then(parse::memory_rank),
             })
             .collect();
         s.memory.total_mb = s.memory.modules.iter().map(|m| m.capacity_mb).sum();
@@ -146,14 +154,32 @@ impl Wmi {
             .first()
             .and_then(|r| num(r, "SMBIOSMemoryType"))
             .and_then(parse::ddr_generation);
+        // Some boards report the clock in MHz (half the MT/s); this puts every module in MT/s.
+        ram::normalize_configured(&mut s.memory.modules, s.memory.ddr_generation);
+        // The kit's rating from its part numbers, which the Hardware tab shows (the speeds don't change it).
+        s.memory.rated_mts = ram::rated_mts(&s.memory.modules);
+        // The slot count can fail on its own: the modules above are kept, and the error is reported after them.
+        let arrays = self
+            .rows("SELECT Use, MemoryDevices FROM Win32_PhysicalMemoryArray")
+            .map_err(|e| {
+                format!("couldn't read the memory slots (Win32_PhysicalMemoryArray): {e}")
+            })?;
+        let arrays: Vec<(Option<u64>, Option<u64>)> = arrays
+            .iter()
+            .map(|a| (num(a, "Use"), num(a, "MemoryDevices")))
+            .collect();
+        s.memory.slots_total = parse::memory_slots(&arrays);
         Ok(())
     }
 
     fn board(&self, s: &mut SystemSnapshot) -> Outcome {
         let board = first(self.rows("SELECT Manufacturer, Product FROM Win32_BaseBoard")?)?;
-        s.board.manufacturer = text(&board, "Manufacturer");
-        s.board.product = text(&board, "Product");
-        let bios = first(self.rows("SELECT SMBIOSBIOSVersion, ReleaseDate FROM Win32_BIOS")?)?;
+        s.board.manufacturer = real_name(&board, "Manufacturer");
+        s.board.product = real_name(&board, "Product");
+        let bios = first(
+            self.rows("SELECT Manufacturer, SMBIOSBIOSVersion, ReleaseDate FROM Win32_BIOS")?,
+        )?;
+        s.board.bios_vendor = real_name(&bios, "Manufacturer");
         s.board.bios_version = text(&bios, "SMBIOSBIOSVersion");
         s.board.bios_date = parse::cim_date(&text(&bios, "ReleaseDate"));
         Ok(())
@@ -216,32 +242,68 @@ impl Wmi {
         Ok(())
     }
 
-    fn storage(&self, s: &mut SystemSnapshot) -> Outcome {
-        let Some(install) = s.storage.valorant.as_mut() else {
-            return Ok(());
-        };
-        let letter = install.drive_letter.chars().next().unwrap_or('C');
+    /// Every physical drive with its lettered volumes and their space (`storage.drives`). `space` is each volume's
+    /// (letter, free GiB, total GiB).
+    fn drives(&self, s: &mut SystemSnapshot, space: &[(char, f64, f64)]) -> Outcome {
         let namespace = "root\\Microsoft\\Windows\\Storage";
-        let partitions = self.rows_in(
-            namespace,
-            "SELECT DriveLetter, DiskNumber FROM MSFT_Partition",
-        )?;
-        let disk = partitions
+        let disks: Vec<DiskRecord> = self
+            .rows_in(
+                namespace,
+                "SELECT DeviceId, FriendlyName, MediaType, BusType, Size FROM MSFT_PhysicalDisk",
+            )?
             .iter()
-            .find(|p| drive_letter_of(p) == Some(letter))
-            .and_then(|p| num(p, "DiskNumber"))
-            .ok_or("VALORANT's drive has no partition record")?;
-        let disks = self.rows_in(
-            namespace,
-            "SELECT DeviceId, MediaType, BusType FROM MSFT_PhysicalDisk",
-        )?;
-        let row = disks
+            .filter_map(|d| {
+                let bus_type = num(d, "BusType");
+                Some(DiskRecord {
+                    number: u32::try_from(num(d, "DeviceId")?).ok()?,
+                    model: text(d, "FriendlyName"),
+                    media: parse::drive_media(bus_type, num(d, "MediaType")),
+                    bus: parse::drive_bus(bus_type),
+                    size_gb: num(d, "Size").unwrap_or(0) as f64 / system_info::GIB,
+                })
+            })
+            .collect();
+        let partitions: Vec<(u32, char)> = self
+            .rows_in(
+                namespace,
+                "SELECT DiskNumber, DriveLetter FROM MSFT_Partition",
+            )?
             .iter()
-            .find(|d| text(d, "DeviceId") == disk.to_string())
-            .ok_or("VALORANT's disk has no physical disk record")?;
-        install.media = parse::drive_media(num(row, "BusType"), num(row, "MediaType"));
+            .filter_map(|p| {
+                Some((
+                    u32::try_from(num(p, "DiskNumber")?).ok()?,
+                    drive_letter_of(p)?,
+                ))
+            })
+            .collect();
+        s.storage.drives = hardware::drives(&disks, &partitions, space);
         Ok(())
     }
+}
+
+/// VALORANT's drive type: the type of the drive that holds its letter, from the list `drives` just read. An empty
+/// list has its own error already.
+fn valorant_media(s: &mut SystemSnapshot) -> Outcome {
+    let Some(install) = s.storage.valorant.as_mut() else {
+        return Ok(());
+    };
+    if s.storage.drives.is_empty() {
+        return Ok(());
+    }
+    let drive = s
+        .storage
+        .drives
+        .iter()
+        .find(|d| {
+            d.volumes.iter().any(|v| {
+                v.letter
+                    .trim_end_matches(':')
+                    .eq_ignore_ascii_case(&install.drive_letter)
+            })
+        })
+        .ok_or("VALORANT's drive isn't among the drives Windows listed")?;
+    install.media = drive.media;
+    Ok(())
 }
 
 fn first(mut rows: Vec<Row>) -> Result<Row, Box<dyn std::error::Error>> {
@@ -256,6 +318,16 @@ fn text(row: &Row, key: &str) -> String {
     match row.get(key) {
         Some(Variant::String(v)) => v.trim().to_string(),
         _ => String::new(),
+    }
+}
+
+/// A maker's or model's name, or "" when the firmware left filler there ("To be filled by O.E.M.", "Default string"…).
+fn real_name(row: &Row, key: &str) -> String {
+    let value = text(row, key);
+    if hardware::is_placeholder(&value) {
+        String::new()
+    } else {
+        value
     }
 }
 
@@ -293,11 +365,123 @@ fn flag(row: &Row, key: &str) -> Option<bool> {
 }
 
 /// MSFT_Partition.DriveLetter is a CIM char16. The wmi crate returns it as a one-letter string (a partition
-/// with no letter comes back as "\0"); a plain number is handled too.
+/// with no letter comes back as "\0", which is None here); a plain number is handled too.
 fn drive_letter_of(row: &Row) -> Option<char> {
     match row.get("DriveLetter")? {
         Variant::String(v) => v.chars().next(),
         other => variant_num(other).and_then(|n| char::from_u32(n as u32)),
     }
+    .filter(char::is_ascii_alphabetic)
     .map(|c| c.to_ascii_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kestrel_core::{DriveInfo, DriveMedia, StorageInfo, ValorantInstall, VolumeInfo};
+
+    fn string(text: &str) -> Variant {
+        Variant::String(text.into())
+    }
+
+    fn row(entries: &[(&str, Variant)]) -> Row {
+        entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn firmware_filler_is_not_a_name() {
+        let board = row(&[
+            ("Manufacturer", string("To be filled by O.E.M.")),
+            ("Product", string("  ROG STRIX B550-F GAMING  ")),
+        ]);
+        assert_eq!(real_name(&board, "Manufacturer"), "");
+        assert_eq!(real_name(&board, "Product"), "ROG STRIX B550-F GAMING");
+        // A property the row doesn't have is no name either.
+        assert_eq!(real_name(&board, "Model"), "");
+    }
+
+    #[test]
+    fn a_partition_has_a_drive_letter_only_when_windows_gives_a_letter() {
+        let letter = |value| drive_letter_of(&row(&[("DriveLetter", value)]));
+        assert_eq!(letter(string("c")), Some('C'));
+        // A plain number is a character code.
+        assert_eq!(letter(Variant::UI2(u16::from(b'D'))), Some('D'));
+        // No letter comes back as a NUL character (or its code), or as no value at all.
+        assert_eq!(letter(string("\0")), None);
+        assert_eq!(letter(Variant::UI2(0)), None);
+        assert_eq!(letter(Variant::Null), None);
+        assert_eq!(drive_letter_of(&row(&[])), None);
+    }
+
+    /// A drive of `media` with a volume for each of `letters`.
+    fn drive(media: DriveMedia, letters: &[&str]) -> DriveInfo {
+        DriveInfo {
+            media,
+            volumes: letters
+                .iter()
+                .map(|letter| VolumeInfo {
+                    letter: letter.to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// A scan that found VALORANT on `valorant_letter` (if installed) and listed `drives`.
+    fn scanned(valorant_letter: Option<&str>, drives: Vec<DriveInfo>) -> SystemSnapshot {
+        SystemSnapshot {
+            storage: StorageInfo {
+                valorant: valorant_letter.map(|letter| ValorantInstall {
+                    drive_letter: letter.into(),
+                    ..Default::default()
+                }),
+                drives,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn valorants_drive_type_is_that_of_the_drive_holding_its_letter() {
+        let drives = vec![
+            drive(DriveMedia::Nvme, &["C"]),
+            drive(DriveMedia::Hdd, &["D", "E"]),
+        ];
+        // The letter is compared without regard to case.
+        let mut s = scanned(Some("e"), drives);
+        valorant_media(&mut s).expect("the drive is listed");
+        assert_eq!(s.storage.valorant.map(|v| v.media), Some(DriveMedia::Hdd));
+    }
+
+    #[test]
+    fn a_letter_on_none_of_the_listed_drives_is_reported_and_the_type_stays_unknown() {
+        let mut s = scanned(Some("F"), vec![drive(DriveMedia::Nvme, &["C"])]);
+        let error = valorant_media(&mut s).expect_err("no drive holds F");
+        assert_eq!(
+            error.to_string(),
+            "VALORANT's drive isn't among the drives Windows listed"
+        );
+        assert_eq!(
+            s.storage.valorant.map(|v| v.media),
+            Some(DriveMedia::Unknown)
+        );
+    }
+
+    #[test]
+    fn without_a_drive_list_or_an_install_there_is_no_error_to_add() {
+        // A failed drive list has its own error, and no VALORANT means no drive to find.
+        let mut no_list = scanned(Some("C"), Vec::new());
+        valorant_media(&mut no_list).expect("an empty list is reported by `drives`");
+        assert_eq!(
+            no_list.storage.valorant.map(|v| v.media),
+            Some(DriveMedia::Unknown)
+        );
+        let mut no_install = scanned(None, vec![drive(DriveMedia::Nvme, &["C"])]);
+        valorant_media(&mut no_install).expect("nothing to look for");
+        assert_eq!(no_install.storage.valorant, None);
+    }
 }

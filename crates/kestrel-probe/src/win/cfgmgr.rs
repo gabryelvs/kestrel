@@ -59,7 +59,7 @@ const _: () = {
 };
 
 /// Each graphics card's PCIe link and Resizable BAR, and the board's chipset. Runs after WMI, which lists the cards
-/// with their PNPDeviceID and reads the board's name.
+/// with their PNPDeviceID and reads the board's name and the form factor.
 pub fn fill(s: &mut SystemSnapshot, errors: &mut Vec<ProbeError>) {
     for gpu in &mut s.gpus {
         // Virtual adapters (ROOT\…, SWD\…, VMBUS\…) and cards WMI gave no id for have no PCI link to read.
@@ -86,8 +86,10 @@ pub fn fill(s: &mut SystemSnapshot, errors: &mut Vec<ProbeError>) {
         errors.push(problem("chipset", e));
         None
     });
-    // The board's name is enough on its own, so the chipset is worked out even without the controller's name.
-    s.board.chipset = hardware::chipset(&s.board.product, description.as_deref());
+    // The board's name is enough on its own, so the chipset is worked out even without the controller's name. On a
+    // laptop it is left out: a model code can spell a chipset by chance, so only the controller's name may say.
+    let board_name = parse::chipset_board_name(s.machine.form_factor, &s.board.product);
+    s.board.chipset = hardware::chipset(board_name, description.as_deref());
 }
 
 /// The current link of the card's slot device. None when the card isn't a PCI device Windows lists, or its link

@@ -1,7 +1,8 @@
 //! Pure helpers that turn raw Windows values into Kestrel's model. No OS calls, so they're tested anywhere.
 use kestrel_core::topology::PhysicalCore;
 use kestrel_core::{
-    BootMode, BusyProcess, CacheKind, CpuInfo, CpuVendor, DriveMedia, FormFactor, NetKind,
+    hardware, BootMode, BusyProcess, CacheKind, CpuInfo, CpuVendor, DisplayInfo, DriveBus,
+    DriveMedia, FormFactor, NetKind,
 };
 use std::collections::HashMap;
 
@@ -332,6 +333,18 @@ pub fn cpu_socket(form_factor: FormFactor, table_socket: Option<&str>) -> Option
     }
 }
 
+/// The board name the chipset may be read from. A laptop's board name is a model code that can spell a chipset by
+/// chance, and "nothing is guessed", so on a laptop it is left out and only the Intel LPC/eSPI controller's description
+/// can name the chipset. A desktop's board name is kept, and so is an unknown form factor's (WMI couldn't tell), like
+/// the socket in `cpu_socket`.
+pub fn chipset_board_name(form_factor: FormFactor, product: &str) -> &str {
+    if form_factor == FormFactor::Laptop {
+        ""
+    } else {
+        product
+    }
+}
+
 /// The CPU's name and maker. WMI's `Win32_Processor` stays primary: what it left empty (no name, or
 /// `CpuVendor::Other`, because its query failed or it didn't say) is filled from the processor itself, with CPUID's
 /// brand string and vendor.
@@ -460,6 +473,73 @@ pub fn is_pci_instance(instance_id: &str) -> bool {
     instance_id
         .get(..4)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("PCI\\"))
+}
+
+/// MSFT_PhysicalDisk.BusType (STORAGE_BUS_TYPE in winioctl.h): 17 NVMe; 11 SATA and 3 ATA; 7 USB; 10 SAS; 8 RAID;
+/// 14 virtual and 15 file-backed virtual (a mounted VHD). Anything else (SCSI, iSCSI, SD, Storage Spaces…) is Other.
+pub fn drive_bus(bus_type: Option<u64>) -> DriveBus {
+    match bus_type {
+        Some(17) => DriveBus::Nvme,
+        Some(3 | 11) => DriveBus::Sata,
+        Some(7) => DriveBus::Usb,
+        Some(10) => DriveBus::Sas,
+        Some(8) => DriveBus::Raid,
+        Some(14 | 15) => DriveBus::Virtual,
+        _ => DriveBus::Other,
+    }
+}
+
+/// Win32_PhysicalMemory.Attributes is SMBIOS type 17's Attributes byte: bits 3–0 are the module's rank (1 single,
+/// 2 dual, 4 quad), 0 when unknown.
+pub fn memory_rank(attributes: u64) -> Option<u32> {
+    Some((attributes & 0x0F) as u32).filter(|&rank| rank > 0)
+}
+
+/// Win32_PhysicalMemoryArray rows as (Use, MemoryDevices) → the slots of the arrays that hold system memory (Use 3),
+/// added up. None when none lists a slot.
+pub fn memory_slots(arrays: &[(Option<u64>, Option<u64>)]) -> Option<u32> {
+    let slots: u64 = arrays
+        .iter()
+        .filter(|(usage, _)| *usage == Some(3))
+        .filter_map(|(_, devices)| *devices)
+        .sum();
+    u32::try_from(slots).ok().filter(|&slots| slots > 0)
+}
+
+/// A volume's mount point → its drive letter: "C:\" → 'C'. A volume mounted in a folder ("D:\Games\") or without a
+/// letter ("\\?\Volume{…}\") has none.
+pub fn volume_letter(mount_point: &str) -> Option<char> {
+    let mut chars = mount_point.chars();
+    let letter = chars.next().filter(char::is_ascii_alphabetic)?;
+    (chars.next() == Some(':') && matches!(chars.as_str(), "" | "\\" | "/"))
+        .then_some(letter.to_ascii_uppercase())
+}
+
+/// One active path of Windows' display configuration: which desktop shows on which monitor, and how it's connected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorPath {
+    /// The desktop's GDI name, like `\\.\DISPLAY1`: the same as `DisplayInfo::name`.
+    pub gdi_name: String,
+    /// The monitor's name from its EDID; empty when it has none.
+    pub monitor_name: String,
+    /// DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY as unsigned bits (INTERNAL is 0x8000_0000).
+    pub output_technology: u32,
+}
+
+/// Gives each display its monitor's name (when the EDID has one) and its connection, from the first path with its GDI
+/// name (a desktop cloned onto two monitors has two paths). A display without a path is left as it is.
+pub fn name_monitors(displays: &mut [DisplayInfo], paths: &[MonitorPath]) {
+    for display in displays {
+        let Some(path) = paths
+            .iter()
+            .find(|p| p.gdi_name.eq_ignore_ascii_case(&display.name))
+        else {
+            continue;
+        };
+        let name = path.monitor_name.trim();
+        display.monitor_name = (!name.is_empty()).then(|| name.to_string());
+        display.connection = hardware::connection_name(path.output_technology).map(str::to_string);
+    }
 }
 
 #[cfg(test)]
@@ -1257,5 +1337,141 @@ mod tests {
         assert_eq!(allocated_ranges(list(MAX_DESCRIPTORS + 1)), None);
         // A walk that never ends is not followed forever.
         assert_eq!(allocated_ranges(std::iter::repeat(registers)), None);
+    }
+
+    #[test]
+    fn bus_types_name_the_drive_bus() {
+        // MSFT_PhysicalDisk.BusType is a STORAGE_BUS_TYPE (winioctl.h).
+        let cases = [
+            (17, DriveBus::Nvme),
+            (11, DriveBus::Sata),
+            (3, DriveBus::Sata), // ATA
+            (7, DriveBus::Usb),
+            (10, DriveBus::Sas),
+            (8, DriveBus::Raid),
+            (14, DriveBus::Virtual),
+            (15, DriveBus::Virtual), // file-backed: a mounted VHD
+            (1, DriveBus::Other),    // SCSI
+            (12, DriveBus::Other),   // SD card
+            (16, DriveBus::Other),   // Storage Spaces
+            (0, DriveBus::Other),
+        ];
+        for (code, bus) in cases {
+            assert_eq!(drive_bus(Some(code)), bus, "BusType {code}");
+        }
+        assert_eq!(drive_bus(None), DriveBus::Other);
+    }
+
+    #[test]
+    fn memory_rank_is_the_low_four_bits_of_the_attributes() {
+        assert_eq!(memory_rank(1), Some(1));
+        assert_eq!(memory_rank(2), Some(2));
+        assert_eq!(memory_rank(4), Some(4));
+        assert_eq!(memory_rank(0x12), Some(2), "bits 7–4 are reserved");
+        assert_eq!(memory_rank(0), None, "0 is an unknown rank");
+        assert_eq!(memory_rank(0x10), None);
+    }
+
+    #[test]
+    fn memory_slots_add_up_the_system_memory_arrays() {
+        // (Use, MemoryDevices): Use 3 is system memory; 4 is video memory, 5 flash, 7 cache.
+        assert_eq!(memory_slots(&[(Some(3), Some(4))]), Some(4));
+        assert_eq!(
+            memory_slots(&[(Some(3), Some(2)), (Some(3), Some(2))]),
+            Some(4)
+        );
+        assert_eq!(
+            memory_slots(&[(Some(3), Some(4)), (Some(5), Some(1))]),
+            Some(4)
+        );
+        assert_eq!(memory_slots(&[(Some(5), Some(1))]), None);
+        assert_eq!(memory_slots(&[(Some(3), Some(0))]), None);
+        assert_eq!(memory_slots(&[(None, Some(4))]), None);
+        assert_eq!(memory_slots(&[]), None);
+    }
+
+    #[test]
+    fn only_a_volume_at_the_root_of_a_drive_has_a_letter() {
+        assert_eq!(volume_letter("C:\\"), Some('C'));
+        assert_eq!(volume_letter("d:\\"), Some('D'));
+        assert_eq!(volume_letter("E:"), Some('E'));
+        // Mounted in a folder, or with no letter at all.
+        assert_eq!(volume_letter("D:\\Games\\"), None);
+        assert_eq!(
+            volume_letter("\\\\?\\Volume{0b5ac4d2-0000-0000-0000-100000000000}\\"),
+            None
+        );
+        assert_eq!(volume_letter(""), None);
+    }
+
+    fn display(name: &str) -> DisplayInfo {
+        DisplayInfo {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    fn monitor(gdi_name: &str, monitor_name: &str, output_technology: u32) -> MonitorPath {
+        MonitorPath {
+            gdi_name: gdi_name.into(),
+            monitor_name: monitor_name.into(),
+            output_technology,
+        }
+    }
+
+    #[test]
+    fn displays_take_their_monitors_name_and_connection() {
+        let mut displays = vec![
+            display("\\\\.\\DISPLAY1"),
+            display("\\\\.\\DISPLAY2"),
+            display("\\\\.\\DISPLAY3"),
+        ];
+        // DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY 10 is DisplayPort, 5 HDMI. DISPLAY1 is cloned onto two monitors: the
+        // first path names it, whatever the letter case.
+        let paths = [
+            monitor("\\\\.\\DISPLAY2", "", 5),
+            monitor("\\\\.\\display1", "XL2566K", 10),
+            monitor("\\\\.\\DISPLAY1", "LG ULTRAGEAR", 5),
+        ];
+        name_monitors(&mut displays, &paths);
+        assert_eq!(displays[0].monitor_name.as_deref(), Some("XL2566K"));
+        assert_eq!(displays[0].connection.as_deref(), Some("DisplayPort"));
+        // No name in the monitor's EDID: the connection is still known.
+        assert_eq!(displays[1].monitor_name, None);
+        assert_eq!(displays[1].connection.as_deref(), Some("HDMI"));
+        // A display with no active path keeps nothing.
+        assert_eq!(displays[2].monitor_name, None);
+        assert_eq!(displays[2].connection, None);
+    }
+
+    #[test]
+    fn a_laptops_board_name_is_not_read_for_its_chipset() {
+        // A laptop's model code can spell a chipset by chance, so on a laptop only the Intel controller's description
+        // may name it. A desktop's board name is read as it is, and so is the name of a PC whose form factor WMI could
+        // not tell (the same as `cpu_socket` does).
+        let board = "ROG STRIX B550-F GAMING";
+        assert_eq!(chipset_board_name(FormFactor::Laptop, board), "");
+        assert_eq!(chipset_board_name(FormFactor::Desktop, board), board);
+        assert_eq!(chipset_board_name(FormFactor::Unknown, board), board);
+        assert_eq!(chipset_board_name(FormFactor::Desktop, ""), "");
+    }
+
+    #[test]
+    fn on_a_laptop_the_controllers_description_alone_names_the_chipset() {
+        // The board name spells B760 and the Intel controller says Z790: a desktop goes by its board name, a laptop,
+        // whose board name is a model code, only by the controller.
+        let (board, description) = (
+            "MAG B760 TOMAHAWK WIFI",
+            Some("Intel(R) Z790 LPC/eSPI Controller - 7A04"),
+        );
+        let chipset =
+            |form_factor| hardware::chipset(chipset_board_name(form_factor, board), description);
+        assert_eq!(chipset(FormFactor::Desktop).as_deref(), Some("Intel B760"));
+        assert_eq!(chipset(FormFactor::Laptop).as_deref(), Some("Intel Z790"));
+        // Without a controller to read, a laptop's chipset is not reported.
+        assert_eq!(
+            hardware::chipset(chipset_board_name(FormFactor::Laptop, board), None),
+            None
+        );
     }
 }
