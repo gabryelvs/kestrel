@@ -74,7 +74,7 @@ jobs:
           node-version: lts/*
           cache: npm
           cache-dependency-path: app/package-lock.json
-      - run: cargo clippy -p kestrel-probe -p kestrel-bench --locked -- -D warnings
+      - run: cargo clippy -p kestrel-probe -p kestrel-bench --locked --all-targets -- -D warnings
       - run: cargo test -p kestrel-core -p kestrel-probe -p kestrel-bench --locked
       - name: Probe this runner (smoke test)
         run: cargo run --locked -q -p kestrel-probe --bin kestrel-probe -- --pretty | Tee-Object -FilePath probe-report.json
