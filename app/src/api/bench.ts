@@ -1,5 +1,6 @@
 import { strings } from '../strings';
-import type { BenchState, Flag, MetricId, RunMetrics, ValorantSettings, Verdict } from './types';
+import { linkLabel } from './hardware';
+import type { BenchContext, BenchState, Flag, MetricId, RunMetrics, ValorantSettings, Verdict } from './types';
 
 /** The order metrics appear in tiles and comparisons. */
 export const METRIC_ORDER: MetricId[] = ['avg-fps', 'low1-fps', 'low01-fps', 'stutters-per-min', 'pc-latency-ms'];
@@ -91,6 +92,20 @@ export function dateText(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   const two = (n: number) => n.toString().padStart(2, '0');
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+/** A result's "PC at the time" lines. The PCIe link is the highest the graphics card reached during the runs. */
+export function contextRows(ctx: BenchContext): [string, string][] {
+  const r = strings.bench.contextRows;
+  return [
+    [r.powerPlan, ctx.powerPlan ?? '—'],
+    [r.ram, ctx.ramMts ? `${ctx.ramMts} MT/s` : '—'],
+    [r.gpu, ctx.gpu ? `${ctx.gpu}${ctx.gpuDriver ? ` · ${ctx.gpuDriver}` : ''}` : '—'],
+    [r.pcieLink, ctx.gpuLink ? linkLabel(ctx.gpuLink) : strings.bench.notReported],
+    [r.windows, ctx.windowsBuild ? String(ctx.windowsBuild) : '—'],
+    [r.display, ctx.displayHz ? `${ctx.displayHz} Hz` : '—'],
+    [r.game, settingsText(ctx.gameSettings)],
+  ];
 }
 
 /** VALORANT's recorded settings in one line: "1920×1080 · V-Sync off · No FPS limit". */

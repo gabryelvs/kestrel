@@ -1,3 +1,6 @@
+/** The stage each later feature arrives in (decision 66). kestrel-core's health.rs keeps TWEAKS_STAGE and COMPETITIVE_STAGE. */
+export const STAGE = { tweaks: 5, competitive: 6, lockIn: 7, fixes: 8 } as const;
+
 /** Every user-facing string lives here (spec decision 17). Sentence case, no exclamation marks. */
 export const strings = {
   app: { name: 'Kestrel' },
@@ -18,7 +21,7 @@ export const strings = {
     hardware: 'Hardware',
     seeHardware: 'See all',
     lockIn: 'Lock In',
-    lockInSoon: 'Arrives in stage 5',
+    lockInSoon: `Arrives in stage ${STAGE.lockIn}`,
     liveLoad: 'Live load',
     lastBenchmark: 'Last benchmark',
     noBenchmark: 'No benchmark yet. Measure your starting point in the Range: about 6 minutes.',
@@ -130,12 +133,12 @@ export const strings = {
     enterKey: (key: string) => `To open the BIOS, restart and press ${key}.`,
     why: 'Why',
     careful: 'Careful',
-    later: 'Fixes and the VALORANT troubleshooter arrive in stage 6.',
+    later: `Fixes and the VALORANT troubleshooter arrive in stage ${STAGE.fixes}.`,
   },
   comingSoon: {
     arrives: (n: number) => `Arrives in stage ${n}`,
-    tweaks: { stage: 3, title: 'Tweaks', body: 'Reversible tweaks picked for your hardware, with Preview and one-click undo.' },
-    lockIn: { stage: 5, title: 'Lock In', body: 'A tiny helper that boosts your PC while VALORANT runs and undoes everything when you quit.' },
+    tweaks: { stage: STAGE.tweaks, title: 'Tweaks', body: 'Reversible tweaks picked for your hardware, with Preview and one-click undo.' },
+    lockIn: { stage: STAGE.lockIn, title: 'Lock In', body: 'A tiny helper that boosts your PC while VALORANT runs and undoes everything when you quit.' },
   },
   diagnostics: { copy: 'Copy diagnostics', copied: 'Copied. Paste it in chat.', failed: 'Couldn’t copy. Try again.' },
   bench: {
@@ -195,7 +198,10 @@ export const strings = {
     graph: 'Frame times of the middle run',
     graphAxis: 'ms per frame, lower is smoother',
     context: 'PC at the time',
-    contextRows: { powerPlan: 'Power plan', ram: 'RAM', gpu: 'Graphics', windows: 'Windows build', display: 'Monitor', game: 'VALORANT' },
+    contextRows: {
+      powerPlan: 'Power plan', ram: 'RAM', gpu: 'Graphics', pcieLink: 'PCIe link under load', windows: 'Windows build', display: 'Monitor',
+      game: 'VALORANT',
+    },
     gameSettings: {
       notFound: 'Settings not found',
       vsync: (on: boolean) => (on ? 'V-Sync on' : 'V-Sync off'),

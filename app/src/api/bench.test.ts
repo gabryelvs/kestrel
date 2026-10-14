@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { canStartRun, flagText, graphShape, metricText, passLabel, pct, sessionHeadline, settingsText, spreadText, verdictTone } from './bench';
-import type { BenchState, ValorantSettings } from './types';
+import { canStartRun, contextRows, flagText, graphShape, metricText, passLabel, pct, sessionHeadline, settingsText, spreadText, verdictTone } from './bench';
+import type { BenchContext, BenchState, ValorantSettings } from './types';
 
 const base: BenchState = {
   phase: 'waiting', profileId: 'valorant', pass: 0, gameRunning: true, runs: [null, null, null], resultId: null,
@@ -23,6 +23,19 @@ describe('bench helpers', () => {
     expect(settingsText(settings)).toBe('1920×1080 · V-Sync off · No FPS limit');
     const unknown = { ...settings, resolution: null, fullscreenMode: null, vsync: null, frameRateLimit: null, reflex: null, multithreadedRendering: null };
     expect(settingsText(unknown)).toBe('—');
+  });
+
+  it('lists the PC at the time, with the PCIe link measured under load', () => {
+    const ctx: BenchContext = {
+      powerPlan: 'EXM Free Power Plan V8', ramMts: 3600, gpu: 'NVIDIA GeForce RTX 3060 Ti', gpuDriver: '610.74', windowsBuild: 26200,
+      displayHz: 360, gameSettings: null, gpuPnpDeviceId: 'PCI\\VEN_10DE&DEV_2489', gpuLink: { gen: 4, width: 16 },
+    };
+    expect(contextRows(ctx)).toEqual([
+      ['Power plan', 'EXM Free Power Plan V8'], ['RAM', '3600 MT/s'], ['Graphics', 'NVIDIA GeForce RTX 3060 Ti · 610.74'],
+      ['PCIe link under load', '4.0 x16'], ['Windows build', '26200'], ['Monitor', '360 Hz'], ['VALORANT', 'Settings not found'],
+    ]);
+    // Saved by v0.2.0, or Windows didn't report the link during the runs.
+    expect(contextRows({ ...ctx, gpuPnpDeviceId: null, gpuLink: null })[3]).toEqual(['PCIe link under load', 'Not reported']);
   });
 
   it('signs percentages and colours verdicts', () => {

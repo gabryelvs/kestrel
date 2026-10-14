@@ -108,7 +108,7 @@ Games, Ubisoft or Activision.
 - Vanguard readiness: TPM 2.0, Secure Boot, Memory Integrity, IOMMU, Vanguard installed, On-Demand eligibility
 - Network: Wi-Fi instead of cable; link speed; adapter power saving; Delivery Optimization internet uploads
 
-## Tweak list (stages 3–4)
+## Tweak list (stages 5–6)
 
 Essential: Kestrel power plan (High performance base, no core parking, USB/PCIe power saving off;
 laptops only on charger); VALORANT on "High performance" GPU; Game Mode on; Game DVR background

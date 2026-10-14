@@ -7,7 +7,7 @@ import { RouteCard } from '../components/bench/RouteCard';
 import { SessionPanel } from '../components/bench/SessionPanel';
 import { strings } from '../strings';
 
-/** Stage 2: start a benchmark, follow the session, and look through saved results (newest first). */
+/** The Benchmark tab: start a benchmark, follow the session, and look through saved results (newest first). */
 export function Benchmark() {
   const [profile, setProfile] = useState<GameProfile | null>(null);
   const [items, setItems] = useState<BenchmarkSummary[]>([]);

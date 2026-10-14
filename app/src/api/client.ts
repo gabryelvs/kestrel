@@ -45,7 +45,7 @@ export async function openLink(url: string): Promise<void> {
   await openUrl(url);
 }
 
-// Stage 2: the benchmark. In the browser preview these use sample data and a fake session.
+// The benchmark. In the browser preview these use sample data and a fake session.
 export const benchProfiles = (): Promise<GameProfile[]> => (inTauri() ? call('bench_profiles') : Promise.resolve([sampleProfile]));
 export const benchState = (): Promise<BenchState | null> => (inTauri() ? call('bench_state') : Promise.resolve(fakeSession.state()));
 export const benchStart = (profile: string): Promise<BenchState> => (inTauri() ? call('bench_start', { profile }) : later(fakeSession.start(), 300));

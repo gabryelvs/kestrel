@@ -123,7 +123,7 @@ export interface LoadSample { cpuPercent: number; ramPercent: number; gpuPercent
 /** One physical core's clock (Rust: kestrel_core::topology::CoreClock). `kind` is set only on hybrid CPUs. */
 export interface CoreClock { core: number; kind: 'performance' | 'efficiency' | null; mhz: number | null }
 
-// Stage 2: the benchmark (Rust: crates/kestrel-bench and app/src-tauri/src/bench).
+// The benchmark (Rust: crates/kestrel-bench and app/src-tauri/src/bench).
 export type Bottleneck = 'gpu' | 'cpu' | 'mixed' | 'unknown';
 export interface RunMetrics {
   frames: number;

@@ -1,6 +1,6 @@
 import { strings } from '../strings';
 
-/** Placeholder until stage 5: shows where Lock In will live, switched off. */
+/** Placeholder until Lock In arrives (STAGE.lockIn in strings.ts): shows where it will live, switched off. */
 export function LockInCard() {
   return (
     <section className="panel lock-in">

@@ -1,4 +1,5 @@
-//! Game profiles (decision 55). Stage 2 has one: VALORANT with Route v1.
+//! Game profiles (decision 55). VALORANT with Route v1 is the only one so far; FiveM, Rainbow Six Siege and Warzone
+//! follow (decision 56).
 use serde::Serialize;
 
 /// The routine a benchmark follows. Results from different route versions are never compared.

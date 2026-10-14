@@ -50,9 +50,10 @@ pub trait Platform: Send + Sync + 'static {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StartMode {
-    /// The start key works.
+    /// Kestrel holds the start key. The UI still offers "Start run" (a 10-second countdown) whenever a pass waits with
+    /// the game running, because a game can swallow the key.
     Hotkey,
-    /// Another app holds the key: the UI's "Start run" button starts a 10-second countdown instead.
+    /// Another app holds the start key, so "Start run" is the only way to start a pass.
     Countdown,
 }
 
