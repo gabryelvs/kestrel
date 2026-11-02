@@ -145,6 +145,8 @@ struct Failures {
     copies: BTreeSet<String>,
     /// Plans that can't be activated.
     activations: BTreeSet<String>,
+    /// Plans that can't be deleted.
+    deletions: BTreeSet<String>,
     /// Values whose next write will read back wrongly once.
     lies: BTreeSet<String>,
     /// Values written under a lie that have not been read back yet.
@@ -482,7 +484,9 @@ impl FakeSystem {
 
     // Making things go wrong. Reads and writes are named by the registry value they touch, in any key or account. A
     // key is named by its path: `fail_read` makes listing its values fail, and `fail_write` makes deleting it when it
-    // is empty fail. `MOUSE_LIVE` names the live mouse setting and `ACTIVE_PLAN` the plan in use. Case doesn't matter.
+    // is empty fail. `MOUSE_LIVE` names the live mouse setting and `ACTIVE_PLAN` the plan in use. A setting of a power
+    // plan is named by its GUID, in any plan, and describing a plan (`fail_write` only) by the plan's own GUID. Case
+    // doesn't matter.
 
     /// Reads of this fail, whether or not it is there.
     pub fn fail_read(&self, name: &str) {
@@ -502,6 +506,11 @@ impl FakeSystem {
     /// Activating this plan fails.
     pub fn fail_activate(&self, guid: &str) {
         self.lock().failures.activations.insert(guid.to_string());
+    }
+
+    /// Deleting this plan fails.
+    pub fn fail_delete(&self, guid: &str) {
+        self.lock().failures.deletions.insert(guid.to_string());
     }
 
     /// The next write to this value is stored as written, but the first read of it afterwards says something that
@@ -684,6 +693,7 @@ impl System for FakeSystem {
 
     fn describe_plan(&self, guid: &str, name: &str, description: &str) -> io::Result<()> {
         let mut inner = self.lock();
+        inner.refuse_write(guid)?;
         let plan = inner.plan_mut(guid).ok_or_else(|| no_such_plan(guid))?;
         plan.name = name.to_string();
         plan.description = description.to_string();
@@ -692,8 +702,16 @@ impl System for FakeSystem {
     }
 
     fn read_plan_value(&self, guid: &str, subgroup: &str, setting: &str) -> Read<u32> {
-        match self.plan_value(guid, subgroup, setting) {
-            Some(value) => Read::Value(value),
+        let mut inner = self.lock();
+        let folded = fold(setting);
+        if inner.failures.reads.contains(&folded) {
+            return failed_read(setting);
+        }
+        let lying = inner.failures.lying.remove(&folded);
+        let key = (subgroup.to_string(), setting.to_string());
+        match inner.plan(guid).and_then(|plan| plan.values.get(&key)) {
+            Some(value) if lying => Read::Value(!value),
+            Some(value) => Read::Value(*value),
             None => Read::Absent,
         }
     }
@@ -712,9 +730,17 @@ impl System for FakeSystem {
         value: u32,
     ) -> io::Result<()> {
         let mut inner = self.lock();
+        inner.refuse_write(setting)?;
         let plan = inner.plan_mut(guid).ok_or_else(|| no_such_plan(guid))?;
         plan.values
             .insert((subgroup.to_string(), setting.to_string()), value);
+        // A lie lasts from the write it was set for until the value is first read back.
+        let folded = fold(setting);
+        if inner.failures.lies.remove(&folded) {
+            inner.failures.lying.insert(folded);
+        } else {
+            inner.failures.lying.remove(&folded);
+        }
         inner
             .log
             .push(format!("plan-value {guid} {subgroup}/{setting} = {value}"));
@@ -738,6 +764,11 @@ impl System for FakeSystem {
 
     fn delete_plan(&self, guid: &str) -> io::Result<()> {
         let mut inner = self.lock();
+        if inner.failures.deletions.contains(guid) {
+            return Err(io::Error::other(format!(
+                "the fake was told that deleting power plan {guid} fails"
+            )));
+        }
         if inner.plan(guid).is_none() {
             return Err(no_such_plan(guid));
         }
@@ -1366,6 +1397,142 @@ mod tests {
         assert!(pc.activate_plan(HIGH_PERFORMANCE).is_err());
         assert_eq!(pc.active_plan(), Read::Value(BALANCED.to_string()));
         pc.activate_plan(POWER_SAVER).unwrap();
+    }
+
+    #[test]
+    fn a_plan_setting_told_to_fail_fails_in_every_plan() {
+        let pc = FakeSystem::new();
+        pc.set_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING, 100);
+
+        // A read told to fail is a failure and not "absent", whether or not the plan holds the value.
+        pc.fail_read(SETTING);
+        assert!(failed(&pc.read_plan_value(
+            HIGH_PERFORMANCE,
+            SUBGROUP,
+            SETTING
+        )));
+        assert!(failed(&pc.read_plan_value(BALANCED, SUBGROUP, SETTING)));
+        // The test's own look at the plan stays true, and other settings read as before.
+        assert_eq!(
+            pc.plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING),
+            Some(100)
+        );
+        assert_eq!(
+            pc.read_plan_value(HIGH_PERFORMANCE, SUBGROUP, "other"),
+            Read::Absent
+        );
+
+        // A write told to fail is refused and changes nothing, in any plan.
+        pc.fail_write(SETTING);
+        for plan in [HIGH_PERFORMANCE, BALANCED] {
+            let refused = pc.write_plan_value(plan, SUBGROUP, SETTING, 0).unwrap_err();
+            assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{plan}");
+        }
+        assert_eq!(
+            pc.plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING),
+            Some(100)
+        );
+        assert_eq!(pc.plan_value(BALANCED, SUBGROUP, SETTING), None);
+        assert!(pc.writes().is_empty());
+        // Other settings are still written.
+        pc.write_plan_value(BALANCED, SUBGROUP, "other", 1).unwrap();
+
+        // Lifting the switches brings the plans back as they were.
+        pc.clear_failures();
+        assert_eq!(
+            pc.read_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING),
+            Read::Value(100)
+        );
+        pc.write_plan_value(BALANCED, SUBGROUP, SETTING, 0).unwrap();
+        assert_eq!(pc.plan_value(BALANCED, SUBGROUP, SETTING), Some(0));
+    }
+
+    #[test]
+    fn a_plan_setting_told_to_lie_reads_back_wrongly_once_after_its_next_write() {
+        let pc = FakeSystem::new();
+        pc.set_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING, 100);
+        pc.lie_on_readback(SETTING);
+
+        // A read before the write is true: that is how a caller finds the prior value.
+        assert_eq!(
+            pc.read_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING),
+            Read::Value(100)
+        );
+        pc.write_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING, 0)
+            .unwrap();
+        // The test's own look is true, the first read through `System` is the lie, and the next is true again.
+        assert_eq!(pc.plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING), Some(0));
+        assert_eq!(
+            pc.read_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING),
+            Read::Value(!0)
+        );
+        assert_eq!(
+            pc.read_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING),
+            Read::Value(0)
+        );
+
+        // A lie is told once: the next write reads back as written.
+        pc.write_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING, 5)
+            .unwrap();
+        assert_eq!(
+            pc.read_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING),
+            Read::Value(5)
+        );
+
+        // A lie lasts from the write it was set for until the value is first read back, and no longer: a second write
+        // before any read has no lie set for it.
+        pc.lie_on_readback(SETTING);
+        pc.write_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING, 6)
+            .unwrap();
+        pc.write_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING, 7)
+            .unwrap();
+        assert_eq!(
+            pc.read_plan_value(HIGH_PERFORMANCE, SUBGROUP, SETTING),
+            Read::Value(7)
+        );
+    }
+
+    #[test]
+    fn describing_a_plan_told_to_refuse_changes_nothing() {
+        let pc = FakeSystem::new();
+        pc.add_plan(KESTREL, "High performance");
+        pc.fail_write(KESTREL);
+
+        let refused = pc
+            .describe_plan(KESTREL, "Kestrel", "Created by Kestrel.")
+            .unwrap_err();
+
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(pc.plan_name(KESTREL).as_deref(), Some("High performance"));
+        assert_eq!(pc.plan_description(KESTREL).as_deref(), Some(""));
+        assert!(pc.writes().is_empty());
+        // Other plans are described as usual.
+        pc.describe_plan(BALANCED, "Mine", "Made by me.").unwrap();
+        assert_eq!(pc.plan_name(BALANCED).as_deref(), Some("Mine"));
+    }
+
+    #[test]
+    fn a_plan_told_not_to_be_deleted_stays() {
+        let pc = FakeSystem::new();
+        pc.add_plan(EXM, "EXM");
+        pc.add_plan(KESTREL, "Kestrel");
+
+        pc.fail_delete(KESTREL);
+        let refused = pc.delete_plan(KESTREL).unwrap_err();
+        assert!(refused.to_string().contains(KESTREL), "{refused}");
+        assert!(pc.plan_exists(KESTREL));
+        assert!(!pc
+            .writes()
+            .iter()
+            .any(|line| line.starts_with("delete-plan")));
+
+        // Only that plan is refused.
+        pc.delete_plan(EXM).unwrap();
+        assert!(!pc.plan_exists(EXM));
+
+        pc.clear_failures();
+        pc.delete_plan(KESTREL).unwrap();
+        assert!(!pc.plan_exists(KESTREL));
     }
 
     #[test]

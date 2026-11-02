@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod fake;
 pub mod journal;
 pub mod plan;
+pub mod power;
 pub mod system;
 pub mod targets;
 pub mod tokens;
