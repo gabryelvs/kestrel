@@ -3,9 +3,12 @@
 pub mod catalog;
 pub mod fake;
 pub mod journal;
+pub mod plan;
 pub mod system;
+pub mod targets;
 pub mod tokens;
 
 pub use catalog::{info, Impact, Info, Timing};
 pub use journal::RestoreOutcome;
+pub use plan::{PlanInput, PreviewItem, Row, RowState, ValueChange};
 pub use system::{Read, Readiness, System};
