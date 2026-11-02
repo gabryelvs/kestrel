@@ -2017,6 +2017,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kestrel-tweaks"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "kestrel-core",
+ "kestrel-probe",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

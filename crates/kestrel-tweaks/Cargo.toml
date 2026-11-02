@@ -1,0 +1,15 @@
+[package]
+name = "kestrel-tweaks"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+kestrel-core = { path = "../kestrel-core" }
+kestrel-probe = { path = "../kestrel-probe" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+tempfile = "3.27.0"

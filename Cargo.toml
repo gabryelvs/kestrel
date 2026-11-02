@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kestrel-core", "crates/kestrel-probe", "crates/kestrel-bench", "app/src-tauri"]
+members = ["crates/kestrel-core", "crates/kestrel-probe", "crates/kestrel-bench", "crates/kestrel-tweaks", "app/src-tauri"]
 
 [workspace.package]
 edition = "2021"
