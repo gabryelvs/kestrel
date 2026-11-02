@@ -1,4 +1,4 @@
-/** The stage each later feature arrives in (decision 66). kestrel-core's health.rs keeps TWEAKS_STAGE and COMPETITIVE_STAGE. */
+/** The stage each later feature arrives in (decision 66). kestrel-core's health.rs keeps COMPETITIVE_STAGE. */
 export const STAGE = { tweaks: 5, competitive: 6, lockIn: 7, fixes: 8 } as const;
 
 /** Every user-facing string lives here (spec decision 17). Sentence case, no exclamation marks. */
@@ -123,6 +123,7 @@ export const strings = {
     status: { pass: 'OK', problem: 'Fix', info: 'Info', unknown: 'Unknown' },
     severity: { high: 'High', medium: 'Med', low: 'Low', info: 'Info' },
     biosGuide: 'Open BIOS guide',
+    fix: 'Fix',
     laterStage: (n: number) => `Kestrel fixes this in stage ${n}`,
     howToFix: 'How to fix',
     probeErrors: (n: number) => `${n} probe${n === 1 ? '' : 's'} couldn’t read everything. Use Copy diagnostics on Home to share the details.`,

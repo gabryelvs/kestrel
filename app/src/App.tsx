@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getReport, inTauri, isElevated, rescan } from './api/client';
-import type { BiosTopic, Report } from './api/types';
+import type { BiosTopic, Report, TweakId } from './api/types';
 import { Banner } from './components/Banner';
 import { TitleBar, type Tab } from './components/TitleBar';
 import { FirstRun } from './first-run/FirstRun';
@@ -20,6 +20,8 @@ export function App() {
   const [scan, setScan] = useState<Scan>({ state: 'loading' });
   const [admin, setAdmin] = useState<boolean | null>(null);
   const [guideTopic, setGuideTopic] = useState<BiosTopic | null>(null);
+  // The tweak a Fix button asked for. The Tweaks page will open its Preview and clear this; the placeholder tab reads nothing.
+  const [, setTweakFocus] = useState<TweakId | null>(null);
   const [firstRun, setFirstRun] = useState(() => !firstRunDone());
   const skippedInitialScan = useRef(firstRun);
 
@@ -52,6 +54,12 @@ export function App() {
     refresh();
     setGuideTopic(topic);
     setTab('toolbox');
+  };
+
+  const openTweak = (tweak: TweakId) => {
+    refresh();
+    setTweakFocus(tweak);
+    setTab('tweaks');
   };
 
   const chooseTab = (next: Tab) => {
@@ -88,8 +96,8 @@ export function App() {
               <button className="btn btn-ghost cut-s" onClick={() => void run(true)}>{strings.loading.retry}</button>
             </div>
           )}
-          {report && tab === 'home' && <Home report={report} onTab={chooseTab} onGuide={openGuide} onRescan={() => void run(true)} />}
-          {report && tab === 'health' && <Health report={report} onGuide={openGuide} />}
+          {report && tab === 'home' && <Home report={report} onTab={chooseTab} onGuide={openGuide} onTweak={openTweak} onRescan={() => void run(true)} />}
+          {report && tab === 'health' && <Health report={report} onGuide={openGuide} onTweak={openTweak} />}
           {report && tab === 'hardware' && <Hardware report={report} onGuide={openGuide} onRescan={() => void run(true)} />}
           {report && tab === 'toolbox' && <Toolbox guide={report.guide} focus={guideTopic} appVersion={report.appVersion} />}
           {report && tab === 'tweaks' && <ComingSoon {...strings.comingSoon.tweaks} />}

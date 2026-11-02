@@ -1,5 +1,6 @@
 //! CPUID decoding: the CPU's maker, family, model and stepping, the instruction sets Windows lets programs use,
-//! and the codename table. The probe runs the instruction; everything here works on the register values.
+//! and the codename table. The probe runs the instruction; everything here works on the register values, except
+//! `is_dual_ccd_x3d`, which reads the CPU's name.
 use crate::snapshot::CpuVendor;
 use std::ops::RangeInclusive;
 
@@ -283,6 +284,22 @@ const AMD: &[Row] = &[
     row(0x1A, 0x60, ANY, "Krackan Point / Gorgon Point", MOBILE),
     row(0x1A, 0x70, ANY, "Strix Halo", MOBILE),
 ];
+
+/// The dual-CCD X3D Ryzens, by model number. AMD's guidance for them is the Balanced power plan with Game Mode on, so
+/// Kestrel offers no plan of its own there.
+const DUAL_CCD_X3D: [&str; 5] = ["7900X3D", "7950X3D", "9900X3D", "9950X3D", "9950X3D2"];
+
+/// Whether a CPU's name ("AMD Ryzen 9 7950X3D 16-Core Processor") holds one of those model numbers, in any letter case
+/// and as a whole word.
+pub fn is_dual_ccd_x3d(name: &str) -> bool {
+    let is_model = |word: &str| {
+        DUAL_CCD_X3D
+            .iter()
+            .any(|model| word.eq_ignore_ascii_case(model))
+    };
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(is_model)
+}
 
 #[cfg(test)]
 mod tests {
@@ -786,5 +803,51 @@ mod tests {
             ["SSE4.2", "AVX", "AVX2", "AVX-512", "AVX-VNNI", "AMX"]
         );
         assert_eq!(codename(id.vendor, id.family, id.model, id.stepping), None);
+    }
+
+    #[test]
+    fn dual_ccd_x3d_names() {
+        for name in [
+            "AMD Ryzen 9 7900X3D 12-Core Processor",
+            "AMD Ryzen 9 7950X3D 16-Core Processor",
+            "AMD Ryzen 9 9900X3D 12-Core Processor",
+            "AMD Ryzen 9 9950X3D 16-Core Processor",
+            "AMD Ryzen 9 9950X3D2 16-Core Processor",
+            // The model number alone, in any letter case.
+            "7950X3D",
+            "amd ryzen 9 7950x3d 16-core processor",
+            "AMD RYZEN 9 9950X3D2",
+        ] {
+            assert!(is_dual_ccd_x3d(name), "{name}");
+        }
+        for name in [
+            // The X3D chips with a single CCD.
+            "AMD Ryzen 7 7800X3D 8-Core Processor",
+            "AMD Ryzen 7 9800X3D 8-Core Processor",
+            "AMD Ryzen 7 5800X3D 8-Core Processor",
+            // Dual CCD without the extra cache.
+            "AMD Ryzen 9 7950X 16-Core Processor",
+            "AMD Ryzen 9 9950X 16-Core Processor",
+            "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz",
+            "Intel Core i9-11900K",
+            "",
+        ] {
+            assert!(!is_dual_ccd_x3d(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_model_number_counts_only_as_a_whole_word() {
+        for name in [
+            // The number runs on into other characters at either end.
+            "AMD Ryzen 9 17950X3D",
+            "AMD Ryzen 9 7950X3DX",
+            "AMD Ryzen 9 9950X3D22",
+        ] {
+            assert!(!is_dual_ccd_x3d(name), "{name}");
+        }
+        // Punctuation around the number still leaves it a word.
+        assert!(is_dual_ccd_x3d("AMD Ryzen 9 (7950X3D)"));
+        assert!(is_dual_ccd_x3d("AMD Ryzen 9 7950X3D, 16-Core Processor"));
     }
 }

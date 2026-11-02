@@ -1,9 +1,11 @@
 //! The Health Check: one finding per check, in plain words, each with a way to fix it.
 use crate::bios_guide::memory_profile_name;
+use crate::cpu;
 use crate::gpu;
 use crate::pcie;
 use crate::ram::{self, ChannelLayout};
 use crate::snapshot::*;
+use crate::tweak_id::TweakId;
 use chrono::NaiveDate;
 use serde::Serialize;
 
@@ -50,18 +52,18 @@ pub enum BiosTopic {
     Virtualization,
 }
 
+/// What fixes a finding. `Tweak` is a fix the Tweaks tab makes: it opens there with that tweak's Preview.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Fix {
     BiosGuide { topic: BiosTopic },
+    Tweak { tweak: TweakId },
     LaterStage { stage: u8 },
     Steps { steps: Vec<String> },
     Link { label: String, url: String },
     Nothing,
 }
 
-/// The stage that brings the tweak engine: Kestrel's own power plan, Game Mode and background recording.
-pub const TWEAKS_STAGE: u8 = 5;
 /// The stage that brings the Competitive tier: startup apps, adapter power saving and Delivery Optimization.
 pub const COMPETITIVE_STAGE: u8 = 6;
 
@@ -562,7 +564,7 @@ fn valorant_gpu(s: &SystemSnapshot) -> Finding {
         _ => c.problem(
             "VALORANT may run on the integrated graphics",
             "This PC has two graphics chips. Windows can pick the weaker one unless VALORANT is set to High performance.",
-            steps(&["Open Settings → System → Display → Graphics.", "Find VALORANT (add VALORANT-Win64-Shipping.exe if it isn't listed).", "Choose Options → High performance → Save."]),
+            Fix::Tweak { tweak: TweakId::GpuPreference },
         ),
     }
 }
@@ -596,6 +598,7 @@ const PERFORMANCE_NAMES: [&str; 3] = ["high performance", "ultimate performance"
 /// Only the built-in Balanced and Power saver plans are problems. `powercfg -duplicatescheme` (the usual way to get
 /// Ultimate Performance on Home and Pro) gives the copy a new GUID, and OEM, AMD and Bitsum plans have their own, so
 /// a plan Kestrel doesn't know is reported but not counted. Names follow the user's language; GUIDs never change.
+/// On a dual-CCD X3D, Balanced passes: it is AMD's guidance there, and the Tweaks tab doesn't offer Kestrel's plan.
 fn power_plan(s: &SystemSnapshot) -> Finding {
     let c = Check {
         id: "power-plan",
@@ -607,21 +610,23 @@ fn power_plan(s: &SystemSnapshot) -> Finding {
     };
     let guid = plan.guid.to_ascii_lowercase();
     let name = plan.name.to_ascii_lowercase();
+    let amds_choice = guid == BALANCED && cpu::is_dual_ccd_x3d(&s.cpu.name);
     if guid == HIGH_PERFORMANCE
         || guid == ULTIMATE_PERFORMANCE
         || PERFORMANCE_NAMES.iter().any(|word| name.contains(word))
+        || amds_choice
     {
         c.pass(format!("Power plan: {}", plan.name), "")
     } else if guid == BALANCED || guid == POWER_SAVER {
         c.problem(
             format!("Power plan is {}", plan.name),
-            format!("This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage {TWEAKS_STAGE}. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead."),
-            Fix::LaterStage { stage: TWEAKS_STAGE },
+            "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's plan is in the Tweaks tab.",
+            Fix::Tweak { tweak: TweakId::PowerPlan },
         )
     } else {
         c.info(
             format!("Custom power plan: {}", plan.name),
-            "Kestrel can't tell how this plan is tuned, so it isn't counted as a problem. If it favours battery life over speed, High performance is the safer choice for VALORANT.",
+            "Kestrel can't tell how this plan is tuned, so it isn't counted as a problem. You can try Kestrel's plan in the Tweaks tab and measure before and after.",
         )
     }
 }
@@ -634,7 +639,7 @@ fn game_mode(s: &SystemSnapshot) -> Finding {
     };
     match s.windows.game_mode {
         Some(true) => c.pass("Game Mode is on", ""),
-        Some(false) => c.problem("Game Mode is off", "Game Mode tells Windows to favour the game you're playing. Ryzen X3D chips also need it to pick the right cores.", Fix::LaterStage { stage: TWEAKS_STAGE }),
+        Some(false) => c.problem("Game Mode is off", "Game Mode tells Windows to favour the game you're playing. Ryzen X3D chips also need it to pick the right cores.", Fix::Tweak { tweak: TweakId::GameMode }),
         None => c.unknown("Couldn't read the Game Mode setting", ""),
     }
 }
@@ -646,7 +651,7 @@ fn background_recording(s: &SystemSnapshot) -> Finding {
         severity: Severity::Medium,
     };
     match s.windows.background_recording {
-        Some(true) => c.problem("Background recording is on", "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS.", Fix::LaterStage { stage: TWEAKS_STAGE }),
+        Some(true) => c.problem("Background recording is on", "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS.", Fix::Tweak { tweak: TweakId::BackgroundRecording }),
         Some(false) => c.pass("Background recording is off", ""),
         None => c.unknown("Couldn't read the background recording setting", ""),
     }
@@ -1335,10 +1340,19 @@ mod tests {
         )];
         let v = get(&run_health_check(&s, today()), "valorant-gpu").clone();
         assert_eq!((v.status, v.severity), (Status::Problem, Severity::High));
+        // Moving a cable is not something a tweak can do, so this one stays a list of steps.
+        assert_eq!(
+            v.fix,
+            steps(&[
+                "Shut down the PC.",
+                "Move the monitor cable from the motherboard's video port to a port on the graphics card (lower down at the back).",
+                "Start the PC.",
+            ])
+        );
     }
 
-    #[test]
-    fn hybrid_laptop_needs_high_performance_preference() {
+    /// A laptop whose screen runs on the integrated graphics, with an NVIDIA chip beside it and no GPU preference.
+    fn hybrid_laptop() -> SystemSnapshot {
         let mut s = owner_pc_fixture();
         s.machine.form_factor = FormFactor::Laptop;
         s.machine.on_battery = Some(false);
@@ -1364,6 +1378,12 @@ mod tests {
             false,
             "Intel(R) UHD Graphics",
         )];
+        s
+    }
+
+    #[test]
+    fn hybrid_laptop_needs_high_performance_preference() {
+        let mut s = hybrid_laptop();
         assert_eq!(
             get(&run_health_check(&s, today()), "valorant-gpu").status,
             Status::Problem
@@ -1439,16 +1459,9 @@ mod tests {
             assert_eq!(plan.title, format!("Power plan is {name}"));
             assert_eq!(
                 plan.fix,
-                Fix::LaterStage {
-                    stage: TWEAKS_STAGE
+                Fix::Tweak {
+                    tweak: TweakId::PowerPlan
                 }
-            );
-            // Laptops with Modern Standby only offer Balanced, so the detail names the Power mode setting too.
-            assert!(
-                plan.detail
-                    .contains("Settings → System → Power → Power mode → Best performance"),
-                "{}",
-                plan.detail
             );
         }
     }
@@ -2469,34 +2482,70 @@ mod tests {
     }
 
     #[test]
-    fn later_stage_fixes_follow_the_current_stage_order() {
-        let mut s = owner_pc_fixture();
-        // The owner's PC already has Balanced and adapter power saving; make the other four problems too.
+    fn tweak_fixes_point_at_their_tweak() {
+        let mut s = owner_pc_fixture(); // has Balanced
         s.windows.game_mode = Some(false);
         s.windows.background_recording = Some(true);
-        s.windows.startup_app_count = Some(11);
-        s.network.delivery_optimization_internet = Some(true);
         let f = run_health_check(&s, today());
-        for (id, stage) in [
-            ("power-plan", TWEAKS_STAGE),
-            ("game-mode", TWEAKS_STAGE),
-            ("background-recording", TWEAKS_STAGE),
-            ("startup-apps", COMPETITIVE_STAGE),
-            ("adapter-power", COMPETITIVE_STAGE),
-            ("delivery-optimization", COMPETITIVE_STAGE),
+        for (id, tweak) in [
+            ("power-plan", TweakId::PowerPlan),
+            ("game-mode", TweakId::GameMode),
+            ("background-recording", TweakId::BackgroundRecording),
         ] {
             let finding = get(&f, id);
             assert_eq!(
                 (finding.status, finding.fix.clone()),
-                (Status::Problem, Fix::LaterStage { stage }),
+                (Status::Problem, Fix::Tweak { tweak }),
+                "{id}"
+            );
+            assert!(
+                !finding.title.contains("stage") && !finding.detail.contains("stage"),
+                "{id} still names a stage"
+            );
+        }
+        assert_eq!(get(&f, "power-plan").detail, "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's plan is in the Tweaks tab.");
+        // Only the fix changed on the other two: their titles and details are the ones they had.
+        let wording = |id| (get(&f, id).title.as_str(), get(&f, id).detail.as_str());
+        assert_eq!(
+            wording("game-mode"),
+            (
+                "Game Mode is off",
+                "Game Mode tells Windows to favour the game you're playing. Ryzen X3D chips also need it to pick the right cores."
+            )
+        );
+        assert_eq!(
+            wording("background-recording"),
+            (
+                "Background recording is on",
+                "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS."
+            )
+        );
+    }
+
+    #[test]
+    fn competitive_fixes_keep_their_stage() {
+        let mut s = owner_pc_fixture();
+        // The owner's PC already has adapter power saving; make the other two problems too.
+        s.windows.startup_app_count = Some(11);
+        s.network.delivery_optimization_internet = Some(true);
+        let f = run_health_check(&s, today());
+        for id in ["startup-apps", "adapter-power", "delivery-optimization"] {
+            let finding = get(&f, id);
+            assert_eq!(
+                (finding.status, finding.fix.clone()),
+                (
+                    Status::Problem,
+                    Fix::LaterStage {
+                        stage: COMPETITIVE_STAGE
+                    }
+                ),
                 "{id}"
             );
         }
-        assert_eq!(get(&f, "power-plan").detail, "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's own plan arrives in stage 5. Until then, pick High performance in Control Panel → Power Options. If it only lists Balanced (laptops with Modern Standby do that), set Settings → System → Power → Power mode → Best performance instead.");
         assert_eq!(get(&f, "startup-apps").detail, "Each one uses memory and CPU in the background. Kestrel's startup manager arrives in stage 6; until then, turn off what you don't need in Task Manager → Startup apps.");
         assert_eq!(get(&f, "adapter-power").detail, "Windows can let the adapter doze, which causes small latency spikes. Kestrel's Competitive tier turns this off in stage 6.");
         for finding in &f {
-            for old in ["stage 3", "stage 4"] {
+            for old in ["stage 3", "stage 4", "stage 5"] {
                 assert!(
                     !finding.title.contains(old) && !finding.detail.contains(old),
                     "{} still says {old}",
@@ -2504,6 +2553,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_hybrid_pc_without_a_gpu_preference_gets_the_tweak() {
+        for preference in [None, Some(0), Some(1)] {
+            let mut s = hybrid_laptop();
+            s.windows.valorant_gpu_preference = preference;
+            let finding = get(&run_health_check(&s, today()), "valorant-gpu").clone();
+            assert_eq!(
+                (finding.status, finding.fix),
+                (
+                    Status::Problem,
+                    Fix::Tweak {
+                        tweak: TweakId::GpuPreference
+                    }
+                ),
+                "{preference:?}"
+            );
+            // The wording is the one the check had when its fix was a list of steps.
+            assert_eq!(finding.title, "VALORANT may run on the integrated graphics");
+            assert_eq!(finding.detail, "This PC has two graphics chips. Windows can pick the weaker one unless VALORANT is set to High performance.");
+        }
+    }
+
+    /// The owner's PC with this CPU and this power plan, and what the power plan check says about it.
+    fn power_plan_on(cpu: &str, guid: &str, name: &str) -> Finding {
+        let mut s = owner_pc_fixture();
+        s.cpu.name = cpu.into();
+        s.windows.power_plan = Some(PowerPlan {
+            guid: guid.into(),
+            name: name.into(),
+        });
+        get(&run_health_check(&s, today()), "power-plan").clone()
+    }
+
+    const BALANCED_GUID: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
+    const POWER_SAVER_GUID: &str = "a1841308-3541-4fab-bc81-f71556f20b4a";
+
+    #[test]
+    fn balanced_passes_on_a_dual_ccd_x3d() {
+        let mut s = owner_pc_fixture();
+        s.cpu.name = "AMD Ryzen 9 7950X3D 16-Core Processor".into();
+        let f = run_health_check(&s, today());
+        let plan = get(&f, "power-plan");
+        assert_eq!(plan.status, Status::Pass);
+        assert_eq!(
+            (plan.title.as_str(), &plan.fix),
+            ("Power plan: Balanced", &Fix::Nothing)
+        );
+        // Windows names its plans in the user's language, but the GUID says it is Balanced.
+        let localised = power_plan_on(
+            "AMD Ryzen 9 7950X3D 16-Core Processor",
+            &BALANCED_GUID.to_ascii_uppercase(),
+            "Equilibrado",
+        );
+        assert_eq!(
+            (localised.status, localised.title.as_str()),
+            (Status::Pass, "Power plan: Equilibrado")
+        );
+    }
+
+    #[test]
+    fn only_balanced_on_a_dual_ccd_x3d_gets_the_pass() {
+        // Elsewhere Balanced is still a problem, including on an X3D with one CCD.
+        for cpu in [
+            "AMD Ryzen 7 7800X3D 8-Core Processor",
+            "AMD Ryzen 9 7950X 16-Core Processor",
+            "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz",
+        ] {
+            let plan = power_plan_on(cpu, BALANCED_GUID, "Balanced");
+            assert_eq!(plan.status, Status::Problem, "{cpu}");
+        }
+        // AMD's guidance for a dual-CCD X3D is Balanced: Power saver is no better there than anywhere.
+        let saver = power_plan_on(
+            "AMD Ryzen 9 9950X3D 16-Core Processor",
+            POWER_SAVER_GUID,
+            "Power saver",
+        );
+        assert_eq!(saver.status, Status::Problem);
+    }
+
+    #[test]
+    fn another_tools_plan_points_at_the_tweaks_tab() {
+        let plan = power_plan_finding(
+            "5b1d3a84-6b3c-4a52-9a77-3f1c2d8e9b10",
+            "EXM Free Power Plan V8",
+        );
+        assert_eq!(plan.status, Status::Info);
+        assert_eq!(plan.title, "Custom power plan: EXM Free Power Plan V8");
+        assert_eq!(plan.detail, "Kestrel can't tell how this plan is tuned, so it isn't counted as a problem. You can try Kestrel's plan in the Tweaks tab and measure before and after.");
+        assert_eq!(plan.fix, Fix::Nothing);
+    }
+
+    #[test]
+    fn a_tweak_fix_serializes_with_the_tweak_id() {
+        let json = serde_json::to_string(&Fix::Tweak {
+            tweak: TweakId::GameMode,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"kind":"tweak","tweak":"game-mode"}"#);
     }
 
     #[test]

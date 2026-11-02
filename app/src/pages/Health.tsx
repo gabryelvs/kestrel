@@ -2,7 +2,7 @@ import { IconAlertTriangle, IconCheck, IconHelpCircle, IconInfoCircle } from '@t
 import { useState, type ReactElement } from 'react';
 import { openLink } from '../api/client';
 import { groupByCategory } from '../api/findings';
-import type { BiosTopic, Finding, Report, Status } from '../api/types';
+import type { BiosTopic, Finding, Report, Status, TweakId } from '../api/types';
 import { strings } from '../strings';
 
 const ICONS: Record<Status, ReactElement> = {
@@ -12,7 +12,9 @@ const ICONS: Record<Status, ReactElement> = {
   unknown: <IconHelpCircle size={16} color="var(--muted)" aria-hidden />,
 };
 
-export function Health({ report, onGuide }: { report: Report; onGuide: (topic: BiosTopic) => void }) {
+type FixHandlers = { onGuide: (topic: BiosTopic) => void; onTweak: (tweak: TweakId) => void };
+
+export function Health({ report, onGuide, onTweak }: { report: Report } & FixHandlers) {
   const errors = report.snapshot.probeErrors;
   return (
     <div className="page">
@@ -25,7 +27,7 @@ export function Health({ report, onGuide }: { report: Report; onGuide: (topic: B
         <section key={group.category} className="panel group">
           <h2 className="label">{strings.health.categories[group.category]}</h2>
           {group.findings.map((finding) => (
-            <CheckRow key={finding.id} finding={finding} onGuide={onGuide} />
+            <CheckRow key={finding.id} finding={finding} onGuide={onGuide} onTweak={onTweak} />
           ))}
         </section>
       ))}
@@ -33,7 +35,7 @@ export function Health({ report, onGuide }: { report: Report; onGuide: (topic: B
   );
 }
 
-function CheckRow({ finding, onGuide }: { finding: Finding; onGuide: (topic: BiosTopic) => void }) {
+function CheckRow({ finding, onGuide, onTweak }: { finding: Finding } & FixHandlers) {
   const [open, setOpen] = useState(false);
   const { fix } = finding;
   return (
@@ -59,6 +61,7 @@ function CheckRow({ finding, onGuide }: { finding: Finding; onGuide: (topic: Bio
       </div>
       <div className="check-action">
         {fix.kind === 'bios-guide' && <button className="link" onClick={() => onGuide(fix.topic)}>{strings.health.biosGuide}</button>}
+        {fix.kind === 'tweak' && <button className="link" onClick={() => onTweak(fix.tweak)}>{strings.health.fix}</button>}
         {fix.kind === 'later-stage' && <span className="muted small">{strings.health.laterStage(fix.stage)}</span>}
         {fix.kind === 'steps' && (
           <button className="link" aria-expanded={open} onClick={() => setOpen(!open)}>{strings.health.howToFix}</button>

@@ -1,13 +1,13 @@
 import { topProblems } from '../api/findings';
 import { filledSegments } from '../api/format';
-import type { BiosTopic, Report } from '../api/types';
+import type { BiosTopic, Report, TweakId } from '../api/types';
 import { strings } from '../strings';
 import { FindingRow } from './FindingRow';
 import type { Tab } from './TitleBar';
 
-type Props = { report: Report; onTab: (tab: Tab) => void; onGuide: (topic: BiosTopic) => void };
+type Props = { report: Report; onTab: (tab: Tab) => void; onGuide: (topic: BiosTopic) => void; onTweak: (tweak: TweakId) => void };
 
-export function ScoreCard({ report, onTab, onGuide }: Props) {
+export function ScoreCard({ report, onTab, onGuide, onTweak }: Props) {
   const { score } = report;
   const filled = filledSegments(score.value);
   return (
@@ -26,7 +26,7 @@ export function ScoreCard({ report, onTab, onGuide }: Props) {
       {score.potentialGain > 0 && <p className="muted small">{strings.home.gain(score.potentialGain)}</p>}
       <div className="score-findings">
         {topProblems(report.findings).map((f) => (
-          <FindingRow key={f.id} finding={f} onTab={onTab} onGuide={onGuide} />
+          <FindingRow key={f.id} finding={f} onTab={onTab} onGuide={onGuide} onTweak={onTweak} />
         ))}
       </div>
       <div className="actions">

@@ -1,12 +1,12 @@
 import { openLink } from '../api/client';
-import type { BiosTopic, Finding } from '../api/types';
+import type { BiosTopic, Finding, TweakId } from '../api/types';
 import { strings } from '../strings';
 import type { Tab } from './TitleBar';
 
-type Props = { finding: Finding; onTab: (tab: Tab) => void; onGuide: (topic: BiosTopic) => void };
+type Props = { finding: Finding; onTab: (tab: Tab) => void; onGuide: (topic: BiosTopic) => void; onTweak: (tweak: TweakId) => void };
 
 /** One problem on the home screen: severity tag, what's wrong, and the quickest way to fix it. */
-export function FindingRow({ finding, onTab, onGuide }: Props) {
+export function FindingRow({ finding, onTab, onGuide, onTweak }: Props) {
   const { fix } = finding;
   return (
     <div className="finding-row">
@@ -14,6 +14,9 @@ export function FindingRow({ finding, onTab, onGuide }: Props) {
       <span className="title">{finding.title}</span>
       {fix.kind === 'bios-guide' && (
         <button className="link" onClick={() => onGuide(fix.topic)}>{strings.health.biosGuide}</button>
+      )}
+      {fix.kind === 'tweak' && (
+        <button className="link" onClick={() => onTweak(fix.tweak)}>{strings.health.fix}</button>
       )}
       {fix.kind === 'later-stage' && <span className="muted small">{strings.home.stage(fix.stage)}</span>}
       {fix.kind === 'steps' && (

@@ -3,9 +3,19 @@ export type Severity = 'high' | 'medium' | 'low' | 'info';
 export type Category = 'hardware' | 'display' | 'gpu' | 'windows' | 'storage' | 'background' | 'vanguard' | 'network';
 export type Status = 'pass' | 'problem' | 'info' | 'unknown';
 export type BiosTopic = 'xmp' | 'memory-gear' | 'iommu' | 'resizable-bar' | 'update-bios' | 'pcie-slot' | 'virtualization';
+/** A tweak, named as kestrel-core's tweak_id::TweakId serializes it. */
+export type TweakId =
+  | 'power-plan'
+  | 'game-mode'
+  | 'background-recording'
+  | 'windowed-optimizations'
+  | 'gpu-preference'
+  | 'pointer-precision'
+  | 'system-protection';
 
 export type Fix =
   | { kind: 'bios-guide'; topic: BiosTopic }
+  | { kind: 'tweak'; tweak: TweakId }
   | { kind: 'later-stage'; stage: number }
   | { kind: 'steps'; steps: string[] }
   | { kind: 'link'; label: string; url: string }
