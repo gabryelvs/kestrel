@@ -54,6 +54,10 @@ const PROTECTION_UNKNOWN: &str =
     "Couldn't tell whether System Protection is on, so Kestrel left it alone.";
 const PROTECTION_NOT_KESTRELS: &str =
     "The journal doesn't say System Protection was off before Kestrel, so Kestrel left it on.";
+const PROTECTION_STILL_ON: &str =
+    "Windows said it turned System Protection off, and it's still on.";
+const PROTECTION_NOT_CONFIRMED: &str =
+    "Kestrel asked Windows to turn System Protection off, and couldn't tell whether it did.";
 
 /// Whether Apply and Undo may run now, and if not, what they wait for. The app decides; the view only carries it to the
 /// page.
@@ -109,12 +113,21 @@ pub struct ItemOutcome {
 enum Standing {
     /// It holds what Kestrel wrote. For the plan: Kestrel's plan is the one in use.
     Holds,
-    /// It is back at what Kestrel found, so nothing of Kestrel's is left. For the plan: Kestrel's plan is gone.
+    /// It is back at what Kestrel found, so nothing of Kestrel's is left (see `targets::is_back_at`). For the plan:
+    /// Kestrel's plan is gone.
     Back,
     /// Neither of those. For the plan: Kestrel's plan is on the PC and another is in use.
     Elsewhere,
     /// It couldn't be read, and this says why in a sentence. Nothing is ever decided on a failed read.
     Unknown(String),
+}
+
+/// Which button asked for a change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    Apply,
+    /// The only one that goes over a value something else has put there.
+    ApplyAgain,
 }
 
 /// One change Apply is about to make, as its intent will say it.
@@ -235,7 +248,8 @@ impl Engine {
     }
 
     /// Changes each item in turn, under one lock, starting from a settled journal: one item failing doesn't stop the
-    /// others, and each says how it went. A flagged row goes the way of Apply again.
+    /// others, and each says how it went. A flagged row is left alone and says why: what something else has put there
+    /// is only written over by Apply again, which is the person being asked.
     ///
     /// If the journal can't be locked or read or the first intent can't be written, this returns the error and nothing
     /// has been changed. If it stops working part-way, the items that have no intent on disk fail and are not changed.
@@ -250,7 +264,7 @@ impl Engine {
         let mut items = Vec::with_capacity(ids.len());
         for &id in ids {
             let record = record_of(&replay.open, id, signed_in);
-            let change = match self.change_for(input, id, signed_in, record) {
+            let change = match self.change_for(input, id, signed_in, record, Asked::Apply) {
                 Ok(change) => change,
                 Err(skipped) => {
                     items.push(skipped);
@@ -319,7 +333,7 @@ impl Engine {
         let Some(record) = record_of(&replay.open, id, signed_in) else {
             return Ok(failure(id, NOTHING_TO_APPLY_AGAIN));
         };
-        let change = match self.change_for(input, id, signed_in, Some(record)) {
+        let change = match self.change_for(input, id, signed_in, Some(record), Asked::ApplyAgain) {
             Ok(change) => change,
             Err(skipped) => return Ok(skipped),
         };
@@ -416,10 +430,15 @@ impl Engine {
             .collect()
     }
 
-    /// Whether any account has a change open, after settling the journal. It says yes for a journal it can't read: the
-    /// answer decides whether anyone is asked about undoing, and that is the safe side to be wrong on.
+    /// Whether any account has a change open, after settling the journal. The answer is the file's, not the settling's:
+    /// a record whose closing entry couldn't be written, because someone else holds the lock or the file refused it, is
+    /// still open. It says yes for a journal it can't read. The answer decides whether anyone is asked about undoing,
+    /// and that is the safe side to be wrong on.
     pub fn has_open_records(&self) -> bool {
-        self.reconcile()
+        // If this can't read the journal, neither can the line below, and that one says so.
+        let _ = self.reconcile();
+        self.journal
+            .read()
             .map_or(true, |replay| !replay.open.is_empty())
     }
 
@@ -541,7 +560,7 @@ impl Engine {
         };
         if targets::same_meaning(id, &now, &record.planned) {
             Standing::Holds
-        } else if targets::same_meaning(id, &now, &record.prior) {
+        } else if targets::is_back_at(id, &now, &record.prior, sys.account().differs()) {
             Standing::Back
         } else {
             Standing::Elsewhere
@@ -592,15 +611,16 @@ impl Engine {
 
     /// The change Apply would make for this tweak, or the item's answer if it would make none. Reading only.
     ///
-    /// A row goes ahead when it's Available, or ChangedElsewhere as Apply again. A failed read stops it here, which is
-    /// what keeps a value of the wrong type from being written over: the writes for DWORDs and the mouse don't read
-    /// first.
+    /// A row goes ahead when it's Available, and a flagged one when Apply again is what's asking. A failed read stops
+    /// it here, which is what keeps a value of the wrong type from being written over: the writes for DWORDs and the
+    /// mouse don't read first.
     fn change_for(
         &self,
         input: &PlanInput,
         id: TweakId,
         signed_in: Option<&str>,
         record: Option<&OpenRecord>,
+        asked: Asked,
     ) -> Result<Change, ItemOutcome> {
         let sys = &*self.system;
         let Some(row) = self.row(input, id, signed_in, record) else {
@@ -617,6 +637,9 @@ impl Engine {
         };
         let prior = match (row.state, read) {
             (RowState::AlreadySet | RowState::Applied, _) => return Err(failure(id, ALREADY_SET)),
+            (RowState::ChangedElsewhere, _) if asked == Asked::Apply => {
+                return Err(failure(id, row.why))
+            }
             (RowState::Available | RowState::ChangedElsewhere, Ok(prior)) => prior,
             (
                 RowState::Available | RowState::ChangedElsewhere | RowState::CouldntRead,
@@ -677,11 +700,9 @@ impl Engine {
         record: Option<&OpenRecord>,
     ) -> Option<PreviewItem> {
         let sys = &*self.system;
-        let change = self.change_for(input, id, signed_in, record).ok()?;
-        // Apply again has a button of its own and no Preview: only what's Available is listed.
-        if change.again {
-            return None;
-        }
+        let change = self
+            .change_for(input, id, signed_in, record, Asked::Apply)
+            .ok()?;
         if id == TweakId::PowerPlan {
             return Some(power::preview(sys, input));
         }
@@ -722,10 +743,13 @@ impl Engine {
         let differs = sys.account().differs();
         let why = match targets::write(sys, id, sid, name, &change.planned, differs) {
             Err(why) => format!("Windows refused the change: {why}"),
-            Ok(()) => match self.reads_as(sid, id, name, &change.planned, NOT_KEPT) {
-                Ok(()) => return self.made(change),
-                Err(why) => why,
-            },
+            Ok(()) => {
+                let held = |now: &Saved| targets::same_meaning(id, now, &change.planned);
+                match self.reads_back(sid, id, name, held, NOT_KEPT) {
+                    Ok(()) => return self.made(change),
+                    Err(why) => why,
+                }
+            }
         };
         match self.take_back(sid, change, differs) {
             Ok(false) => self.failed(change, false, why),
@@ -743,35 +767,49 @@ impl Engine {
 
     /// Puts a setting back as `change` found it, after a change that didn't take. True if that took a write, false if
     /// it had never left. It only counts as back if it reads back.
+    ///
+    /// Whether it ever left goes by the whole state and not by what it means. What the mouse means is in the strings,
+    /// and Windows can have set the mouse in force and saved nothing.
     fn take_back(&self, sid: &str, change: &Change, differs: bool) -> Result<bool, String> {
+        let sys = &*self.system;
         let (id, name) = (change.id, change.value_name.as_deref());
-        if self
-            .reads_as(sid, id, name, &change.prior, OLD_VALUE_NOT_KEPT)
-            .is_ok()
-        {
+        if known(targets::current(sys, id, sid, name)).is_ok_and(|now| now == change.prior) {
             return Ok(false);
         }
-        targets::restore(&*self.system, id, sid, name, &change.prior, differs)
+        targets::restore(sys, id, sid, name, &change.prior, differs)
             .map_err(|why| why.to_string())?;
-        self.reads_as(sid, id, name, &change.prior, OLD_VALUE_NOT_KEPT)?;
+        self.reads_as_found(sid, id, name, &change.prior, differs)?;
         Ok(true)
     }
 
-    /// Reads one of the five settings back: it means `value`, or this says why it doesn't, in `not_kept`'s words if it
-    /// holds something else.
-    fn reads_as(
+    /// Reads one of the five settings back: `held` says whether what it finds is right, or this says why not, in
+    /// `not_kept`'s words if it holds something else.
+    fn reads_back(
         &self,
         sid: &str,
         id: TweakId,
         name: Option<&str>,
-        value: &Saved,
+        held: impl Fn(&Saved) -> bool,
         not_kept: &str,
     ) -> Result<(), String> {
         match known(targets::current(&*self.system, id, sid, name)) {
-            Ok(now) if targets::same_meaning(id, &now, value) => Ok(()),
+            Ok(now) if held(&now) => Ok(()),
             Ok(_) => Err(not_kept.to_string()),
             Err(why) => Err(format!("Couldn't read this setting back: {why}")),
         }
+    }
+
+    /// Reads one of the five settings back after Kestrel put it back.
+    fn reads_as_found(
+        &self,
+        sid: &str,
+        id: TweakId,
+        name: Option<&str>,
+        prior: &Saved,
+        differs: bool,
+    ) -> Result<(), String> {
+        let back = |now: &Saved| targets::is_back_at(id, now, prior, differs);
+        self.reads_back(sid, id, name, back, OLD_VALUE_NOT_KEPT)
     }
 
     /// Makes Kestrel's plan and switches to it, then reads back that it did. `create_and_activate` already takes back
@@ -862,7 +900,7 @@ impl Engine {
         if let Err(why) = targets::restore(sys, id, sid, name, &record.prior, differs) {
             return failure(id, format!("Couldn't put this back: {why}"));
         }
-        match self.reads_as(sid, id, name, &record.prior, OLD_VALUE_NOT_KEPT) {
+        match self.reads_as_found(sid, id, name, &record.prior, differs) {
             Ok(()) => {
                 self.note(&undone(record, None));
                 success(id, UNDONE)
@@ -883,19 +921,23 @@ impl Engine {
     }
 
     /// Turning System Protection off deletes the drive's restore points, so it takes a record saying that it was off
-    /// before Kestrel. It isn't read back like the others: being wrong can only leave it on, which is the safe way
-    /// round.
+    /// before Kestrel. Like any undo it counts once it reads back: while Windows says it's still on, or won't say, the
+    /// record stays and the row with it.
     fn protection_off(&self, record: &OpenRecord) -> ItemOutcome {
         let id = record.tweak;
         if record.prior != (Saved::Protection { on: false }) {
             return failure(id, PROTECTION_NOT_KESTRELS);
         }
-        match self.system.turn_protection_off() {
-            Ok(()) => {
+        if let Err(why) = self.system.turn_protection_off() {
+            return failure(id, format!("Couldn't turn System Protection off: {why}"));
+        }
+        match self.standing(record) {
+            Standing::Back => {
                 self.note(&undone(record, None));
                 success(id, UNDONE)
             }
-            Err(why) => failure(id, format!("Couldn't turn System Protection off: {why}")),
+            Standing::Holds => failure(id, PROTECTION_STILL_ON),
+            Standing::Elsewhere | Standing::Unknown(_) => failure(id, PROTECTION_NOT_CONFIRMED),
         }
     }
 }
@@ -1594,13 +1636,14 @@ mod tests {
 
     #[test]
     fn a_lying_readback_puts_the_prior_back() {
-        // The two DWORDs, the two strings, and the mouse strings, which only go through `System` when the accounts
-        // differ.
+        // The two DWORDs, the two strings, and the mouse both ways: through Windows, which saves the strings itself,
+        // when the accounts are the same, and the strings alone when they differ.
         let cases = [
             (GameMode, false),
             (BackgroundRecording, false),
             (WindowedOptimizations, false),
             (GpuPreference, false),
+            (PointerPrecision, false),
             (PointerPrecision, true),
         ];
         for (id, accounts_differ) in cases {
@@ -1627,6 +1670,35 @@ mod tests {
                 assert_eq!(rig.state(id), Available, "{id:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_mouse_change_the_strings_never_saw_is_still_put_back() {
+        // Windows set the mouse in force and saved nothing, so the strings still mean what Kestrel found. That doesn't
+        // make it a change that never happened.
+        let pc = arranged();
+        pc.set_account(Account {
+            signed_in: Some(SID.to_string()),
+            this_process: None,
+        });
+        let rig = Rig::on(pc);
+        let before = rig.pc.dump();
+
+        let item = rig.apply(PointerPrecision);
+
+        assert!(!item.ok);
+        assert_eq!(
+            item.message,
+            "Windows didn't keep the change. Kestrel put the old value back."
+        );
+        assert_eq!(rig.pc.mouse_live(), Read::Value([6, 10, 1]));
+        assert_eq!(rig.pc.dump(), before);
+        assert_eq!(
+            rig.story(),
+            says(&[("intent", PointerPrecision), ("failed", PointerPrecision)])
+        );
+        assert!(rig.open().is_empty());
+        assert_eq!(rig.state(PointerPrecision), Available);
     }
 
     #[test]
@@ -2218,6 +2290,148 @@ mod tests {
     }
 
     #[test]
+    fn a_mouse_undo_windows_refuses_keeps_its_record_until_it_works() {
+        let rig = Rig::on(arranged());
+        let before = rig.pc.dump();
+        assert!(rig.apply(PointerPrecision).ok);
+        rig.pc.fail_write(MOUSE_LIVE);
+
+        let item = rig.undo(PointerPrecision);
+
+        assert!(!item.ok);
+        assert!(
+            item.message.contains("told that writing"),
+            "{}",
+            item.message
+        );
+        assert_eq!(rig.pc.mouse_live(), Read::Value([0, 0, 0]));
+
+        // Looking doesn't lose it, whether or not Windows has come round.
+        assert_eq!(rig.state(PointerPrecision), Applied);
+        rig.pc.clear_failures();
+        assert_eq!(rig.state(PointerPrecision), Applied);
+        assert_eq!(
+            rig.story(),
+            says(&[("intent", PointerPrecision), ("applied", PointerPrecision)])
+        );
+
+        let item = rig.undo(PointerPrecision);
+
+        assert!(item.ok, "{}", item.message);
+        assert_eq!(rig.pc.dump(), before);
+        assert!(rig.open().is_empty());
+    }
+
+    #[test]
+    fn a_mouse_windows_says_it_set_and_didnt_is_read_back() {
+        // Applying it: nothing changed, so nothing is put back and nothing says it was.
+        let rig = Rig::on(arranged());
+        let before = rig.pc.dump();
+        rig.pc.ignore_mouse();
+
+        let item = rig.apply(PointerPrecision);
+
+        assert!(!item.ok);
+        assert_eq!(item.message, "Windows didn't keep the change.");
+        assert_eq!(rig.pc.dump(), before);
+        assert!(rig.open().is_empty());
+
+        // Undoing it: the strings went back and the mouse in force is still Kestrel's, so it isn't undone.
+        let rig = Rig::on(arranged());
+        let before = rig.pc.dump();
+        assert!(rig.apply(PointerPrecision).ok);
+        rig.pc.ignore_mouse();
+
+        let item = rig.undo(PointerPrecision);
+
+        assert!(!item.ok);
+        assert_eq!(item.message, "Windows didn't keep the old value.");
+        assert_eq!(rig.pc.mouse_live(), Read::Value([0, 0, 0]));
+        assert_eq!(rig.open().len(), 1);
+        assert_eq!(rig.state(PointerPrecision), ChangedElsewhere);
+
+        rig.pc.clear_failures();
+        assert!(rig.engine.restore_anyway(PointerPrecision).unwrap().ok);
+        assert_eq!(rig.pc.dump(), before);
+    }
+
+    #[test]
+    fn a_crash_between_a_mouse_undos_two_writes_leaves_the_undo_to_try_again() {
+        // The mouse in force is back, and the strings are still what Kestrel wrote.
+        let rig = Rig::on(arranged());
+        let before = rig.pc.dump();
+        assert!(rig.apply(PointerPrecision).ok);
+        rig.pc.set_mouse([6, 10, 1]);
+
+        let engine = rig.restarted();
+        let view = engine.view(&input(), Gate::Open).unwrap();
+
+        assert_eq!(row_in(&view, PointerPrecision).state, Applied);
+        assert_eq!(rig.open().len(), 1);
+        assert!(engine.undo(PointerPrecision).unwrap().ok);
+        assert_eq!(rig.pc.dump(), before);
+    }
+
+    #[test]
+    fn a_record_stays_open_while_the_mouse_in_force_is_still_kestrels() {
+        // The strings are back at what Kestrel found and the mouse in force isn't: a tool wrote the registry, say.
+        let strings_back = |pc: &FakeSystem| {
+            put_back_by_hand(pc, PointerPrecision);
+            pc.set_mouse([0, 0, 0]);
+        };
+        let rig = Rig::on(arranged());
+        let before = rig.pc.dump();
+        assert!(rig.apply(PointerPrecision).ok);
+        strings_back(&rig.pc);
+        let entries = rig.story();
+        let held = rig.pc.dump();
+
+        assert_eq!(rig.state(PointerPrecision), ChangedElsewhere);
+        assert_eq!(rig.story(), entries, "the record stays");
+        assert!(rig.engine.has_open_records());
+        assert!(rig.engine.applied_ids().is_empty());
+        // Undo leaves it alone and nothing has been written, as with any third value.
+        let item = rig.undo(PointerPrecision);
+        assert!(!item.ok);
+        assert_eq!(item.message, LEFT_ALONE_TEXT);
+        assert_eq!(rig.pc.dump(), held);
+        // Restore anyway is what puts the mouse back.
+        assert!(rig.engine.restore_anyway(PointerPrecision).unwrap().ok);
+        assert_eq!(rig.pc.dump(), before);
+        assert!(rig.open().is_empty());
+
+        // After a crash it isn't a change that never happened either.
+        let rig = Rig::on(arranged());
+        strings_back(&rig.pc);
+        let found = Saved::Mouse {
+            speed: Some("1".to_string()),
+            threshold1: Some("6".to_string()),
+            threshold2: Some("10".to_string()),
+            live: [6, 10, 1],
+        };
+        let planned = targets::target(PointerPrecision, &found);
+        rig.left_by_an_earlier_run(&[intent(PointerPrecision, Some(SID), found, planned)]);
+
+        let view = rig.view();
+
+        assert_eq!(row_in(&view, PointerPrecision).state, ChangedElsewhere);
+        assert_eq!(
+            view.interrupted,
+            [interrupted(PointerPrecision, "Something else changed it.")]
+        );
+        assert_eq!(rig.open().len(), 1);
+
+        // When the accounts differ Kestrel never touched the mouse in force, so it says nothing.
+        let rig = Rig::on(with_differing_accounts(arranged()));
+        assert!(rig.apply(PointerPrecision).ok);
+        put_back_by_hand(&rig.pc, PointerPrecision);
+        rig.pc.set_mouse([0, 0, 0]);
+
+        assert_eq!(rig.state(PointerPrecision), Available);
+        assert!(rig.open().is_empty());
+    }
+
+    #[test]
     fn an_undo_windows_didnt_keep_keeps_the_record() {
         let rig = Rig::on(arranged());
         assert!(rig.apply(GameMode).ok);
@@ -2338,7 +2552,10 @@ mod tests {
         assert_eq!(row_in(&view, GameMode).state, Available);
         assert_eq!(row_in(&view, BackgroundRecording).state, Available);
         assert!(rig.engine.applied_ids().is_empty());
-        assert!(!rig.engine.has_open_records());
+        assert!(
+            rig.engine.has_open_records(),
+            "the file still holds them, and that's what this counts"
+        );
         assert_eq!(rig.story(), entries);
 
         drop(held);
@@ -2355,6 +2572,7 @@ mod tests {
             ]
         );
         assert!(rig.open().is_empty());
+        assert!(!rig.engine.has_open_records());
     }
 
     #[test]
@@ -2403,6 +2621,23 @@ mod tests {
             rig.story(),
             ["intent game-mode", "closed game-mode NotApplied"]
         );
+
+        // A record whose closing entry didn't reach the file is still in the file, and still counts.
+        let rig = Rig::on(arranged());
+        rig.left_by_an_earlier_run(&[game_mode_intent()]);
+        // The read, the lock, the read under the lock, and then the entry, which is refused. The answer's own read
+        // isn't.
+        let refusing_the_entry = hooked_journal(&rig.folder(), |look| {
+            if look == 3 {
+                Err(io::Error::other("the journal refused that one"))
+            } else {
+                Ok(())
+            }
+        });
+        let engine = Engine::new(rig.pc.clone(), refusing_the_entry);
+
+        assert!(engine.has_open_records());
+        assert_eq!(rig.story(), ["intent game-mode"]);
     }
 
     #[test]
@@ -2522,6 +2757,34 @@ mod tests {
     }
 
     #[test]
+    fn a_mouse_restore_anyway_windows_refuses_keeps_its_record_until_it_works() {
+        let rig = Rig::on(arranged());
+        let before = rig.pc.dump();
+        assert!(rig.apply(PointerPrecision).ok);
+        change_elsewhere(&rig.pc, PointerPrecision);
+        rig.pc.fail_write(MOUSE_LIVE);
+
+        let item = rig.engine.restore_anyway(PointerPrecision).unwrap();
+
+        assert!(!item.ok);
+        assert!(
+            item.message.contains("told that writing"),
+            "{}",
+            item.message
+        );
+        assert_eq!(rig.state(PointerPrecision), ChangedElsewhere);
+        rig.pc.clear_failures();
+        assert_eq!(rig.state(PointerPrecision), ChangedElsewhere);
+        assert_eq!(rig.open().len(), 1);
+
+        let item = rig.engine.restore_anyway(PointerPrecision).unwrap();
+
+        assert!(item.ok, "{}", item.message);
+        assert_eq!(rig.pc.dump(), before);
+        assert!(rig.open().is_empty());
+    }
+
+    #[test]
     fn restore_anyway_is_only_for_the_five_settings() {
         let rig = Rig::on(arranged());
         assert!(rig.apply(PowerPlan).ok);
@@ -2589,17 +2852,35 @@ mod tests {
     }
 
     #[test]
-    fn apply_again_is_what_apply_does_with_a_flagged_row() {
-        let rig = Rig::on(arranged());
-        assert!(rig.apply(GameMode).ok);
-        change_elsewhere(&rig.pc, GameMode);
+    fn apply_leaves_a_flagged_row_alone_and_apply_again_is_the_asking() {
+        for id in SETTINGS {
+            let rig = Rig::on(arranged());
+            let before = rig.pc.dump();
+            assert!(rig.apply(id).ok, "{id:?}");
+            change_elsewhere(&rig.pc, id);
+            let held = rig.pc.dump();
+            let writes = rig.pc.writes().len();
+            let entries = rig.story();
 
-        assert!(rig.apply(GameMode).ok);
+            let item = rig.apply(id);
 
-        assert_eq!(rig.pc.dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE), Some(1));
-        assert_eq!(rig.story().last().unwrap(), "reapplied game-mode");
-        assert!(rig.undo(GameMode).ok);
-        assert_eq!(rig.pc.dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE), Some(0));
+            assert!(!item.ok, "{id:?}");
+            assert_eq!(
+                item.message, "Something else changed this after Kestrel did.",
+                "{id:?}"
+            );
+            assert_eq!(rig.pc.dump(), held, "{id:?}: the third value stays");
+            assert_eq!(rig.pc.writes().len(), writes, "{id:?}");
+            assert_eq!(rig.story(), entries, "{id:?}");
+            assert_eq!(rig.state(id), ChangedElsewhere, "{id:?}");
+
+            let item = rig.engine.apply_again(&input(), id).unwrap();
+
+            assert!(item.ok, "{id:?}: {}", item.message);
+            assert_eq!(rig.state(id), Applied, "{id:?}");
+            assert!(rig.undo(id).ok, "{id:?}");
+            assert_eq!(rig.pc.dump(), before, "{id:?}: back to the first prior");
+        }
     }
 
     #[test]
@@ -3699,6 +3980,45 @@ mod tests {
         assert_eq!(rig.pc.protection(), Readiness::Ready);
         assert_eq!(rig.open().len(), 1);
         assert_eq!(rig.state(SystemProtection), Applied);
+    }
+
+    #[test]
+    fn a_turn_off_that_doesnt_take_keeps_the_record() {
+        // Windows says yes, and it stays on.
+        let rig = Rig::on(arranged());
+        rig.left_by_an_earlier_run(&protection_record());
+        rig.pc.protection_lands_on(Readiness::Ready);
+
+        let item = rig.undo(SystemProtection);
+
+        assert!(!item.ok);
+        assert!(item.message.contains("still on"), "{}", item.message);
+        assert_eq!(rig.state(SystemProtection), Applied);
+        assert_eq!(rig.open().len(), 1);
+        assert_eq!(rig.story().len(), 2);
+
+        // It can be tried again.
+        rig.pc.clear_failures();
+        assert!(rig.undo(SystemProtection).ok);
+        assert_eq!(rig.pc.protection(), Readiness::ProtectionOff);
+        assert!(rig.open().is_empty());
+
+        // Or it says yes and then won't say at all: Kestrel can't claim it's undone, and the first look that can tell
+        // does.
+        let rig = Rig::on(arranged());
+        rig.left_by_an_earlier_run(&protection_record());
+        rig.pc.protection_lands_on(Readiness::Unknown);
+
+        let item = rig.undo(SystemProtection);
+
+        assert!(!item.ok);
+        assert!(item.message.contains("couldn't tell"), "{}", item.message);
+        assert_eq!(rig.open().len(), 1);
+
+        rig.pc.clear_failures();
+        rig.pc.set_protection(Readiness::ProtectionOff);
+        assert!(!rig.view().rows.iter().any(|row| row.id == SystemProtection));
+        assert!(rig.open().is_empty());
     }
 
     #[test]

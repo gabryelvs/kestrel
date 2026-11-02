@@ -7,9 +7,10 @@
 //! be deleted; `persist` saves the mouse strings in the profile of the account the call runs as.
 //!
 //! To arrange a PC, use the `set_*` and `add_*` methods. They are the test's own hands, not changes Kestrel made, so
-//! they never appear in `writes()` and the failure switches don't stop them. The switches (`fail_*`, `ignore_activate`,
-//! `lie_on_readback`) make what goes through `System` go wrong. Failures are told apart from absence: a read that is
-//! made to fail is `Read::Failed` even when the value isn't there. Once set, a switch stays until `clear_failures`.
+//! they never appear in `writes()` and the failure switches don't stop them. The switches (`fail_*`, `ignore_*`,
+//! `protection_lands_on`, `lie_on_readback`) make what goes through `System` go wrong. Failures are told apart from
+//! absence: a read that is made to fail is `Read::Failed` even when the value isn't there. Once set, a switch stays
+//! until `clear_failures`.
 //!
 //! `writes()` records what changed, one line per change made through `System`, in the order they happened; a refused
 //! change is not a change. `dump()` is the comparable state of the PC itself, without that log and the switches.
@@ -156,6 +157,10 @@ struct Failures {
     lies: BTreeSet<String>,
     /// Values written under a lie that have not been read back yet.
     lying: BTreeSet<String>,
+    /// What switching System Protection really leaves, whatever was asked for.
+    protection_lands_on: Option<Readiness>,
+    /// Setting the mouse says it worked and changes nothing.
+    mouse_ignored: bool,
 }
 
 struct Inner {
@@ -254,18 +259,23 @@ impl Inner {
             .entry(sid.to_string())
             .or_default()
             .set(key, name, value);
+        self.written(name);
+        self.log.push(line);
+        Ok(())
+    }
+
+    /// What a write to the value `name` sets off. A read told to fail after it starts failing now, and a lie lasts from
+    /// the write it was set for until the value is first read back.
+    fn written(&mut self, name: &str) {
         let folded = fold(name);
         if self.failures.reads_after_write.remove(&folded) {
             self.failures.reads.insert(folded.clone());
         }
-        // A lie lasts from the write it was set for until the value is first read back.
         if self.failures.lies.remove(&folded) {
             self.failures.lying.insert(folded);
         } else {
             self.failures.lying.remove(&folded);
         }
-        self.log.push(line);
-        Ok(())
     }
 
     fn switch_protection(&mut self, to: Readiness, line: &str) -> io::Result<()> {
@@ -275,6 +285,10 @@ impl Inner {
                 io::ErrorKind::PermissionDenied,
                 "a policy decides System Protection",
             ));
+        }
+        if let Some(lands_on) = self.failures.protection_lands_on {
+            self.state.protection = lands_on;
+            return Ok(());
         }
         self.state.protection = to;
         self.log.push(line.to_string());
@@ -531,6 +545,16 @@ impl FakeSystem {
             .insert(guid.to_string());
     }
 
+    /// Setting the mouse says it worked, and it stays as it was, the strings included.
+    pub fn ignore_mouse(&self) {
+        self.lock().failures.mouse_ignored = true;
+    }
+
+    /// Switching System Protection says it worked, and it ends up as this, whatever was asked for.
+    pub fn protection_lands_on(&self, readiness: Readiness) {
+        self.lock().failures.protection_lands_on = Some(readiness);
+    }
+
     /// Deleting this plan fails.
     pub fn fail_delete(&self, guid: &str) {
         self.lock().failures.deletions.insert(guid.to_string());
@@ -658,6 +682,9 @@ impl System for FakeSystem {
     fn set_mouse_live(&self, values: [i32; 3], persist: bool) -> io::Result<()> {
         let mut inner = self.lock();
         inner.refuse_write(MOUSE_LIVE)?;
+        if inner.failures.mouse_ignored {
+            return Ok(());
+        }
         inner.state.mouse = values;
         let mut line = format!("mouse {values:?}");
         if persist {
@@ -670,6 +697,9 @@ impl System for FakeSystem {
                 hive.set(MOUSE_KEY, "MouseSpeed", text(values[2]));
                 hive.set(MOUSE_KEY, "MouseThreshold1", text(values[0]));
                 hive.set(MOUSE_KEY, "MouseThreshold2", text(values[1]));
+                for name in ["MouseSpeed", "MouseThreshold1", "MouseThreshold2"] {
+                    inner.written(name);
+                }
             }
         }
         inner.log.push(line);
@@ -757,13 +787,7 @@ impl System for FakeSystem {
         let plan = inner.plan_mut(guid).ok_or_else(|| no_such_plan(guid))?;
         plan.values
             .insert((subgroup.to_string(), setting.to_string()), value);
-        // A lie lasts from the write it was set for until the value is first read back.
-        let folded = fold(setting);
-        if inner.failures.lies.remove(&folded) {
-            inner.failures.lying.insert(folded);
-        } else {
-            inner.failures.lying.remove(&folded);
-        }
+        inner.written(setting);
         inner
             .log
             .push(format!("plan-value {guid} {subgroup}/{setting} = {value}"));
@@ -1554,6 +1578,89 @@ mod tests {
 
         pc.clear_failures();
         assert_eq!(pc.read_dword(SID, GAME_BAR, GAME_MODE), Read::Value(2));
+    }
+
+    #[test]
+    fn a_mouse_told_to_ignore_being_set_says_it_was_and_isnt() {
+        let pc = FakeSystem::new();
+        let before = pc.dump();
+        pc.ignore_mouse();
+
+        pc.set_mouse_live([0, 0, 0], true).unwrap();
+
+        assert_eq!(pc.mouse_live(), Read::Value([6, 10, 1]));
+        assert_eq!(pc.dump(), before, "the strings weren't saved either");
+        assert!(
+            pc.writes().is_empty(),
+            "nothing changed, so nothing is logged"
+        );
+
+        // A refusal still comes first.
+        pc.fail_write(MOUSE_LIVE);
+        assert!(pc.set_mouse_live([0, 0, 0], false).is_err());
+
+        pc.clear_failures();
+        pc.set_mouse_live([0, 0, 0], false).unwrap();
+        assert_eq!(pc.mouse_live(), Read::Value([0, 0, 0]));
+    }
+
+    #[test]
+    fn a_mouse_string_told_to_go_wrong_does_so_when_windows_saves_it() {
+        let read = |pc: &FakeSystem| pc.read_string(SID, MOUSE_KEY, "MouseSpeed");
+        let pc = FakeSystem::new();
+        pc.lie_on_readback("MouseSpeed");
+        // Setting the mouse without saving it writes no string, so it isn't the write the lie waits for.
+        pc.set_mouse_live([0, 0, 0], false).unwrap();
+        assert_eq!(read(&pc), Read::Value("1".to_string()));
+
+        pc.set_mouse_live([0, 0, 0], true).unwrap();
+        assert_eq!(read(&pc), Read::Value(LIE.to_string()), "the first read");
+        assert_eq!(read(&pc), Read::Value("0".to_string()), "the next is true");
+
+        let pc = FakeSystem::new();
+        pc.fail_read_after_write("MouseSpeed");
+        pc.set_mouse_live([0, 0, 0], false).unwrap();
+        assert_eq!(read(&pc), Read::Value("1".to_string()));
+        pc.set_mouse_live([0, 0, 0], true).unwrap();
+        assert!(failed(&read(&pc)));
+
+        // With no profile to save it in, nothing is written, so nothing goes wrong.
+        let pc = FakeSystem::new();
+        pc.set_account(Account {
+            signed_in: Some(SID.to_string()),
+            this_process: None,
+        });
+        pc.lie_on_readback("MouseSpeed");
+        pc.set_mouse_live([0, 0, 0], true).unwrap();
+        assert_eq!(read(&pc), Read::Value("1".to_string()));
+    }
+
+    #[test]
+    fn system_protection_told_where_to_land_says_it_worked() {
+        let pc = FakeSystem::new();
+        pc.protection_lands_on(Readiness::Ready);
+
+        pc.turn_protection_off().unwrap();
+
+        assert_eq!(pc.protection(), Readiness::Ready);
+        assert!(
+            pc.writes().is_empty(),
+            "nothing changed, so nothing is logged"
+        );
+
+        pc.protection_lands_on(Readiness::Unknown);
+        pc.turn_protection_off().unwrap();
+        assert_eq!(pc.protection(), Readiness::Unknown);
+
+        // A refusal still comes first.
+        pc.set_protection(Readiness::Ready);
+        pc.fail_write(PROTECTION);
+        assert!(pc.turn_protection_off().is_err());
+        assert_eq!(pc.protection(), Readiness::Ready);
+
+        pc.clear_failures();
+        pc.turn_protection_off().unwrap();
+        assert_eq!(pc.protection(), Readiness::ProtectionOff);
     }
 
     #[test]

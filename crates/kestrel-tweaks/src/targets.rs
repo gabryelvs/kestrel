@@ -250,7 +250,9 @@ pub fn write(
 
 /// Puts the setting back as `prior` says it was. Where `write` adds Kestrel's token, this puts the old one back or takes
 /// it out, and removes the string, and its key, if Kestrel made them and nothing else has been put in since. A DWORD
-/// that wasn't there is deleted, and the three mouse strings are written back or deleted exactly.
+/// that wasn't there is deleted, and the three mouse strings are written back or deleted exactly, after the mouse in
+/// force: the strings are what say whether Kestrel's change still holds, so if this stops before them, the setting
+/// still reads as Kestrel's and the undo can be tried again.
 ///
 /// It refuses what `write` refuses. It does not check that the setting still holds what Kestrel left; that is for the
 /// caller to have decided.
@@ -317,20 +319,18 @@ pub fn restore(
                 live,
             },
         ) => {
-            // The strings are written exactly as they were, or deleted if they weren't there. The mouse in force is put
-            // back too, unless Kestrel never changed it because the accounts differ.
+            // The mouse in force goes back first, unless Kestrel never changed it because the accounts differ. Then the
+            // strings are written exactly as they were, or deleted if they weren't there.
+            if !accounts_differ {
+                sys.set_mouse_live(*live, false)?;
+            }
             put_strings(
                 sys,
                 sid,
                 speed.as_deref(),
                 threshold1.as_deref(),
                 threshold2.as_deref(),
-            )?;
-            if accounts_differ {
-                Ok(())
-            } else {
-                sys.set_mouse_live(*live, false)
-            }
+            )
         }
         _ => Err(refused(tweak)),
     }
@@ -475,7 +475,7 @@ pub fn gpu_value_name(sys: &dyn System, sid: &str, exe: &str) -> Read<String> {
 /// isn't there counts as the setting's default, and what only says how a state came about does not count. Absent means
 /// Game Mode on, background recording off, the graphics preference 0, and the mouse strings 1, 6 and 10; a windowed
 /// token has no default, so absent is equal only to absent. The mouse in force, and whether the string value and its key
-/// existed, are ignored. States of different kinds never mean the same.
+/// existed, are ignored (`is_back_at` adds the mouse in force). States of different kinds never mean the same.
 pub fn same_meaning(tweak: TweakId, a: &Saved, b: &Saved) -> bool {
     match (a, b) {
         (Saved::Dword { value: a }, Saved::Dword { value: b }) => {
@@ -502,6 +502,20 @@ pub fn same_meaning(tweak: TweakId, a: &Saved, b: &Saved) -> bool {
         (Saved::Protection { on: a }, Saved::Protection { on: b }) => a == b,
         _ => false,
     }
+}
+
+/// Whether a setting that reads as `now` has gone back to `prior`: what closes a record, and what an undo has to see
+/// before it counts. That is `same_meaning`, and for the mouse one thing more. What the mouse means is in the strings,
+/// but when the accounts are the same Kestrel changes the mouse in force as well, and it isn't back while that is
+/// anything else. When they differ Kestrel never touches the mouse in force, so it has no say.
+pub fn is_back_at(tweak: TweakId, now: &Saved, prior: &Saved, accounts_differ: bool) -> bool {
+    let in_force_is_back = match (now, prior) {
+        (Saved::Mouse { live: now, .. }, Saved::Mouse { live: prior, .. }) => {
+            accounts_differ || now == prior
+        }
+        _ => true,
+    };
+    same_meaning(tweak, now, prior) && in_force_is_back
 }
 
 fn dword_meaning(tweak: TweakId, value: Option<u32>) -> Option<u32> {
@@ -1622,6 +1636,126 @@ mod tests {
             assert_eq!(pc.string(SID, MOUSE_KEY, name).as_deref(), Some(value));
         }
         assert_eq!(pc.dump(), before);
+    }
+
+    #[test]
+    fn being_back_takes_the_mouse_in_force_too_when_kestrel_changes_it() {
+        let found = default_mouse();
+        assert!(is_back_at(
+            PointerPrecision,
+            &default_mouse(),
+            &found,
+            false
+        ));
+        // Strings that weren't there mean the same as their defaults, as ever.
+        let no_strings = mouse(None, None, None, [6, 10, 1]);
+        assert!(is_back_at(PointerPrecision, &no_strings, &found, false));
+
+        // The strings are back and Kestrel's mouse is still in force: what they mean can't tell, and this can.
+        let still_in_force = mouse(Some("1"), Some("6"), Some("10"), [0, 0, 0]);
+        assert!(same_meaning(PointerPrecision, &still_in_force, &found));
+        assert!(!is_back_at(
+            PointerPrecision,
+            &still_in_force,
+            &found,
+            false
+        ));
+        // Or some other one is.
+        let another = mouse(Some("1"), Some("6"), Some("10"), [1, 2, 3]);
+        assert!(!is_back_at(PointerPrecision, &another, &found, false));
+        // When the accounts differ Kestrel never touched the mouse in force, so it has no say.
+        assert!(is_back_at(PointerPrecision, &still_in_force, &found, true));
+
+        // Strings that aren't back never are, whatever is in force.
+        for accounts_differ in [false, true] {
+            let kestrels = no_acceleration();
+            assert!(!is_back_at(
+                PointerPrecision,
+                &kestrels,
+                &found,
+                accounts_differ
+            ));
+            let same_in_force = mouse(Some("0"), Some("0"), Some("0"), [6, 10, 1]);
+            assert!(!is_back_at(
+                PointerPrecision,
+                &same_in_force,
+                &found,
+                accounts_differ
+            ));
+        }
+    }
+
+    #[test]
+    fn being_back_is_what_it_means_for_every_other_setting() {
+        for accounts_differ in [false, true] {
+            // Absent is that setting's default, and whether a value or a key existed has no say.
+            let (absent, one, zero) = (dword(None), dword(Some(1)), dword(Some(0)));
+            assert!(is_back_at(GameMode, &absent, &one, accounts_differ));
+            assert!(!is_back_at(GameMode, &zero, &one, accounts_differ));
+            assert!(is_back_at(
+                BackgroundRecording,
+                &absent,
+                &zero,
+                accounts_differ
+            ));
+            let (later, first) = (token(None, true, true), token(None, false, false));
+            assert!(is_back_at(
+                WindowedOptimizations,
+                &later,
+                &first,
+                accounts_differ
+            ));
+            assert!(is_back_at(
+                GpuPreference,
+                &token(Some("0"), true, true),
+                &first,
+                accounts_differ
+            ));
+            assert!(!is_back_at(
+                GpuPreference,
+                &token(Some("2"), true, true),
+                &first,
+                accounts_differ
+            ));
+            // States of different kinds aren't.
+            assert!(!is_back_at(GameMode, &plan(), &one, accounts_differ));
+            assert!(!is_back_at(
+                PointerPrecision,
+                &one,
+                &default_mouse(),
+                accounts_differ
+            ));
+        }
+    }
+
+    #[test]
+    fn mouse_restore_sets_the_mouse_in_force_before_the_strings() {
+        // The strings say whether Kestrel's change still holds, so they go last: stopping anywhere before them leaves a
+        // setting that reads as Kestrel's, and an undo that can be tried again.
+        let pc = FakeSystem::new();
+        let prior = now(&pc, PointerPrecision);
+        apply(&pc, PointerPrecision, &prior);
+        let logged = pc.writes().len();
+
+        undo(&pc, PointerPrecision, &prior);
+
+        assert_eq!(pc.writes()[logged].as_str(), "mouse [6, 10, 1]");
+        assert!(pc.writes()[logged + 1..]
+            .iter()
+            .all(|line| line.starts_with("string")));
+        assert_eq!(pc.writes().len(), logged + 4);
+
+        // Refused, and nothing has moved.
+        let pc = FakeSystem::new();
+        let prior = now(&pc, PointerPrecision);
+        apply(&pc, PointerPrecision, &prior);
+        let held = pc.dump();
+        pc.fail_write(MOUSE_LIVE);
+
+        let refused = restore(&pc, PointerPrecision, SID, None, &prior, false).unwrap_err();
+
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(pc.dump(), held);
     }
 
     #[test]
