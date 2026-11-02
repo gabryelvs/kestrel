@@ -83,6 +83,18 @@ Games, Ubisoft or Activision.
 | 77 | Copy specs | A Copy specs button on the Hardware tab copies a short plain-text summary of the PC |
 | 78 | Hardware screen design | The owner designs the Hardware screen in Claude Design from Kestrel's brief (`docs/superpowers/notes/2026-10-13-hardware-tab-brief.md`); stage 3 builds the tab in the current look and stage 9 builds the owner's design |
 
+### Decisions of 2026-11-02
+
+| # | Topic | Decision |
+| --- | --- | --- |
+| 79 | Owner's games | VALORANT only: no FiveM, Rainbow Six Siege or Warzone on the owner's PC |
+| 80–84 | Game-profile questions | Parked unanswered with stage 4 (`docs/superpowers/notes/2026-11-02-game-profiles-parked.md`) |
+| 85 | Stage 4 | Postponed until someone can test the game profiles. Stage 5 is next. FiveM detection and rule 61 arrive before stage 6, the first stage that touches services. NVIDIA profiles for other games and FiveM/GTA V settings wait with the profiles |
+| 86 | Testers | No friend can test the other games for now |
+| 87 | Another tool's power plan | Kestrel's plan is offered unticked, the preview shows what would change, and Kestrel suggests measuring before and after. Undo returns to the old plan |
+| 88 | Uninstall | The uninstaller asks whether to undo Kestrel's changes before removing it; built in stage 5 |
+| 89 | System Protection off | Ask at that moment: turn it on and create the restore point (recorded and undoable), or go on with Kestrel's undo only |
+
 ## Stages
 
 | Stage | Contents |
@@ -90,9 +102,9 @@ Games, Ubisoft or Activision.
 | 1 | App shell, hardware detection, Health Check, BIOS guide, Copy diagnostics. Read-only. (v0.1.0, done) |
 | 2 | Benchmark, built on game profiles, VALORANT first |
 | 3 | Hardware & BIOS: Hardware tab and BIOS checks (51–53) |
-| 4 | Game profiles: FiveM, Rainbow Six Siege, Warzone (detection, checks, benchmarks); telagem safety (61) |
+| 4 | Game profiles: FiveM, Rainbow Six Siege, Warzone (detection, checks, benchmarks), with their NVIDIA profiles and FiveM/GTA V settings. Postponed (85) |
 | 5 | Tweak engine, undo journal, restore points, Essential tier, Smart Plan, Kestrel report |
-| 6 | Competitive + Extreme tiers, NVIDIA profiles per game, network, debloat, FiveM/GTA V settings (58) |
+| 6 | Competitive + Extreme tiers, network, debloat, FiveM detection and telagem safety (61) |
 | 7 | Lock In |
 | 8 | Fixes, troubleshooters per game, auto-update, installer polish |
 | 9 | Visual redesign from the owner's Claude Design work (63–65) → v1.0 |
