@@ -18,8 +18,10 @@
 //! - An outcome written after a crash is told as an interruption, and never as a success the person chose.
 //! - An intent that never got its outcome, and a record closed as never applied, have no line.
 //!
-//! Active is the journal's open records that are known to have happened. It isn't judged against Windows: that takes a
-//! look at the tab, which writes to the journal, and a report must not.
+//! Active is the open records of the `Replay` it is given, newest first, each with the state its first intent found, the
+//! one it planned and that intent's time. It is not judged here: `text` knows nothing of Windows or of accounts, so what
+//! counts as active is for whoever builds the `Replay`. `Engine::report` hands over the records that would be an Applied
+//! row, which it can tell by reading the PC and without writing to it.
 //!
 //! Everything the journal holds is untrusted text. Any of it that reaches the report has its control characters
 //! replaced with spaces, so no detail, name or reason can start a line of its own, and times are cut by characters.
@@ -31,6 +33,7 @@ use crate::targets;
 
 const NO_CHANGES: &str = "No changes yet.";
 const NOTHING_ACTIVE: &str = "Nothing is active.";
+const NO_FINISHED_CHANGES: &str = "No finished changes yet.";
 const UNREADABLE_CAUSE: &str =
     "An interruption while Kestrel was writing is the usual cause of an unreadable line.";
 const UNREADABLE: &str = "Part of Kestrel's history couldn't be read.";
@@ -38,6 +41,16 @@ const UNREADABLE: &str = "Part of Kestrel's history couldn't be read.";
 /// The report for a journal that was read. `now` is when it is made, spelled as the journal spells times.
 /// `unreadable_note` adds the warning that part of the history couldn't be read, which is so when `replay.unreadable`
 /// is above 0. The warning is the last line.
+///
+/// Active lists `replay.open` just as it is given, newest first, and does not look at `settled`. That is the caller's
+/// to decide: a record whose outcome hasn't been written yet (a crash cut it off after the write) is what the next look at
+/// the tab calls Applied if its setting holds what Kestrel wrote, and `Engine::report` passes it for that reason. The
+/// History tells nothing of an intent that has no outcome, so such a record can be active before it has a line.
+///
+/// With neither anything active nor anything to tell, the report is the header and "No changes yet.". Otherwise both
+/// headings are there, as in the spec's example, and an empty section says why under its heading: "Nothing is active."
+/// when everything was undone, flagged or left alone, and "No finished changes yet." when only unfinished ones are
+/// active.
 pub fn text(
     replay: &Replay,
     kestrel_version: &str,
@@ -54,7 +67,7 @@ pub fn text(
         lines.push("Active".to_string());
         lines.extend(or_say(active, NOTHING_ACTIVE));
         lines.push("History".to_string());
-        lines.extend(or_say(history, NO_CHANGES));
+        lines.extend(or_say(history, NO_FINISHED_CHANGES));
     }
     if unreadable_note {
         lines.push(UNREADABLE_CAUSE.to_string());
@@ -91,13 +104,11 @@ fn or_say(lines: Vec<String>, when_empty: &str) -> Vec<String> {
     }
 }
 
-/// The open records that are known to have happened, newest first, each with the state its first intent found and the
-/// one it planned, and the time of that intent. A record with no outcome yet may never have happened (a crash cut it
-/// short, or another process is making the change right now), so it isn't listed.
+/// The records it is given, newest first (`open` is oldest first), each with the state its first intent found and the one
+/// it planned, and the time of that intent.
 fn active_lines(open: &[OpenRecord]) -> Vec<String> {
     open.iter()
         .rev()
-        .filter(|record| record.settled)
         .map(|record| {
             format!(
                 "  {}: {} → {} ({})",
@@ -771,7 +782,8 @@ History
                 ],
                 vec![at_18_12("Applied System Protection: off → on")],
             ),
-            // A crash before the change leaves nothing to tell, and so does an intent still waiting for its outcome.
+            // A crash before the change leaves nothing to tell, and so does an intent still waiting for its outcome (the
+            // History says so, since that record is in the Active list).
             (
                 vec![
                     intent(GameMode, &t, dword(0), dword(1)),
@@ -779,7 +791,10 @@ History
                 ],
                 Vec::new(),
             ),
-            (vec![intent(GameMode, &t, dword(0), dword(1))], Vec::new()),
+            (
+                vec![intent(GameMode, &t, dword(0), dword(1))],
+                vec!["No finished changes yet.".to_string()],
+            ),
         ];
         for (entries, expected) in cases {
             assert_eq!(history_of(&entries), expected, "{entries:#?}");
@@ -1121,13 +1136,11 @@ History
     }
 
     #[test]
-    fn a_change_that_may_not_have_happened_is_not_active_yet() {
-        // An intent with no outcome: a crash cut it off, or another process is making it right now.
+    fn active_lists_every_record_it_is_given_and_judges_none() {
+        // What counts as applied is for whoever builds the `Replay` to say, and `Engine::report` hands over the records
+        // that hold. One still waiting for its outcome (a crash cut it off after the write) is what the next look at the
+        // tab calls Applied, so it is listed like any other.
         let t = time("18:12");
-        let report = report_of(&[intent(GameMode, &t, dword(0), dword(1))]);
-        assert!(!report.contains("Game Mode"), "{report}");
-        assert!(report.ends_with("\nNo changes yet."), "{report}");
-
         let entries = [
             kestrel_plan(&t, plan(BALANCED, "Balanced")),
             vec![intent(GameMode, &t, dword(0), dword(1))],
@@ -1135,12 +1148,34 @@ History
         .concat();
         assert_eq!(
             active_of(&entries),
-            ["Kestrel power plan: Balanced → Kestrel (2026-11-02 18:12)"]
+            [
+                "Game Mode: off → on (2026-11-02 18:12)",
+                "Kestrel power plan: Balanced → Kestrel (2026-11-02 18:12)",
+            ]
         );
     }
 
     #[test]
-    fn another_accounts_changes_are_part_of_the_story() {
+    fn a_change_with_nothing_finished_yet_does_not_say_that_nothing_changed() {
+        // Active has a record and History has no line, because the record's outcome isn't written yet. "No changes yet."
+        // is for a report with nothing in either.
+        let t = time("18:12");
+        let report = report_of(&[intent(GameMode, &t, dword(0), dword(1))]);
+
+        assert_eq!(
+            report,
+            "\
+Kestrel report · Kestrel 0.5.0 · Windows build 26200 · 2026-11-02 18:20
+Active
+  Game Mode: off → on (2026-11-02 18:12)
+History
+  No finished changes yet."
+        );
+        assert!(!report.contains("No changes yet."));
+    }
+
+    #[test]
+    fn each_account_has_a_record_of_its_own() {
         let t = time("18:12");
         let entries = [
             game_mode_on(&t),
@@ -1151,6 +1186,8 @@ History
         ]
         .concat();
 
+        // The report knows nothing of accounts: it lists the records it is given, and `Engine::report` gives it this
+        // account's and the machine's.
         assert_eq!(
             active_of(&entries),
             [
@@ -1159,7 +1196,7 @@ History
             ]
         );
         assert_eq!(history_of(&entries).len(), 2);
-        // Each account has a record of its own: the second account's intent is a fresh one, not a later one.
+        // The second account's intent is a fresh one, not a later one.
         assert!(history_of(&entries)
             .iter()
             .all(|line| line == &at_18_12("Applied Game Mode: off → on")));

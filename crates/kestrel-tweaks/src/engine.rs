@@ -446,13 +446,23 @@ impl Engine {
     /// The Kestrel report as plain text (see `report`), for the Tweaks tab and for Copy diagnostics. `now` is when it is
     /// made, as the journal spells times.
     ///
-    /// It only reads the journal. It doesn't settle what a crash left, so it takes no lock and writes nothing, and it
-    /// makes no folder on a PC that never applied; it can be asked for at any moment, even while another process is
-    /// changing something, which then shows up half done or not at all. A journal that can't be read says so, and is not
-    /// taken for an empty one.
+    /// The History is the whole journal's story. The Active list is what would be an Applied row: this account's and the
+    /// machine's open records whose setting holds what Kestrel wrote (see `applied_records`). Anything else stays in the
+    /// History and is not listed as active: a value something else changed, one that went back, an inactive plan, one
+    /// that can't be read, another account's.
+    ///
+    /// It only reads, both the PC and the journal. It doesn't settle what a crash left, so it takes no lock and writes nothing
+    /// to the journal or to Windows, and it makes no folder on a PC that never applied; it can be asked for at any
+    /// moment, even while another process is changing something, which then shows up half done or not at all. A journal
+    /// that can't be read says so, and is not taken for an empty one.
     pub fn report(&self, kestrel_version: &str, build: u32, now: &str) -> String {
         match self.journal.read() {
-            Ok(replay) => report::text(&replay, kestrel_version, build, now, replay.unreadable > 0),
+            Ok(replay) => {
+                let unreadable_note = replay.unreadable > 0;
+                let open = self.applied_records(&replay);
+                let replay = Replay { open, ..replay };
+                report::text(&replay, kestrel_version, build, now, unreadable_note)
+            }
             Err(why) => report::unavailable(kestrel_version, build, now, &why.to_string()),
         }
     }
@@ -598,6 +608,27 @@ impl Engine {
 
     fn plan_holds(&self) -> bool {
         matches!(self.plan_standing(), Standing::Holds)
+    }
+
+    /// The open records whose rows would say Applied: this account's and the machine's whose setting holds what Kestrel
+    /// wrote, whether or not their outcome has been written (the next look would call one Applied that a crash cut off
+    /// after the write). A flagged value, one back at its prior, an inactive plan, a setting that can't be read, and
+    /// another account's record are not. Another account's settings aren't even read.
+    ///
+    /// This only reads, and settles nothing, so a record that the next look would close is left out here and not closed.
+    /// For the same reason System Protection has to hold like the rest, where `applied_ids` has its row say Applied for
+    /// as long as its record is open: protection that reads off, or can't be read, is not listed as active.
+    fn applied_records(&self, replay: &Replay) -> Vec<OpenRecord> {
+        let signed_in = self.system.account().signed_in;
+        replay
+            .open
+            .iter()
+            .filter(|record| {
+                is_ours(record, signed_in.as_deref())
+                    && matches!(self.standing(record), Standing::Holds)
+            })
+            .cloned()
+            .collect()
     }
 
     fn lines(&self) -> MutexGuard<'_, Vec<String>> {
@@ -4840,14 +4871,14 @@ mod tests {
 
     #[test]
     fn the_report_doesnt_call_a_change_it_couldnt_put_back_a_success() {
-        // The read-back lies, and the key Kestrel made can't be deleted again: the change may still be on the PC.
+        // The read-back lies, and the key Kestrel made can't be deleted again. The value itself did go back, so what is
+        // left is an empty key and a record that stays open until the next look.
         let pc = FakeSystem::new();
         pc.fail_write(DIRECTX_KEY);
         let rig = Rig::on(pc);
         rig.pc.lie_on_readback(DIRECTX_SETTINGS);
         let item = rig.apply(WindowedOptimizations);
         assert!(!item.ok);
-        let record = rig.open()[0].clone();
 
         let report = report_of(&rig.engine);
 
@@ -4858,14 +4889,35 @@ mod tests {
                 item.message
             )]
         );
+        // The setting is back at its prior, so it is not active, and the next look closes the record.
+        assert_eq!(under(&report, "Active"), ["Nothing is active."]);
+        assert_eq!(rig.state(WindowedOptimizations), Available);
+
+        // A put-back that failed with the value still Kestrel's is a change on the PC. It is listed as active, and the
+        // History still doesn't call it a success.
+        let rig = Rig::on(arranged());
+        rig.pc.set_dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE, 1);
+        let why = "Windows didn't keep the change. Kestrel couldn't put the old value back: no";
+        rig.left_by_an_earlier_run(&[
+            game_mode_intent(),
+            Entry::Outcome {
+                at: WHEN.to_string(),
+                tweak: GameMode.as_str().to_string(),
+                sid: Some(SID.to_string()),
+                applied: true,
+                detail: Some(why.to_string()),
+                interrupted: false,
+            },
+        ]);
+
+        let report = report_of(&rig.engine);
+
         assert_eq!(
-            active_told(&report),
-            [format!(
-                "Optimizations for windowed games: {} → {}",
-                targets::describe(WindowedOptimizations, &record.prior),
-                targets::describe(WindowedOptimizations, &record.planned)
-            )]
+            under(&report, "History"),
+            [format!("2026-11-02 18:12 Couldn't apply Game Mode: {why}")]
         );
+        assert_eq!(active_told(&report), ["Game Mode: off → on"]);
+        assert_eq!(rig.state(GameMode), Applied);
     }
 
     #[test]
@@ -5038,8 +5090,14 @@ mod tests {
         let before = std::fs::read(&file).unwrap();
         let dump = rig.pc.dump();
 
-        assert_eq!(report_of(&rig.engine), NO_CHANGES_TEXT);
+        let report = report_of(&rig.engine);
 
+        // It holds what Kestrel wrote, so it is listed as the next look would call it; the interruption isn't told yet.
+        assert_eq!(
+            under(&report, "Active"),
+            ["Game Mode: off → on (2026-11-02 18:12)"]
+        );
+        assert_eq!(under(&report, "History"), ["No finished changes yet."]);
         assert_eq!(
             std::fs::read(&file).unwrap(),
             before,
@@ -5076,6 +5134,242 @@ mod tests {
         let held_elsewhere = rig.journal().lock().unwrap();
         assert_eq!(report_of(&rig.engine), report);
         drop(held_elsewhere);
+    }
+
+    /// What the report says of a record's change, from the record itself: `Title: before → after`.
+    fn change_told(record: &OpenRecord) -> String {
+        format!(
+            "{}: {} → {}",
+            info(record.tweak).title,
+            targets::describe(record.tweak, &record.prior),
+            targets::describe(record.tweak, &record.planned)
+        )
+    }
+
+    /// What happens to the PC after Apply, in a test.
+    type Afterwards = Box<dyn Fn(&Rig)>;
+
+    #[test]
+    fn active_is_what_the_row_would_call_applied() {
+        // After Apply, something happens to the PC; the report is taken before anything looks at the journal. Whether
+        // the record is listed is whether its row would say Applied, and the History keeps its line either way.
+        let cases: Vec<(&str, TweakId, Afterwards, RowState)> = vec![
+            ("it holds", GameMode, Box::new(|_| {}), Applied),
+            (
+                "a third value",
+                GameMode,
+                Box::new(|rig| change_elsewhere(&rig.pc, GameMode)),
+                ChangedElsewhere,
+            ),
+            (
+                "put back by hand",
+                GameMode,
+                Box::new(|rig| put_back_by_hand(&rig.pc, GameMode)),
+                Available,
+            ),
+            (
+                "an inactive plan",
+                PowerPlan,
+                Box::new(|rig| rig.pc.set_active(BALANCED)),
+                PlanInactive,
+            ),
+            (
+                "a value that can't be read",
+                GameMode,
+                Box::new(|rig| rig.pc.fail_read(AUTO_GAME_MODE)),
+                CouldntRead,
+            ),
+            (
+                "a plan that can't be read",
+                PowerPlan,
+                Box::new(|rig| rig.pc.fail_read(ACTIVE_PLAN)),
+                CouldntRead,
+            ),
+        ];
+        for (what, id, arrange, row) in cases {
+            let rig = Rig::on(arranged());
+            assert!(rig.apply(id).ok, "{what}");
+            arrange(&rig);
+            let change = change_told(&rig.open()[0]);
+
+            let report = report_of(&rig.engine);
+
+            let expected = if row == Applied {
+                vec![change.clone()]
+            } else {
+                vec!["Nothing is active.".to_string()]
+            };
+            assert_eq!(active_told(&report), expected, "{what}");
+            assert_eq!(
+                history_told(&report),
+                [format!("Applied {change}")],
+                "{what}: the History keeps its line"
+            );
+            // The tab says the same, and it is the look at the tab that settles what the report left alone.
+            assert_eq!(rig.state(id), row, "{what}");
+        }
+    }
+
+    #[test]
+    fn another_accounts_record_is_in_the_history_and_not_under_active() {
+        // Nothing is set for that account, which for Game Mode means on: if anyone read it, it would hold.
+        let rig = Rig::on(arranged());
+        rig.left_by_an_earlier_run(&[
+            intent(GameMode, Some(OTHER_SID), dword(0), dword(1)),
+            outcome(GameMode, Some(OTHER_SID)),
+        ]);
+        let dump = rig.pc.dump();
+
+        let report = report_of(&rig.engine);
+
+        assert_eq!(under(&report, "Active"), ["Nothing is active."]);
+        assert_eq!(
+            under(&report, "History"),
+            ["2026-11-02 18:12 Applied Game Mode: off → on"]
+        );
+        assert_eq!(rig.pc.dump(), dump);
+        let view = rig.view();
+        assert_eq!(view.pending_other_accounts, 1, "it waits for its account");
+        assert_ne!(row_in(&view, GameMode).state, Applied);
+
+        // This account's own change is listed, and the other's still isn't.
+        assert!(rig.apply(GameMode).ok);
+        let report = report_of(&rig.engine);
+        assert_eq!(active_told(&report), ["Game Mode: off → on"]);
+        assert_eq!(history_told(&report).len(), 2, "{report}");
+    }
+
+    #[test]
+    fn a_change_cut_short_that_holds_is_active_before_the_look_that_settles_it() {
+        let rig = Rig::on(FakeSystem::new());
+        rig.pc.set_dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE, 1);
+        rig.left_by_an_earlier_run(&[game_mode_intent()]);
+
+        let report = report_of(&rig.engine);
+
+        assert_eq!(
+            report,
+            "\
+Kestrel report · Kestrel 0.5.0 · Windows build 26200 · 2026-11-02 18:20
+Active
+  Game Mode: off → on (2026-11-02 18:12)
+History
+  No finished changes yet."
+        );
+        assert_eq!(
+            rig.story(),
+            ["intent game-mode"],
+            "the report wrote nothing"
+        );
+
+        // The look at the tab calls it Applied, and from then on the History tells how it ended.
+        assert_eq!(row_in(&rig.view(), GameMode).state, Applied);
+        let report = report_of(&rig.engine);
+        assert_eq!(
+            under(&report, "Active"),
+            ["Game Mode: off → on (2026-11-02 18:12)"]
+        );
+        assert_eq!(
+            under(&report, "History"),
+            ["2026-11-02 18:12 Kestrel was interrupted while applying Game Mode: off → on"]
+        );
+
+        // One that never reached the write holds nothing, so it is neither listed nor told.
+        let rig = Rig::on(arranged());
+        rig.left_by_an_earlier_run(&[game_mode_intent()]);
+        assert_eq!(report_of(&rig.engine), NO_CHANGES_TEXT);
+    }
+
+    #[test]
+    fn system_protection_is_active_while_windows_says_it_is_on() {
+        let rig = Rig::on(arranged());
+        rig.left_by_an_earlier_run(&protection_record());
+        let line = "2026-11-02 18:12 Applied System Protection: off → on";
+
+        let report = report_of(&rig.engine);
+
+        assert_eq!(
+            under(&report, "Active"),
+            ["System Protection: off → on (2026-11-02 18:12)"]
+        );
+        assert_eq!(under(&report, "History"), [line]);
+
+        // Off, the next look would close the record; blocked or unknown, nothing can be said of it. Neither is listed,
+        // and the History keeps its line.
+        for readiness in [
+            Readiness::ProtectionOff,
+            Readiness::BlockedByPolicy,
+            Readiness::Unknown,
+        ] {
+            rig.pc.set_protection(readiness);
+            let report = report_of(&rig.engine);
+            assert_eq!(
+                under(&report, "Active"),
+                ["Nothing is active."],
+                "{readiness:?}"
+            );
+            assert_eq!(under(&report, "History"), [line], "{readiness:?}");
+        }
+    }
+
+    #[test]
+    fn a_pc_with_every_record_in_another_state_is_reported_as_its_rows_are_and_changes_nothing() {
+        let rig = Rig::on(arranged());
+        for id in TweakId::ESSENTIAL {
+            assert!(rig.apply(id).ok, "{id:?}");
+        }
+        let records = rig.open();
+        rig.pc.set_active(BALANCED); // the plan is not in use
+        change_elsewhere(&rig.pc, GameMode); // a third value
+        put_back_by_hand(&rig.pc, BackgroundRecording); // back where it was
+        rig.pc.fail_read(DIRECTX_SETTINGS); // can't be read
+                                            // The graphics preference and the pointer still hold what Kestrel wrote.
+        let file = rig.folder().join("journal.jsonl");
+        let journal = std::fs::read(&file).unwrap();
+        let dump = rig.pc.dump();
+        let writes = rig.pc.writes();
+
+        let report = report_of(&rig.engine);
+
+        let told = |id: TweakId| {
+            change_told(
+                records
+                    .iter()
+                    .find(|record| record.tweak == id)
+                    .expect("a record"),
+            )
+        };
+        assert_eq!(
+            active_told(&report),
+            [told(PointerPrecision), told(GpuPreference)]
+        );
+        // The report closes nothing, so every change is still in the History, newest first.
+        let applied: Vec<String> = TweakId::ESSENTIAL
+            .into_iter()
+            .rev()
+            .map(|id| format!("Applied {}", told(id)))
+            .collect();
+        assert_eq!(history_told(&report), applied);
+        // And it only read: the journal, the PC and the log of what was written to it are as they were.
+        assert_eq!(std::fs::read(&file).unwrap(), journal);
+        assert_eq!(rig.pc.dump(), dump);
+        assert_eq!(rig.pc.writes(), writes);
+        // Judging what holds takes no lock: with another process holding it, the report is the same.
+        let held_elsewhere = rig.journal().lock().unwrap();
+        assert_eq!(report_of(&rig.engine), report);
+        drop(held_elsewhere);
+
+        // The rows and `applied_ids` pick the same two.
+        let view = rig.view();
+        let applied_rows: Vec<TweakId> = TweakId::ESSENTIAL
+            .into_iter()
+            .filter(|id| row_in(&view, *id).state == Applied)
+            .collect();
+        assert_eq!(applied_rows, [GpuPreference, PointerPrecision]);
+        assert_eq!(
+            rig.engine.applied_ids(),
+            ["gpu-preference", "pointer-precision"]
+        );
     }
 
     #[test]
