@@ -7,7 +7,7 @@
 //! be deleted; `persist` saves the mouse strings in the profile of the account the call runs as.
 //!
 //! To arrange a PC, use the `set_*` and `add_*` methods. They are the test's own hands, not changes Kestrel made, so
-//! they never appear in `writes()` and the failure switches don't stop them. The switches (`fail_*`,
+//! they never appear in `writes()` and the failure switches don't stop them. The switches (`fail_*`, `ignore_activate`,
 //! `lie_on_readback`) make what goes through `System` go wrong. Failures are told apart from absence: a read that is
 //! made to fail is `Read::Failed` even when the value isn't there. Once set, a switch stays until `clear_failures`.
 //!
@@ -31,6 +31,7 @@ pub const POWER_SAVER: &str = "a1841308-3541-4fab-bc81-f71556f20b4a";
 /// Names for `fail_read` and `fail_write` where the thing read or written is not a registry value.
 pub const MOUSE_LIVE: &str = "SPI_GETMOUSE/SPI_SETMOUSE";
 pub const ACTIVE_PLAN: &str = "PowerGetActiveScheme";
+pub const PROTECTION: &str = "SystemRestore";
 
 /// Where Windows saves the mouse setting when `persist` is asked for.
 const MOUSE_KEY: &str = r"Control Panel\Mouse";
@@ -145,8 +146,12 @@ struct Failures {
     copies: BTreeSet<String>,
     /// Plans that can't be activated.
     activations: BTreeSet<String>,
+    /// Plans whose activation says it worked and changes nothing.
+    ignored_activations: BTreeSet<String>,
     /// Plans that can't be deleted.
     deletions: BTreeSet<String>,
+    /// Values whose reads start to fail at their next write.
+    reads_after_write: BTreeSet<String>,
     /// Values whose next write will read back wrongly once.
     lies: BTreeSet<String>,
     /// Values written under a lie that have not been read back yet.
@@ -249,8 +254,11 @@ impl Inner {
             .entry(sid.to_string())
             .or_default()
             .set(key, name, value);
-        // A lie lasts from the write it was set for until the value is first read back.
         let folded = fold(name);
+        if self.failures.reads_after_write.remove(&folded) {
+            self.failures.reads.insert(folded.clone());
+        }
+        // A lie lasts from the write it was set for until the value is first read back.
         if self.failures.lies.remove(&folded) {
             self.failures.lying.insert(folded);
         } else {
@@ -261,6 +269,7 @@ impl Inner {
     }
 
     fn switch_protection(&mut self, to: Readiness, line: &str) -> io::Result<()> {
+        self.refuse_write(PROTECTION)?;
         if self.state.protection == Readiness::BlockedByPolicy {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -484,13 +493,19 @@ impl FakeSystem {
 
     // Making things go wrong. Reads and writes are named by the registry value they touch, in any key or account. A
     // key is named by its path: `fail_read` makes listing its values fail, and `fail_write` makes deleting it when it
-    // is empty fail. `MOUSE_LIVE` names the live mouse setting and `ACTIVE_PLAN` the plan in use. A setting of a power
-    // plan is named by its GUID, in any plan, and describing a plan (`fail_write` only) by the plan's own GUID. Case
-    // doesn't matter.
+    // is empty fail. `MOUSE_LIVE` names the live mouse setting, `ACTIVE_PLAN` the plan in use, and `PROTECTION`
+    // (`fail_write` only) switching System Protection. A setting of a power plan is named by its GUID, in any plan, and
+    // describing a plan (`fail_write` only) by the plan's own GUID. Case doesn't matter.
 
     /// Reads of this fail, whether or not it is there.
     pub fn fail_read(&self, name: &str) {
         self.lock().failures.reads.insert(fold(name));
+    }
+
+    /// The next write to this value goes through, and from then on reads of it fail, as if `fail_read` came right
+    /// after.
+    pub fn fail_read_after_write(&self, name: &str) {
+        self.lock().failures.reads_after_write.insert(fold(name));
     }
 
     /// Writes and deletes of this are refused (`PermissionDenied`) and change nothing.
@@ -506,6 +521,14 @@ impl FakeSystem {
     /// Activating this plan fails.
     pub fn fail_activate(&self, guid: &str) {
         self.lock().failures.activations.insert(guid.to_string());
+    }
+
+    /// Activating this plan says it worked, and the plan in use stays what it was.
+    pub fn ignore_activate(&self, guid: &str) {
+        self.lock()
+            .failures
+            .ignored_activations
+            .insert(guid.to_string());
     }
 
     /// Deleting this plan fails.
@@ -756,6 +779,9 @@ impl System for FakeSystem {
         }
         if inner.plan(guid).is_none() {
             return Err(no_such_plan(guid));
+        }
+        if inner.failures.ignored_activations.contains(guid) {
+            return Ok(());
         }
         inner.state.active = guid.to_string();
         inner.log.push(format!("activate-plan {guid}"));
@@ -1509,6 +1535,69 @@ mod tests {
         // Other plans are described as usual.
         pc.describe_plan(BALANCED, "Mine", "Made by me.").unwrap();
         assert_eq!(pc.plan_name(BALANCED).as_deref(), Some("Mine"));
+    }
+
+    #[test]
+    fn a_value_told_to_fail_after_its_write_reads_until_then() {
+        let pc = FakeSystem::new();
+        pc.set_dword(SID, GAME_BAR, GAME_MODE, 0);
+        pc.fail_read_after_write(GAME_MODE);
+        assert_eq!(pc.read_dword(SID, GAME_BAR, GAME_MODE), Read::Value(0));
+
+        pc.write_dword(SID, GAME_BAR, GAME_MODE, 1).unwrap();
+
+        assert!(failed(&pc.read_dword(SID, GAME_BAR, GAME_MODE)));
+        // The write itself went through, and another one still does.
+        assert_eq!(pc.dword(SID, GAME_BAR, GAME_MODE), Some(1));
+        pc.write_dword(SID, GAME_BAR, GAME_MODE, 2).unwrap();
+        assert_eq!(pc.dword(SID, GAME_BAR, GAME_MODE), Some(2));
+
+        pc.clear_failures();
+        assert_eq!(pc.read_dword(SID, GAME_BAR, GAME_MODE), Read::Value(2));
+    }
+
+    #[test]
+    fn system_protection_told_to_refuse_stays_as_it_is() {
+        let pc = FakeSystem::new();
+        pc.fail_write(PROTECTION);
+
+        assert!(pc.turn_protection_off().is_err());
+        assert_eq!(pc.protection(), Readiness::Ready);
+        assert!(pc.writes().is_empty());
+
+        pc.clear_failures();
+        pc.turn_protection_off().unwrap();
+        pc.fail_write(PROTECTION);
+        assert!(pc.turn_protection_on().is_err());
+        assert_eq!(pc.protection(), Readiness::ProtectionOff);
+    }
+
+    #[test]
+    fn a_plan_told_to_ignore_its_activation_says_it_switched_and_doesnt() {
+        let pc = FakeSystem::new();
+        pc.add_plan(EXM, "EXM");
+        pc.add_plan(KESTREL, "Kestrel");
+
+        pc.ignore_activate(KESTREL);
+        pc.activate_plan(KESTREL).unwrap();
+        assert_eq!(pc.active_plan(), Read::Value(BALANCED.to_string()));
+        assert!(
+            pc.writes().is_empty(),
+            "nothing changed, so nothing is logged"
+        );
+
+        // Only that plan.
+        pc.activate_plan(EXM).unwrap();
+        assert_eq!(pc.active_plan(), Read::Value(EXM.to_string()));
+
+        // A plan that isn't there is still an error.
+        pc.ignore_activate(HIGH_PERFORMANCE);
+        pc.delete_plan(HIGH_PERFORMANCE).unwrap();
+        assert!(pc.activate_plan(HIGH_PERFORMANCE).is_err());
+
+        pc.clear_failures();
+        pc.activate_plan(KESTREL).unwrap();
+        assert_eq!(pc.active_plan(), Read::Value(KESTREL.to_string()));
     }
 
     #[test]
