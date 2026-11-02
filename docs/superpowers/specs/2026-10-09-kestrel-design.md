@@ -94,6 +94,7 @@ Games, Ubisoft or Activision.
 | 87 | Another tool's power plan | Kestrel's plan is offered unticked, the preview shows what would change, and Kestrel suggests measuring before and after. Undo returns to the old plan |
 | 88 | Uninstall | The uninstaller asks whether to undo Kestrel's changes before removing it; built in stage 5 |
 | 89 | System Protection off | Ask at that moment: turn it on and create the restore point (recorded and undoable), or go on with Kestrel's undo only |
+| 90 | NVIDIA profile | Moves to stage 6, and the 10 GB shader cache is dropped (the current driver's default is 16 GB). Kestrel's call, open to the owner when reviewing the stage-5 spec |
 
 ## Stages
 
@@ -104,7 +105,7 @@ Games, Ubisoft or Activision.
 | 3 | Hardware & BIOS: Hardware tab and BIOS checks (51–53) |
 | 4 | Game profiles: FiveM, Rainbow Six Siege, Warzone (detection, checks, benchmarks), with their NVIDIA profiles and FiveM/GTA V settings. Postponed (85) |
 | 5 | Tweak engine, undo journal, restore points, Essential tier, Smart Plan, Kestrel report |
-| 6 | Competitive + Extreme tiers, network, debloat, FiveM detection and telagem safety (61) |
+| 6 | Competitive + Extreme tiers, NVIDIA profile for VALORANT, network, debloat, FiveM detection and telagem safety (61) |
 | 7 | Lock In |
 | 8 | Fixes, troubleshooters per game, auto-update, installer polish |
 | 9 | Visual redesign from the owner's Claude Design work (63–65) → v1.0 |
@@ -122,13 +123,14 @@ Games, Ubisoft or Activision.
 
 ## Tweak list (stages 5–6)
 
-Essential: Kestrel power plan (High performance base, no core parking, USB/PCIe power saving off;
-laptops only on charger); VALORANT on "High performance" GPU; Game Mode on; Game DVR background
-recording off (Game Bar stays); Win11 "Optimizations for windowed games" on; NVIDIA VALORANT profile
-(max-performance power, high-performance texture filtering, 10 GB shader cache, V-Sync off);
-"Enhance pointer precision" off.
+Essential (details and research-based corrections in `2026-11-02-kestrel-stage-5-tweaks-design.md`): Kestrel power
+plan (High performance base, no core parking, USB/PCIe power saving off; lighter on laptops and hybrid CPUs, not offered
+on dual-CCD X3D); VALORANT on "High performance" GPU where there are two GPUs; Game Mode on; Game DVR background
+recording off (Game Bar stays); Win11 "Optimizations for windowed games" on; "Enhance pointer precision" off (offered
+unticked).
 
-Competitive: VALORANT High CPU priority via IFEO PerfOptions (skipped under 6 cores); adapter power
+Competitive: NVIDIA VALORANT profile (max-performance power, high-performance texture filtering, V-Sync off; decision
+90); VALORANT High CPU priority via IFEO PerfOptions (skipped under 6 cores); adapter power
 saving / EEE / interrupt moderation off; Delivery Optimization internet uploads off; QoS DSCP 46 for
 VALORANT; trim unused services (Fax, Remote Registry, Print Spooler without printer…; opt-in, never on
 a PC with FiveM — decision 61); HAGS and fullscreen-optimizations toggles decided by the benchmark.
