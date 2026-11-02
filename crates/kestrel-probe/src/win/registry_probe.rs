@@ -1,5 +1,6 @@
 //! Registry reads. Keys are opened read-only (KEY_READ) and never written.
 use super::problem;
+use crate::account::account;
 use crate::parse;
 use kestrel_core::{valorant, PowerPlan, ProbeError, SystemSnapshot};
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ};
@@ -27,9 +28,20 @@ fn open(root: winreg::HKEY, path: &str) -> Option<RegKey> {
 fn hklm(path: &str) -> Option<RegKey> {
     open(HKEY_LOCAL_MACHINE, path)
 }
+
+/// A key of the signed-in account's settings. When a standard user lets Kestrel run by typing an administrator's
+/// password, `HKEY_CURRENT_USER` is the administrator's, not that of the person at the screen, so the signed-in
+/// account's own hive is opened by its SID. If Windows can't say who that is, `HKEY_CURRENT_USER` is the best there is.
 fn hkcu(path: &str) -> Option<RegKey> {
-    open(HKEY_CURRENT_USER, path)
+    match account().signed_in {
+        Some(sid) => open(HKEY_USERS, &parse::user_key_path(&sid, path)),
+        None => open(HKEY_CURRENT_USER, path),
+    }
 }
+
+/// How to open a key in one hive: `hkcu` or `hklm`.
+type OpenKey = fn(&str) -> Option<RegKey>;
+
 fn dword(key: &Option<RegKey>, name: &str) -> Option<u32> {
     key.as_ref()?.get_value::<u32, _>(name).ok()
 }
@@ -103,34 +115,33 @@ fn power_plan() -> Option<PowerPlan> {
 }
 
 fn startup_app_count() -> u32 {
-    let run_keys = [
+    // Each place apps start from: how to open its hive (the per-user one is the signed-in account's), its Run key, and
+    // the name of its StartupApproved key.
+    let run_keys: [(OpenKey, &str, &str); 3] = [
         (
-            HKEY_CURRENT_USER,
+            hkcu,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
             "Run",
         ),
         (
-            HKEY_LOCAL_MACHINE,
+            hklm,
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
             "Run",
         ),
         (
-            HKEY_LOCAL_MACHINE,
+            hklm,
             r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
             "Run32",
         ),
     ];
     let mut count = 0;
-    for (root, path, approved_name) in run_keys {
-        let Some(run) = open(root, path) else {
+    for (hive, path, approved_name) in run_keys {
+        let Some(run) = hive(path) else {
             continue;
         };
-        let approved = open(
-            root,
-            &format!(
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\{approved_name}"
-            ),
-        );
+        let approved = hive(&format!(
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\{approved_name}"
+        ));
         for (name, _) in run.enum_values().filter_map(Result::ok) {
             let bytes = approved
                 .as_ref()
@@ -182,9 +193,13 @@ fn delivery_optimization_mode() -> Option<u32> {
         &hklm(r"SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"),
         "DODownloadMode",
     );
+    // The Delivery Optimization service runs as NETWORK SERVICE (S-1-5-20) and keeps its setting in that account's hive.
     let settings = open(
         HKEY_USERS,
-        r"S-1-5-20\Software\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Settings",
+        &parse::user_key_path(
+            "S-1-5-20",
+            r"Software\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Settings",
+        ),
     );
     policy
         .or_else(|| dword(&settings, "DownloadMode"))
