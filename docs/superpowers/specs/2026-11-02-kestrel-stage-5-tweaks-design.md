@@ -106,15 +106,17 @@ Row states:
 | Not needed | Doesn't apply to this PC, with the reason | None |
 | Blocked by policy | An organisation policy decides it; Kestrel reports and doesn't fight it | None |
 | Applied | Kestrel changed it and it still holds | **Undo** |
-| Changed by something else | Kestrel changed it, and it no longer holds | **Apply again**, **Restore anyway** |
+| Changed by something else | Kestrel changed it, and it now holds a third value: neither Kestrel's nor the old one | **Apply again**, **Restore anyway** |
+| Kestrel's plan isn't active | Power plan only: Kestrel's plan exists but another plan is active | **Use it again**, **Remove it** |
 | Couldn't read | The read failed; a failed read is never treated as "absent" | None |
 
 ### Preview
 
 Lists each ticked change: what it is in plain words, the technical location (registry value or plan setting), the
 value now and the value after, and when it takes effect ("Now", "Next time VALORANT opens", "Next sign-in"). The power
-plan shows the current plan's value beside Kestrel's for each setting Kestrel sets. **Apply** and **Cancel**. A Home
-fix button opens this Preview with only that tweak.
+plan shows the current plan's value beside Kestrel's for each setting Kestrel sets, and says: "Switching plans also
+replaces everything else in [current plan] with the settings of [base plan]. Undo returns to your plan as it was."
+**Apply** and **Cancel**. A Home fix button opens this Preview with only that tweak.
 
 ### Apply
 
@@ -132,8 +134,12 @@ fix button opens this Preview with only that tweak.
 order. System Protection stays on: turning it off deletes that drive's restore points, so it has its own row with that
 warning and is never part of Revert everything or the uninstaller's undo.
 
-If a value changed since Kestrel wrote it, Undo leaves it alone and the row says **Changed by something else**.
-**Restore anyway** asks first, then writes the old value.
+If a value holds something else now, Undo leaves it alone and the row says **Changed by something else**. **Restore
+anyway** asks first, then writes the old value. Revert everything leaves those rows as they are and says so.
+
+If a value went back to what it was before Kestrel, by hand or through another tool, there's nothing to undo: Kestrel
+closes the record without touching Windows, the report notes "went back outside Kestrel", and the row returns to its
+normal state.
 
 ### Kestrel report
 
@@ -169,9 +175,12 @@ which goes to Home; a flag next to the first-run flag remembers it.
 ### Uninstaller (decision 88)
 
 When Kestrel's changes are active, the uninstaller asks: "Undo Kestrel's changes before removing it?" Yes is the
-default. Yes runs Kestrel's own undo; if something can't be undone it says so, and the uninstall continues. It doesn't
-ask during updates, and a silent uninstall leaves changes in place. Ticking "Delete the application data" also removes
-`%ProgramData%\Kestrel`, after this question.
+default. Yes runs Kestrel's own undo; if something can't be undone it says so, and the uninstall continues. A silent
+uninstall leaves changes in place. Ticking "Delete the application data" also removes `%ProgramData%\Kestrel`, after
+this question.
+
+Installing a newer version is not removing Kestrel: it doesn't ask and the changes stay. That covers `/UPDATE` and also
+running a newer setup by hand, the only update route until stage 8, where the installer runs the old uninstaller itself.
 
 ### Benchmark
 
@@ -227,8 +236,17 @@ performance anyway, fall back to Balanced, and otherwise fail with a clear messa
 tool's. A policy-set plan (`HKLM\SOFTWARE\Policies\Microsoft\Power\PowerSettings\ActivePowerScheme`) gives Blocked by
 policy.
 
-**Undo:** if Kestrel's plan is active, activate the previous plan by GUID (if it's gone, Balanced, and say so). If
-another plan is active, leave it. In every case delete only the plan the journal says Kestrel created.
+**Undo:** activate the previous plan by GUID (if it's gone, Balanced, and say so), then delete Kestrel's plan.
+
+Kestrel's plan stays on disk when another plan becomes active, so this record stays open for as long as the plan exists,
+even if the plan now active is the previous one:
+
+- Another plan active: the row says **Kestrel's plan isn't active**. **Use it again** activates it. **Remove it** keeps the
+  plan now active and deletes Kestrel's. Revert everything and the uninstaller's undo do the same as Remove it.
+- Kestrel's plan deleted outside Kestrel: the record closes and the report says so.
+- A crash after the plan was created and before it was activated lands in the same state and needs no special handling.
+
+Kestrel only ever deletes the plan the journal says it created.
 
 ## How changes are recorded
 
@@ -256,13 +274,23 @@ another plan is active, leave it. In every case delete only the plan the journal
 
 ### Undo and crash recovery
 
-- **Undo is a three-way check.** Current equals what Kestrel wrote: restore the prior. Current equals the prior: done.
-  Anything else: leave it and show **Changed by something else**.
-- **On start,** Kestrel reads every active change. An intent with no outcome (a crash mid-apply) is settled the same
-  way: equal to the plan means applied and undoable; equal to the prior means not applied; anything else is flagged. The
-  tab says Kestrel was interrupted and what happened to each item. The same check shows changes something else made,
-  since Windows updates can reset settings. Kestrel only reports; it never re-applies by itself.
+- **Every open record is judged the same way,** comparing the current value with the old one and the one Kestrel wrote,
+  by what they mean (an absent value counts as that setting's default):
+  - Equal to what Kestrel wrote: **Applied**.
+  - Equal to the old value: the record closes, with no write to Windows, and the report notes it (see "Undo"). Undo
+    finding this state does the same.
+  - Anything else: **Changed by something else**, and nothing is written.
+
+  The power plan's rules are in "Kestrel power plan".
+- **This runs at start and whenever the plan is read.** Windows updates can reset settings, so it catches those. Kestrel
+  writes to its journal here but never to Windows, and it never re-applies by itself.
+- **After a crash,** an intent with no outcome goes through the same check, with "equal to the old value" meaning it was
+  never applied. The tab says Kestrel was interrupted and what happened to each item.
+- **What counts as active:** Applied rows only, for `applied_tweaks` and the report's Active list. Revert everything also
+  removes an inactive Kestrel plan. The uninstaller's check counts every open record.
 - A failed undo keeps the record, so it can be tried again.
+- One process at a time may write the journal, including the uninstaller's undo. The uninstaller makes sure Kestrel's
+  window is closed before it asks.
 
 ### Which account gets the changes
 
@@ -273,7 +301,10 @@ so `HKCU` is the wrong hive: a tweak would pass its check and leave the real use
   `WTSQuerySessionInformationW` and `LookupAccountNameW`. If neither works, per-user tweaks say "Couldn't tell which
   account is signed in" and the power plan still works.
 - **Always** read and write per-user values under `HKEY_USERS\<SID>`, even when the accounts match, so there's one code
-  path. The journal records the SID. An undo for a signed-out account stays pending and says so.
+  path.
+- A per-user record is keyed on tweak and SID. Rows, Revert everything and `applied_tweaks` cover the signed-in account plus
+  machine-wide changes. If another account has open records, one line says so; those wait until that account is signed
+  in. The uninstaller's undo does what it can and says what's left.
 - `registry_probe.rs`'s `hkcu()` reads the same way, so Health sees the account the changes go to.
 - Pointer precision when the accounts differ: write the registry only and say "Next sign-in", because
   `SPIF_UPDATEINIFILE` writes the caller's profile.
@@ -317,7 +348,10 @@ The journal is the real undo. The restore point is a bonus that Windows may late
   from the stage-1 backlog, since Kestrel now writes to the system.
 - **UI:** `app/src/pages/Tweaks.tsx` and `app/src/components/tweaks/`; browser-mode fakes in `client.ts`; every string in
   `strings.ts`.
-- **Installer:** `installerHooks` in `tauri.conf.json` with `NSIS_HOOK_PREUNINSTALL`, skipping when `$UpdateMode` is 1.
+- **Installer:** `installerHooks` in `tauri.conf.json` with `NSIS_HOOK_PREUNINSTALL`. It asks only when `$UpdateMode` isn't
+  1, the uninstaller isn't silent, and `$EXEDIR` differs from `$INSTDIR`. Tauri's installer template runs the old
+  uninstaller in place with `_?=` during an upgrade, while NSIS copies a user-started uninstaller to a temp folder first, so
+  those two folders match only during an upgrade. Checked against the template in CLI 2.12.1; confirm it on the owner's PC.
 - **Release:** the workspace goes to 0.5.0. `release.yml`'s body stops saying the build changes nothing: "Test build. It
   changes your PC only when you press Apply, and every change can be undone."
 
@@ -374,10 +408,13 @@ These can only be settled on a real PC:
 - Undo: your EXM plan is active again and the Kestrel plan is gone from Power Options.
 - Tick everything available, Apply, then Revert everything: every setting is back. Close and reopen Kestrel between steps
   once: the rows still show the right state.
-- Change a setting by hand after applying it (Game Mode, if it was applied, or switch power plans): the row says Changed by
-  something else, and Undo leaves it alone.
+- Apply Kestrel's plan, then pick Balanced by hand in Power Options: the row says Kestrel's plan isn't active. Remove it:
+  Balanced stays and Kestrel's plan is gone. Put your EXM plan back afterwards.
+- If Optimizations for windowed games was applied, turn it off in Settings: the row says Changed by something else, and Undo
+  leaves it alone.
 - Copy report and Copy diagnostics, then paste both in chat.
 - Uninstall with a change active: it asks whether to undo. Then reinstall.
+- On the first fix build after this one: install it over v0.5.x with a change active. It doesn't ask, and the change stays.
 
 ## Left to the builder
 
@@ -396,3 +433,10 @@ the round-trip binary is structured. Where Kestrel made a product call beyond th
 - The journal lives in `%ProgramData%\Kestrel`, which also keeps it out of the uninstaller's "Delete the application data"
   unless that box is ticked.
 - Version 0.5.0, matching the stage number.
+- Installing a newer version by hand counts as an update: no question, and the changes stay.
+- A value that goes back to what it was closes its record, with a note in the report, rather than staying flagged.
+- The power plan row has its own state when Kestrel's plan exists but isn't active, with **Remove it** keeping the plan you
+  chose.
+- The Preview compares the three settings Kestrel sets and says in one sentence that the rest comes from the base plan. It
+  doesn't list every setting of a plan like EXM's.
+- With several accounts on one PC, each account's changes are tracked apart.
