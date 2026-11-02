@@ -74,7 +74,7 @@ Failure even if everything else works:
 | 87 | Another tool's power plan: Kestrel's plan is offered unticked, the Preview shows what would change, Kestrel suggests measuring before and after, and undo returns to the old plan |
 | 88 | The uninstaller asks whether to undo Kestrel's changes |
 | 89 | System Protection off: ask at that moment (turn it on and create the point, recorded and undoable; or go on with undo only) |
-| 90 | **Kestrel's call, open to the owner in review:** the NVIDIA profile moves to stage 6. It is the riskiest item: it writes to the driver's database, GitHub's machine has no NVIDIA card, and the gain is small on a CPU-bound PC (NVIDIA lists "Prefer maximum performance" as an open issue in driver 617.42). The 10 GB shader cache is dropped for good: the current driver's default is 16 GB, so 10 GB would lower it |
+| 90 | **Kestrel's call, approved with this spec:** the NVIDIA profile moves to stage 6. It is the riskiest item: it writes to the driver's database, GitHub's machine has no NVIDIA card, and the gain is small on a CPU-bound PC (NVIDIA lists "Prefer maximum performance" as an open issue in driver 617.42). The 10 GB shader cache is dropped for good: the current driver's default is 16 GB, so 10 GB would lower it |
 
 ## What a person sees
 
@@ -163,7 +163,8 @@ History
 A new `Fix::Tweak { tweak }` replaces `Fix::LaterStage { stage: TWEAKS_STAGE }` on `power-plan` (the Balanced and Power
 saver case), `game-mode` and `background-recording`, and `Fix::Steps` on `valorant-gpu`. Home and Health show a **Fix**
 button that opens the Tweaks tab with that tweak's Preview. The check texts stop saying "arrives in stage 5". The Info
-text for another tool's plan says Kestrel's can be tried in the Tweaks tab. **Apply plan** on Home keeps leading to the
+text for another tool's plan says Kestrel's can be tried in the Tweaks tab. On a dual-CCD X3D, Balanced passes the check,
+since it's what AMD recommends there and Kestrel doesn't offer its plan. **Apply plan** on Home keeps leading to the
 tab. `TWEAKS_STAGE` and `STAGE.tweaks` go away; the tests that pin them follow.
 
 ### First run (decision 22)
@@ -207,8 +208,8 @@ for that. Impact tags replace the guesses in decision 30 where the research cont
 
 ### Kestrel power plan
 
-A new plan named "Kestrel" with a description saying it came from Kestrel. It's created with `PowerDuplicateScheme`
-from a stock plan, its values are set with `PowerWriteACValueIndex`, and it's activated with `PowerSetActiveScheme`.
+A new plan named "Kestrel" with a description saying it came from Kestrel, always under one fixed GUID. It's created
+with `PowerDuplicateScheme` from a stock plan, its values are set with `PowerWriteACValueIndex`, and it's activated with `PowerSetActiveScheme`.
 Values go through `PowerReadValueMin`/`Max` and are clamped to the machine's range, with the clamp recorded. Only AC
 values change, so battery behaviour is the base plan's.
 
@@ -246,7 +247,7 @@ even if the plan now active is the previous one:
 - Kestrel's plan deleted outside Kestrel: the record closes and the report says so.
 - A crash after the plan was created and before it was activated lands in the same state and needs no special handling.
 
-Kestrel only ever deletes the plan the journal says it created.
+Kestrel only ever deletes that one GUID.
 
 ## How changes are recorded
 
@@ -256,7 +257,7 @@ Kestrel only ever deletes the plan the journal says it created.
   SYSTEM can write to it; a folder that already exists with another owner is not trusted. An elevated app must not act
   on a file any user can edit.
 - **Treat it as untrusted anyway.** Undo accepts only known tweak ids and fixed targets; it never takes a registry path
-  from the file. A SID must look like a SID, a plan must be a GUID the journal created, an exe path must end in
+  from the file. A SID must look like a SID, a saved plan must be a GUID, an exe path must end in
   `\VALORANT-Win64-Shipping.exe` and is only ever used as a value name in the one key above.
 - Each change: read the prior state, append and flush an **intent** (batch, tweak id, target, prior, planned value),
   write to Windows, read back, append and flush the **outcome**. Writes are `FlushFileBuffers`-durable. A truncated last
@@ -289,8 +290,7 @@ Kestrel only ever deletes the plan the journal says it created.
 - **What counts as active:** Applied rows only, for `applied_tweaks` and the report's Active list. Revert everything also
   removes an inactive Kestrel plan. The uninstaller's check counts every open record.
 - A failed undo keeps the record, so it can be tried again.
-- One process at a time may write the journal, including the uninstaller's undo. The uninstaller makes sure Kestrel's
-  window is closed before it asks.
+- One process at a time may write the journal, including the uninstaller's undo.
 
 ### Which account gets the changes
 
@@ -326,9 +326,10 @@ The journal is the real undo. The restore point is a bonus that Windows may late
   `SystemRestorePointCreationFrequency` is left alone.
 - **System Protection off (decision 89):** detected from
   `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SPP\Clients`, value `{09F7EDC5-294E-4180-AF6A-FB0E6A0E9513}`,
-  containing C:'s volume GUID, or from `ERROR_SERVICE_DISABLED`. The dialog: "System Protection is off on C:. Turn it on
-  and create a restore point? Windows will use some disk space for restore points." **Turn on and create**, **Continue
-  without**, **Cancel**. Turning on uses WMI `SystemRestore.Enable("C:\\")` and is a journal entry with its own row. If
+  containing the Windows drive's volume GUID, or from `ERROR_SERVICE_DISABLED`. The dialog: "System Protection is off on
+  your Windows drive. Turn it on and create a restore point? Windows will use some disk space for restore points."
+  **Turn on and create**, **Continue
+  without**, **Cancel**. Turning on uses WMI `SystemRestore.Enable` with that drive and is a journal entry with its own row. If
   `DisableSR` or `DisableConfig` policies are set, only **Continue without** and **Cancel** are offered. Kestrel never
   runs `vssadmin resize` and never deletes those policies.
 - **Failure or timeout (3 minutes):** "Couldn't create a restore point: [reason]. Continue with Kestrel's undo only?" The
@@ -341,13 +342,14 @@ The journal is the real undo. The restore point is a bonus that Windows may late
   between it and Windows, with a fake for tests, like `Platform` in the benchmark. The Windows implementation sits behind
   `cfg(windows)` in the same crate. `kestrel-probe` keeps its read-only guarantee and never gains a write.
 - **`app/src-tauri/src/tweaks/`**: commands and state, following `bench/`: `tweaks_plan`, `tweaks_preview`, `tweaks_apply`,
-  `tweaks_undo`, `tweaks_revert_all`, `tweaks_report`; a `tweaks-state` event; one apply at a time; no platform call under
-  a lock; `spawn_blocking` for the slow parts. `get_diagnostics` adds the report and the account check.
+  `tweaks_undo`, `tweaks_revert_all`, `tweaks_report`, and the ones the rows' other buttons need. Commands return what
+  changed and the page re-reads the view, since nothing changes in the background. One apply at a time; no platform call
+  under a lock; `spawn_blocking` for the slow parts. `get_diagnostics` adds the report and the account check.
 - **`main.rs`** parses flags before starting Tauri: the restore-point helper, and the uninstaller's check and undo. It
   also calls `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR)` at start-up,
   from the stage-1 backlog, since Kestrel now writes to the system.
-- **UI:** `app/src/pages/Tweaks.tsx` and `app/src/components/tweaks/`; browser-mode fakes in `client.ts`; every string in
-  `strings.ts`.
+- **UI:** `app/src/pages/Tweaks.tsx` and `app/src/components/tweaks/`; browser-mode fakes in `client.ts`. The page's own
+  labels live in `strings.ts`; per-tweak text comes from Rust, as Findings' text does.
 - **Installer:** `installerHooks` in `tauri.conf.json` with `NSIS_HOOK_PREUNINSTALL`. It asks only when `$UpdateMode` isn't
   1, the uninstaller isn't silent, and `$EXEDIR` differs from `$INSTDIR`. Tauri's installer template runs the old
   uninstaller in place with `_?=` during an upgrade, while NSIS copies a user-started uninstaller to a temp folder first, so
@@ -421,7 +423,7 @@ These can only be settled on a real PC:
 Crate internals, the journal's exact fields, flag names, how the rows lay out in the current look, poll intervals, and how
 the round-trip binary is structured. Where Kestrel made a product call beyond the owner's answers, it's listed below.
 
-## Calls Kestrel made (the owner can change them in review)
+## Calls Kestrel made (approved with this spec)
 
 - Decision 90: the NVIDIA profile moves to stage 6.
 - Pointer precision comes unticked, because it changes the desktop's mouse feel with no benefit in the game.

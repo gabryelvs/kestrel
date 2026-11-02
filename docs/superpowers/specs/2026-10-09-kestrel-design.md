@@ -94,7 +94,7 @@ Games, Ubisoft or Activision.
 | 87 | Another tool's power plan | Kestrel's plan is offered unticked, the preview shows what would change, and Kestrel suggests measuring before and after. Undo returns to the old plan |
 | 88 | Uninstall | The uninstaller asks whether to undo Kestrel's changes before removing it; built in stage 5 |
 | 89 | System Protection off | Ask at that moment: turn it on and create the restore point (recorded and undoable), or go on with Kestrel's undo only |
-| 90 | NVIDIA profile | Moves to stage 6, and the 10 GB shader cache is dropped (the current driver's default is 16 GB). Kestrel's call, open to the owner when reviewing the stage-5 spec |
+| 90 | NVIDIA profile | Moves to stage 6, and the 10 GB shader cache is dropped (the current driver's default is 16 GB). Kestrel's call, approved with the stage-5 spec |
 
 ## Stages
 
