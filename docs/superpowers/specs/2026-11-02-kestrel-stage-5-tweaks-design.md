@@ -210,7 +210,7 @@ for that. Impact tags replace the guesses in decision 30 where the research cont
 
 A new plan named "Kestrel" with a description saying it came from Kestrel, always under one fixed GUID. It's created
 with `PowerDuplicateScheme` from a stock plan, its values are set with `PowerWriteACValueIndex`, and it's activated with `PowerSetActiveScheme`.
-Values go through `PowerReadValueMin`/`Max` and are clamped to the machine's range, with the clamp recorded. Only AC
+Values go through `PowerReadValueMin`/`Max` and are clamped to the machine's range, and the Preview shows the clamped value. Only AC
 values change, so battery behaviour is the base plan's.
 
 | Setting | GUID (subgroup / setting) | Value |
