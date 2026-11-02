@@ -28,6 +28,7 @@ use crate::catalog::{info, Timing};
 use crate::journal::{CloseReason, Entry, JournalFile, OpenRecord, Replay, Saved};
 use crate::plan::{self, PlanInput, PreviewItem, Row, RowState, ValueChange};
 use crate::power::{self, KESTREL_PLAN_GUID, KESTREL_PLAN_NAME};
+use crate::report;
 use crate::system::{Read, Readiness, System};
 use crate::targets;
 
@@ -440,6 +441,20 @@ impl Engine {
         self.journal
             .read()
             .map_or(true, |replay| !replay.open.is_empty())
+    }
+
+    /// The Kestrel report as plain text (see `report`), for the Tweaks tab and for Copy diagnostics. `now` is when it is
+    /// made, as the journal spells times.
+    ///
+    /// It only reads the journal. It doesn't settle what a crash left, so it takes no lock and writes nothing, and it
+    /// makes no folder on a PC that never applied; it can be asked for at any moment, even while another process is
+    /// changing something, which then shows up half done or not at all. A journal that can't be read says so, and is not
+    /// taken for an empty one.
+    pub fn report(&self, kestrel_version: &str, build: u32, now: &str) -> String {
+        match self.journal.read() {
+            Ok(replay) => report::text(&replay, kestrel_version, build, now, replay.unreadable > 0),
+            Err(why) => report::unavailable(kestrel_version, build, now, &why.to_string()),
+        }
     }
 
     // Looking at the journal.
@@ -1091,7 +1106,7 @@ mod tests {
     use crate::fake::{
         FakeSystem, ACTIVE_PLAN, BALANCED, HIGH_PERFORMANCE, MOUSE_LIVE, PROTECTION, SID,
     };
-    use crate::journal::{Folder, PlainFolder};
+    use crate::journal::{Folder, PlainFolder, RestoreOutcome};
     use crate::targets::{
         ALLOW_AUTO_GAME_MODE, ALLOW_GAME_DVR, APP_CAPTURE, AUTO_GAME_MODE, DIRECTX_KEY,
         DIRECTX_SETTINGS, GAME_BAR_KEY, GAME_DVR_KEY, GAME_DVR_POLICY_KEY, GPU_PREFERENCE_TOKEN,
@@ -4695,6 +4710,440 @@ mod tests {
         let rig = Rig::on(arranged());
         let preview = rig.engine.preview(&input(), &[PointerPrecision]);
         assert_eq!(preview.items[0].timing, Timing::Now);
+    }
+
+    // The report.
+
+    const REPORT_AT: &str = "2026-11-02T18:20:00+00:00";
+
+    fn report_of(engine: &Engine) -> String {
+        engine.report("0.5.0", 26200, REPORT_AT)
+    }
+
+    /// The lines under a heading of a report, without their indent.
+    fn under(report: &str, heading: &str) -> Vec<String> {
+        report
+            .lines()
+            .skip_while(|line| *line != heading)
+            .skip(1)
+            .take_while(|line| line.starts_with("  "))
+            .map(|line| line[2..].to_string())
+            .collect()
+    }
+
+    /// What the History says, newest first, without the times: the engine stamps its entries with the clock.
+    fn history_told(report: &str) -> Vec<String> {
+        under(report, "History")
+            .iter()
+            .map(|line| line.chars().skip(17).collect())
+            .collect()
+    }
+
+    /// What the Active list says, without the time.
+    fn active_told(report: &str) -> Vec<String> {
+        under(report, "Active")
+            .iter()
+            .map(|line| {
+                line.rsplit_once(" (")
+                    .map_or(line.as_str(), |(told, _)| told)
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    const NO_CHANGES_TEXT: &str =
+        "Kestrel report · Kestrel 0.5.0 · Windows build 26200 · 2026-11-02 18:20\nNo changes yet.";
+
+    #[test]
+    fn the_report_tells_what_apply_and_undo_did() {
+        let rig = Rig::on(arranged());
+        for id in [PowerPlan, GameMode, BackgroundRecording] {
+            assert!(rig.apply(id).ok, "{id:?}");
+        }
+        assert!(rig.undo(BackgroundRecording).ok);
+
+        let report = report_of(&rig.engine);
+
+        assert!(
+            report.starts_with(
+                "Kestrel report · Kestrel 0.5.0 · Windows build 26200 · 2026-11-02 18:20\nActive\n"
+            ),
+            "{report}"
+        );
+        assert_eq!(
+            active_told(&report),
+            [
+                "Game Mode: off → on",
+                "Kestrel power plan: Balanced → Kestrel"
+            ]
+        );
+        assert_eq!(
+            history_told(&report),
+            [
+                "Undid Background recording off: back to on",
+                "Applied Background recording off: on → off",
+                "Applied Game Mode: off → on",
+                "Applied Kestrel power plan: Balanced → Kestrel",
+            ]
+        );
+        // Each line has the real time of its entry, to the minute.
+        for line in under(&report, "History") {
+            let stamp: Vec<char> = line.chars().take(16).collect();
+            assert!(
+                stamp.iter().enumerate().all(|(at, c)| match at {
+                    4 | 7 => *c == '-',
+                    10 => *c == ' ',
+                    13 => *c == ':',
+                    _ => c.is_ascii_digit(),
+                }),
+                "{line}"
+            );
+        }
+        // The page would read the same after the next look.
+        rig.view();
+        assert_eq!(report_of(&rig.engine), report);
+    }
+
+    #[test]
+    fn the_report_tells_apply_again_and_a_change_that_didnt_take() {
+        let rig = Rig::on(arranged());
+        let refused = "Couldn't apply Game Mode: Windows refused the change";
+
+        // A first apply that Windows refused: it opened no record.
+        rig.pc.fail_write(AUTO_GAME_MODE);
+        assert!(!rig.apply(GameMode).ok);
+        rig.pc.clear_failures();
+        assert_eq!(
+            under(&report_of(&rig.engine), "Active"),
+            ["Nothing is active."]
+        );
+
+        assert!(rig.apply(GameMode).ok);
+        change_elsewhere(&rig.pc, GameMode);
+        // An apply again that Windows refused, which leaves the record as it was, and one that went through.
+        rig.pc.fail_write(AUTO_GAME_MODE);
+        assert!(!rig.engine.apply_again(&input(), GameMode).unwrap().ok);
+        rig.pc.clear_failures();
+        assert!(rig.engine.apply_again(&input(), GameMode).unwrap().ok);
+
+        let report = report_of(&rig.engine);
+
+        let told = history_told(&report);
+        assert_eq!(told.len(), 4, "{report}");
+        assert_eq!(told[0], "Applied Game Mode again");
+        assert!(told[1].starts_with(refused), "{}", told[1]);
+        assert_eq!(told[2], "Applied Game Mode: off → on");
+        assert!(told[3].starts_with(refused), "{}", told[3]);
+        // The record is the first apply's, however many times it was tried again.
+        assert_eq!(active_told(&report), ["Game Mode: off → on"]);
+    }
+
+    #[test]
+    fn the_report_doesnt_call_a_change_it_couldnt_put_back_a_success() {
+        // The read-back lies, and the key Kestrel made can't be deleted again: the change may still be on the PC.
+        let pc = FakeSystem::new();
+        pc.fail_write(DIRECTX_KEY);
+        let rig = Rig::on(pc);
+        rig.pc.lie_on_readback(DIRECTX_SETTINGS);
+        let item = rig.apply(WindowedOptimizations);
+        assert!(!item.ok);
+        let record = rig.open()[0].clone();
+
+        let report = report_of(&rig.engine);
+
+        assert_eq!(
+            history_told(&report),
+            [format!(
+                "Couldn't apply Optimizations for windowed games: {}",
+                item.message
+            )]
+        );
+        assert_eq!(
+            active_told(&report),
+            [format!(
+                "Optimizations for windowed games: {} → {}",
+                targets::describe(WindowedOptimizations, &record.prior),
+                targets::describe(WindowedOptimizations, &record.planned)
+            )]
+        );
+    }
+
+    #[test]
+    fn the_report_tells_a_crash_without_calling_it_a_success() {
+        // Cut short after the write: the next look settles it, and the report tells the interruption.
+        let rig = Rig::on(FakeSystem::new());
+        rig.pc.set_dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE, 1);
+        rig.left_by_an_earlier_run(&[game_mode_intent()]);
+        rig.view();
+
+        let report = report_of(&rig.engine);
+
+        assert_eq!(
+            under(&report, "History"),
+            ["2026-11-02 18:12 Kestrel was interrupted while applying Game Mode: off → on"]
+        );
+        assert_eq!(active_told(&report), ["Game Mode: off → on"]);
+
+        // Cut short during Apply again.
+        let rig = Rig::on(arranged());
+        rig.pc.set_dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE, 1);
+        rig.left_by_an_earlier_run(&[
+            game_mode_intent(),
+            outcome(GameMode, Some(SID)),
+            intent(GameMode, Some(SID), dword(2), dword(1)),
+        ]);
+        rig.view();
+
+        let report = report_of(&rig.engine);
+
+        assert_eq!(
+            under(&report, "History"),
+            [
+                "2026-11-02 18:12 Kestrel was interrupted while applying Game Mode again",
+                "2026-11-02 18:12 Applied Game Mode: off → on",
+            ]
+        );
+
+        // Cut short before the write: it never happened.
+        let rig = Rig::on(arranged());
+        rig.left_by_an_earlier_run(&[game_mode_intent()]);
+        rig.view();
+        assert_eq!(report_of(&rig.engine), NO_CHANGES_TEXT);
+    }
+
+    #[test]
+    fn the_report_tells_what_went_back_outside_kestrel() {
+        let rig = Rig::on(arranged());
+        assert!(rig.apply(GameMode).ok);
+        put_back_by_hand(&rig.pc, GameMode);
+        rig.view();
+
+        let report = report_of(&rig.engine);
+
+        assert_eq!(
+            history_told(&report),
+            [
+                "Game Mode went back outside Kestrel",
+                "Applied Game Mode: off → on"
+            ]
+        );
+        assert_eq!(under(&report, "Active"), ["Nothing is active."]);
+
+        let rig = Rig::on(arranged());
+        assert!(rig.apply(PowerPlan).ok);
+        rig.pc.set_active(BALANCED);
+        rig.pc.delete_plan(KESTREL).unwrap();
+        rig.view();
+
+        assert_eq!(
+            history_told(&report_of(&rig.engine)),
+            [
+                "Kestrel power plan was removed outside Kestrel",
+                "Applied Kestrel power plan: Balanced → Kestrel"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_report_says_which_plan_an_undo_went_back_to() {
+        // The plan that was in use before.
+        let rig = Rig::on(arranged());
+        rig.pc.add_plan(EXM, EXM_NAME);
+        rig.pc.set_active(EXM);
+        assert!(rig.apply(PowerPlan).ok);
+        assert!(rig.undo(PowerPlan).ok);
+        assert_eq!(
+            history_told(&report_of(&rig.engine)),
+            [
+                "Undid Kestrel power plan: Back to EXM Free Power Plan V8.",
+                "Applied Kestrel power plan: EXM Free Power Plan V8 → Kestrel"
+            ]
+        );
+
+        // That plan is gone, and Windows' Balanced took its place.
+        let rig = Rig::on(arranged());
+        rig.pc.add_plan(EXM, EXM_NAME);
+        rig.pc.set_active(EXM);
+        assert!(rig.apply(PowerPlan).ok);
+        rig.pc.delete_plan(EXM).unwrap();
+        assert!(rig.undo(PowerPlan).ok);
+        assert_eq!(
+            history_told(&report_of(&rig.engine))[0],
+            "Undid Kestrel power plan: Your previous plan is gone, so Kestrel switched to Balanced."
+        );
+
+        // Another plan was picked since: Undo removes Kestrel's and leaves that one in use.
+        let rig = Rig::on(arranged());
+        assert!(rig.apply(PowerPlan).ok);
+        rig.pc.set_active(HIGH_PERFORMANCE);
+        assert!(rig.undo(PowerPlan).ok);
+        assert_eq!(
+            history_told(&report_of(&rig.engine))[0],
+            "Undid Kestrel power plan: removed Kestrel's plan and left the plan in use alone"
+        );
+
+        // Use it again is the plan applied again.
+        let rig = Rig::on(arranged());
+        assert!(rig.apply(PowerPlan).ok);
+        rig.pc.set_active(BALANCED);
+        assert!(rig.engine.use_plan_again().unwrap().ok);
+        assert_eq!(
+            history_told(&report_of(&rig.engine)),
+            [
+                "Applied Kestrel power plan again",
+                "Applied Kestrel power plan: Balanced → Kestrel"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_report_has_the_restore_points_and_system_protection() {
+        let rig = Rig::on(arranged());
+        let mut entries = vec![Entry::RestorePoint {
+            at: WHEN.to_string(),
+            outcome: RestoreOutcome::Created { sequence: 57 },
+        }];
+        entries.extend(protection_record());
+        rig.left_by_an_earlier_run(&entries);
+
+        let report = report_of(&rig.engine);
+
+        assert_eq!(
+            under(&report, "History"),
+            [
+                "2026-11-02 18:12 Applied System Protection: off → on",
+                "2026-11-02 18:12 Restore point created (#57)"
+            ]
+        );
+        assert_eq!(
+            under(&report, "Active"),
+            ["System Protection: off → on (2026-11-02 18:12)"]
+        );
+    }
+
+    #[test]
+    fn the_report_reads_the_journal_and_nothing_else() {
+        // A PC that never applied has no folder to make, and nothing to write to.
+        let rig = Rig::on(arranged());
+        assert_eq!(report_of(&rig.engine), NO_CHANGES_TEXT);
+        assert!(!rig.folder().exists());
+        assert!(rig.pc.writes().is_empty());
+
+        // A crash's leftovers are what a look at the tab would settle in the journal. The report leaves them as they
+        // are: it doesn't judge them, and it doesn't write.
+        let rig = Rig::on(arranged());
+        rig.pc.set_dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE, 1);
+        rig.left_by_an_earlier_run(&[game_mode_intent()]);
+        let file = rig.folder().join("journal.jsonl");
+        let before = std::fs::read(&file).unwrap();
+        let dump = rig.pc.dump();
+
+        assert_eq!(report_of(&rig.engine), NO_CHANGES_TEXT);
+
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            before,
+            "the journal is as it was"
+        );
+        assert_eq!(rig.pc.dump(), dump);
+        assert!(rig.pc.writes().is_empty());
+        assert_eq!(
+            rig.engine
+                .view(&input(), Gate::Open)
+                .unwrap()
+                .interrupted
+                .len(),
+            1,
+            "the look at the tab is the one that settles it"
+        );
+
+        // It doesn't ask for the lock, either: with only the journal's own file written (which takes none), there is no
+        // lock file to find afterwards, and one that someone else holds doesn't stop it.
+        let rig = Rig::on(arranged());
+        std::fs::create_dir_all(rig.folder()).unwrap();
+        rig.journal().append(&game_mode_intent()).unwrap();
+        rig.journal().append(&outcome(GameMode, Some(SID))).unwrap();
+        let lock_file = rig.folder().join("journal.lock");
+        assert!(!lock_file.exists());
+
+        let report = report_of(&rig.engine);
+
+        assert!(!lock_file.exists(), "the report took the lock");
+        assert_eq!(
+            under(&report, "History"),
+            ["2026-11-02 18:12 Applied Game Mode: off → on"]
+        );
+        let held_elsewhere = rig.journal().lock().unwrap();
+        assert_eq!(report_of(&rig.engine), report);
+        drop(held_elsewhere);
+    }
+
+    #[test]
+    fn the_report_warns_of_lines_it_couldnt_read() {
+        let rig = Rig::on(arranged());
+        rig.left_by_an_earlier_run(&[game_mode_intent(), outcome(GameMode, Some(SID))]);
+        let file = rig.folder().join("journal.jsonl");
+
+        // A line cut short at the end of the file is no cause for alarm.
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str(r#"{"v":1,"kind":"outc"#);
+        std::fs::write(&file, &text).unwrap();
+        let report = report_of(&rig.engine);
+        assert!(!report.contains("couldn't be read"), "{report}");
+
+        // One in the middle is.
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines.insert(1, "this is not a line of the journal");
+        lines.pop();
+        std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+        let report = report_of(&rig.engine);
+        assert_eq!(
+            report.lines().last(),
+            Some("Part of Kestrel's history couldn't be read.")
+        );
+        assert_eq!(rig.view().unreadable_lines, 1);
+        assert_eq!(
+            history_told(&report),
+            ["Applied Game Mode: off → on"],
+            "what could be read is still told"
+        );
+    }
+
+    #[test]
+    fn a_journal_that_cant_be_read_is_told_and_not_taken_for_an_empty_one() {
+        let rig = Rig::on(arranged());
+        rig.left_by_an_earlier_run(&[]);
+        std::fs::create_dir(rig.folder().join("journal.jsonl")).unwrap();
+
+        let report = report_of(&rig.engine);
+
+        assert_eq!(report.lines().count(), 2, "{report}");
+        assert!(
+            report.starts_with(
+                "Kestrel report · Kestrel 0.5.0 · Windows build 26200 · 2026-11-02 18:20\n"
+            ),
+            "{report}"
+        );
+        assert!(
+            report
+                .lines()
+                .nth(1)
+                .unwrap()
+                .starts_with("Kestrel's history couldn't be read: "),
+            "{report}"
+        );
+        assert!(!report.contains("No changes yet."));
+
+        // A folder the journal's check refuses is the same.
+        let rig = Rig::on(arranged());
+        let refusing = hooked_journal(&rig.folder(), |_| {
+            Err(io::Error::other("not a trusted folder"))
+        });
+        let report = Engine::new(rig.pc.clone(), refusing).report("0.5.0", 26200, REPORT_AT);
+        assert_eq!(
+            report,
+            "Kestrel report · Kestrel 0.5.0 · Windows build 26200 · 2026-11-02 18:20\nKestrel's history couldn't be read: not a trusted folder"
+        );
     }
 
     // How the page reads them.
