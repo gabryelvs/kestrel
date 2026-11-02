@@ -306,7 +306,7 @@ git commit -m "feat(probe): name the signed-in account and read its settings"
 - Consumes: `TweakId`, `Account`.
 - Produces: `Read<T>`, `System`, `Impact`, `Timing`, `Info`, `info` (shared contract). `tokens::get(string: &str, name: &str) -> Option<String>`, `tokens::set(string: &str, name: &str, value: &str) -> String`, `tokens::remove(string: &str, name: &str) -> String`. `fake::FakeSystem`: `new()` (signed-in and process SID `S-1-5-21-1-2-3-1001`, plans Balanced, High performance, Power saver, active Balanced, Modern Standby false, protection Ready, mouse live `[6, 10, 1]`), `set_dword`/`dword`, `set_string`/`string`, `add_plan(guid, name)`, `set_active`, `plans()`, `set_account`, `fail_write(name)`, `fail_read(name)`, `fail_duplicate(guid)`, `fail_activate(guid)`, `lie_on_readback(name)`, `set_plan_range`, `dump()` returning a comparable snapshot of everything.
 
-Dependencies: `chrono` (`std`, `clock`), `kestrel-core`, `kestrel-probe`, `serde`, `serde_json`; dev `tempfile`; Windows-only `windows-sys`, `winreg`, `wmi` added in Tasks 9 and 10. Catalog titles: "Kestrel power plan", "Game Mode", "Background recording off", "Optimizations for windowed games", "GPU preference", "Enhance pointer precision off", "System Protection". Impact and timing per the spec's Essential table; GPU preference is `High`; `PowerPlan` is `Low`; `PointerPrecision` is `NoneInGame`; `WindowedOptimizations` is `Situational`; `GameMode` and `BackgroundRecording` are `Medium`.
+Dependencies: `chrono` (`std`, `clock`), `kestrel-core` and `kestrel-probe` by path only, `serde`, `serde_json`; dev `tempfile`; Windows-only `windows-sys`, `winreg`, `wmi` added in Tasks 9 and 10. Catalog titles: "Kestrel power plan", "Game Mode", "Background recording off", "Optimizations for windowed games", "GPU preference", "Enhance pointer precision off", "System Protection". Impact and timing per the spec's Essential table; GPU preference is `High`; `PowerPlan` is `Low`; `PointerPrecision` is `NoneInGame`; `WindowedOptimizations` is `Situational`; `GameMode` and `BackgroundRecording` are `Medium`.
 
 - [ ] **Step 1: Write the failing tests in `tokens.rs`**
 
@@ -432,7 +432,7 @@ pub fn target(tweak: TweakId, prior: &Saved) -> Saved;     // what Kestrel write
 pub fn write(sys: &dyn System, tweak: TweakId, sid: &str, value_name: Option<&str>, value: &Saved, accounts_differ: bool) -> io::Result<()>;
 pub fn restore(sys: &dyn System, tweak: TweakId, sid: &str, value_name: Option<&str>, prior: &Saved, accounts_differ: bool) -> io::Result<()>;
 pub fn same_meaning(tweak: TweakId, a: &Saved, b: &Saved) -> bool;
-pub fn describe(tweak: TweakId, value: &Saved) -> String;  // "on", "off", "High performance", "Windows decides", "Power saving", "not set"
+pub fn describe(tweak: TweakId, value: &Saved) -> String;  // every Saved variant: "on", "off", "High performance", "Windows decides", "Power saving", "not set", a plan's name
 pub fn gpu_value_name(sys: &dyn System, sid: &str, exe: &str) -> Read<String>; // the existing value's own spelling, else `exe`
 // plan.rs
 pub fn setting_row(sys: &dyn System, input: &PlanInput, id: TweakId, sid: Option<&str>, open: Option<&OpenRecord>) -> Option<Row>; // None: hidden (windowed below 22621)
@@ -521,7 +521,8 @@ pub const KESTREL_PLAN_GUID: &str = "4b455354-524c-4e50-a1b2-c3d4e5f60705";
 pub enum Variant { Full, Light, NotOffered }
 pub fn variant(input: &PlanInput, modern_standby: Option<bool>) -> Variant;
 pub fn row(sys: &dyn System, input: &PlanInput, open: Option<&OpenRecord>) -> Row;
-pub fn create_and_activate(sys: &dyn System, input: &PlanInput) -> Result<Saved, String>;   // returns the prior as Saved::Plan; rolls back on failure
+pub fn prior(sys: &dyn System) -> Read<Saved>;                                              // the active plan as Saved::Plan, for the journal's intent
+pub fn create_and_activate(sys: &dyn System, input: &PlanInput) -> Result<(), String>;      // rolls back on failure
 pub fn preview(sys: &dyn System, input: &PlanInput) -> PreviewItem;
 pub fn undo(sys: &dyn System, prior: &Saved) -> Result<String, String>;                    // Ok(message); Balanced fallback is named in it
 pub fn remove(sys: &dyn System) -> Result<(), String>;                                     // deletes Kestrel's plan only when it isn't active
@@ -550,8 +551,8 @@ Row text (`why`):
 #[test] fn variant_by_pc() { /* desktop one core type: Full. Laptop, Unknown form factor, hybrid_cpu, modern_standby Some(true): Light. "AMD Ryzen 9 9950X3D": NotOffered. "AMD Ryzen 7 9800X3D" desktop: Full */ }
 // One test per row of the table above, asserting (state, ticked, why), with the plan names "Balanced" and "EXM Free Power Plan V8".
 #[test] fn full_writes_all_three_on_a_high_performance_copy() {
-    // fake: active EXM. create_and_activate: duplicate_plan(HIGH_PERFORMANCE, KESTREL); values 100, 0, 0; name "Kestrel"; active == KESTREL;
-    // the returned prior is Plan { guid of EXM, name "EXM Free Power Plan V8" }; EXM's plan still exists.
+    // fake: active EXM. prior() is Plan { guid of EXM, name "EXM Free Power Plan V8" }.
+    // create_and_activate: duplicate_plan(HIGH_PERFORMANCE, KESTREL); values 100, 0, 0; name "Kestrel"; active == KESTREL; EXM's plan still exists.
 }
 #[test] fn light_leaves_parking_alone_on_a_balanced_copy() { /* base Balanced; USB and ASPM written; CPMINCORES not written */ }
 #[test] fn values_are_clamped_to_the_machines_range() { /* plan_value_range(parking) = (0, 50): writes 50 */ }
@@ -597,12 +598,12 @@ git commit -m "feat(tweaks): the Kestrel power plan, its variants and its undo"
 
 **Interfaces:**
 - Consumes: Tasks 3–6.
-- Produces: `Gate`, `TweaksView`, `PreviewView`, `ItemOutcome`, `Engine` (shared contract).
+- Produces: `Gate`, `TweaksView`, `PreviewView`, `ItemOutcome`, `Engine` (shared contract), except `Engine::report` (Task 8) and `Engine::turn_protection_on` and `Engine::record_restore` (Task 10). SystemProtection records are handled here; tests hand-write them in the journal.
 
 Behaviour, from the spec's "How changes are recorded":
 
-- **Apply, per item:** under the journal lock, read the current value; if the row isn't Available or ChangedElsewhere, skip it with `ok: false`, "Already set." A failed read gives `ok: false` and writes nothing. Append and flush the `Intent`; write; read back; if the read-back's meaning differs from the target, restore the prior when the value changed, append `Outcome{applied:false, detail}`, and report the reason. Otherwise append `Outcome{applied:true}`. One failure doesn't stop the others. `PowerPlan` uses `power::create_and_activate`, whose intent carries the prior `Saved::Plan` and planned `Saved::Plan { guid: KESTREL, name: "Kestrel" }`.
-- **Reconcile**, at the start of `view`, `applied_ids` and `has_open_records`: for each open record of the signed-in account or machine-wide, compare the current value. Settled: current = prior closes with `Closed{WentBack}`. Unsettled (crash): current = planned appends `Outcome{applied:true, interrupted:true}`; current = prior appends `Closed{NotApplied}`; otherwise `Outcome{applied:true, interrupted:true}` so the row flags it. Each unsettled record adds a line to `interrupted`, such as "Kestrel was interrupted while changing Game Mode. It finished." or "... It didn't change." These stay in memory until the app closes. A journal write failing during reconcile is ignored: the next read tries again. A plan record stays open while Kestrel's plan exists; if the plan is gone it closes with `PlanRemovedElsewhere`.
+- **Apply, per item:** under the journal lock, read the current value; if the row isn't Available or ChangedElsewhere, skip it with `ok: false`, "Already set." A failed read gives `ok: false` and writes nothing. Append and flush the `Intent`; write; read back; if the read-back's meaning differs from the target, restore the prior when the value changed, append `Outcome{applied:false, detail}`, and report the reason. Otherwise append `Outcome{applied:true}`. One failure doesn't stop the others. `PowerPlan` follows the same order: `power::prior`, the intent with planned `Saved::Plan { guid: KESTREL, name: "Kestrel" }`, then `power::create_and_activate`.
+- **Reconcile**, at the start of `view`, `applied_ids` and `has_open_records`: for each open record of the signed-in account or machine-wide, compare the current value. Settled: current = prior closes with `Closed{WentBack}`. Unsettled (crash): current = planned appends `Outcome{applied:true, interrupted:true}`; current = prior appends `Closed{NotApplied}`; otherwise `Outcome{applied:true, interrupted:true}` so the row flags it. Each unsettled record adds a line to `interrupted`, such as "Kestrel was interrupted while changing Game Mode. It finished." or "... It didn't change." These stay in memory until the app closes. A journal write failing during reconcile is ignored: the next read tries again. **Plan records differ:** settled, the record stays open while Kestrel's plan exists, even with the old plan active, and closes with `PlanRemovedElsewhere` once it's gone. Unsettled with no Kestrel plan on disk: `Closed{NotApplied}`. Unsettled with the plan on disk: `Outcome{applied:true, interrupted:true}`, whichever plan is active.
 - **Undo:** the three-way check. Current = planned: restore, then `Undone`. Current = prior: `Closed{WentBack}`, `ok: true`. Otherwise: `ok: false`, "Something else changed this after Kestrel did. Kestrel left it alone." `PowerPlan` with Kestrel's plan active uses `power::undo`, and with another plan active it's `remove_plan`. `SystemProtection` calls `turn_protection_off`.
 - **Revert everything:** open records of this account and machine-wide, newest first, skipping `SystemProtection` and ChangedElsewhere rows; an inactive Kestrel plan is removed. Rows left alone come back with `ok: false`.
 - **Apply again:** writes the target, appends `Reapplied`, keeps the first prior. **Restore anyway:** writes the prior whatever holds now, appends `Undone`.
@@ -737,7 +738,7 @@ Registry: only `ERROR_FILE_NOT_FOUND` maps to `Read::Absent`. A value of the wro
 
 Round trip, `kestrel-tweak-roundtrip --yes-change-this-machine` (without the flag it prints what it would do and exits 2; off Windows it prints "Windows only" and exits 0):
 
-1. Use `account().signed_in`, falling back to `this_process`, and print which. Save raw copies of every value below, the active plan and the plan list.
+1. Use `account().signed_in`; when it's None, build the system with `WinSystem::with_signed_in(this_process)`, a constructor only this binary uses. Print which. Save raw copies of every value below, the active plan and the plan list.
 2. Arrange: `AutoGameModeEnabled`=0, `HistoricalCaptureEnabled`=1, mouse acceleration on with strings `1/6/10`, no `SwapEffectUpgradeEnable` token, and `DirectXUserGlobalSettings` holding `VRROptimizeEnable=1;`. Take the arranged state as `before`.
 3. `PlanInput`: desktop, one core type, `gpu_choice: true`, `valorant_exe: Some(r"C:\KestrelRoundTrip\VALORANT-Win64-Shipping.exe")`, `fullscreen_mode: Some(1)`, this machine's build.
 4. `Engine::apply` all six; assert every `ok`. Read the raw values and assert each target. Assert the active plan is `KESTREL_PLAN_GUID` with the three values read back.
@@ -812,6 +813,7 @@ pub const HELPER_TIMEOUT: Duration = Duration::from_secs(180);
 /// Runs in the short-lived helper process, on Windows: prints one line of RestoreOutcome JSON to stdout. Exit code 0.
 pub fn helper_main() -> i32;
 /// Runs in the app: spawns `exe --restore-point`, waits up to HELPER_TIMEOUT, kills it past that, parses its line.
+/// Off Windows it returns Skipped without spawning anything.
 pub fn run_helper(exe: &Path) -> RestoreOutcome;
 ```
 
