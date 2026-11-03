@@ -30,8 +30,9 @@ fn only_system_and_app_dlls() {
     use windows_sys::Win32::System::LibraryLoader::{
         SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
     };
-    // SAFETY: takes flags only and changes how this process looks for DLLs from now on. If it fails (Windows without
-    // the update that added it), the process keeps Windows' usual search order, which is how it ran before.
+    // SAFETY: takes flags only and changes how this process looks for DLLs from now on. It is a load-time import of
+    // kernel32, so it is there or Kestrel.exe doesn't start, and the only way it can return FALSE is flags it
+    // rejects; these are fixed and valid, so the result isn't looked at.
     unsafe {
         SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR)
     };

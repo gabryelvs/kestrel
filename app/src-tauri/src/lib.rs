@@ -3,10 +3,10 @@
 //! of the undo buttons; anything else it writes stays inside its own folders.
 use chrono::NaiveDate;
 use kestrel_core::topology::CoreClock;
-use kestrel_core::Report;
+use kestrel_core::{Report, SystemSnapshot};
 use kestrel_probe::clocks::ClockSampler;
 use kestrel_probe::load::{LoadSample, LoadSampler};
-use kestrel_tweaks::{Engine, System};
+use kestrel_tweaks::Engine;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::ShortcutState;
@@ -32,6 +32,12 @@ struct AppState {
 }
 
 impl AppState {
+    /// The last scan's snapshot, or None before there has been one.
+    fn cached_snapshot(&self) -> Result<Option<SystemSnapshot>, String> {
+        let report = self.report.lock().map_err(|e| e.to_string())?;
+        Ok(report.as_ref().map(|r| r.snapshot.clone()))
+    }
+
     /// The Windows build the last scan saw, or 0 before there has been one: the Kestrel report names it.
     fn build(&self) -> u32 {
         self.report
@@ -78,6 +84,17 @@ pub(crate) async fn latest_report(app: &AppHandle) -> Result<Report, String> {
     get_report(app.state::<AppState>(), app.state::<Controller>()).await
 }
 
+/// The last scan's snapshot, scanning first if there hasn't been one. For what only needs the PC as it was seen:
+/// `latest_report` also reads every saved benchmark again and rebuilds the findings and the score, which the tweaks
+/// have no use for.
+pub(crate) async fn latest_snapshot(app: &AppHandle) -> Result<SystemSnapshot, String> {
+    let cached = app.state::<AppState>().cached_snapshot()?;
+    match cached {
+        Some(snapshot) => Ok(snapshot),
+        None => Ok(latest_report(app).await?.snapshot),
+    }
+}
+
 /// One live-load reading; the UI polls this about once a second.
 // Keep `async`: the PDH and NVML reads must stay off the UI thread.
 #[tauri::command(async)]
@@ -103,7 +120,6 @@ fn get_diagnostics(
     state: State<'_, AppState>,
     bench: State<'_, Controller>,
     engine: State<'_, Arc<Engine>>,
-    pc: State<'_, Arc<dyn System>>,
 ) -> Result<String, String> {
     let report = state
         .report
@@ -118,7 +134,7 @@ fn get_diagnostics(
         "valorantSettings": bench.game_settings(),
         // An owned snapshot: no platform call, and the controller's lock is released before this is serialised.
         "benchSession": bench.state(),
-        "tweaks": tweaks::diagnostics(&engine, &**pc, build),
+        "tweaks": tweaks::diagnostics(&engine, build),
     });
     serde_json::to_string_pretty(&diagnostics).map_err(|e| e.to_string())
 }
@@ -165,10 +181,12 @@ pub fn run() {
             });
             app.manage(commands::controller(app.handle())?);
             // Building the engine touches nothing, on the PC or in the journal's folder: the first command that needs
-            // them is the one that finds a missing or refused folder.
-            let pc = kestrel_tweaks::this_pc();
-            app.manage(tweaks::engine(pc.clone(), kestrel_tweaks::journal_file()));
-            app.manage(pc);
+            // them is the one that finds a missing or refused folder. It is also the only way the app reaches the PC's
+            // settings, so nothing changes them past the journal and the gate.
+            app.manage(tweaks::engine(
+                kestrel_tweaks::this_pc(),
+                kestrel_tweaks::journal_file(),
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -219,6 +237,14 @@ mod tests {
             load: Mutex::new(LoadSampler::new()),
             clocks: Mutex::new(ClockSampler::new()),
         }
+    }
+
+    #[test]
+    fn the_cached_snapshot_is_the_last_scans_and_there_is_none_before_one() {
+        assert_eq!(state(None).cached_snapshot(), Ok(None));
+        let report = kestrel_core::build_report(kestrel_core::owner_pc_fixture(), today(), VERSION);
+        let snapshot = report.snapshot.clone();
+        assert_eq!(state(Some(report)).cached_snapshot(), Ok(Some(snapshot)));
     }
 
     #[test]

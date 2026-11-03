@@ -13,14 +13,16 @@ use kestrel_tweaks::journal::JournalFile;
 use kestrel_tweaks::{Engine, Gate, System};
 
 /// Whether tweaks may change Windows now, and if not, what they wait for. A benchmark that is armed comes first: it
-/// wants the PC as it is, whether or not the game is open yet.
-pub fn gate(game_running: bool, session_active: bool) -> Gate {
+/// wants the PC as it is, whether or not the game is open yet. `game_running` is `None` when the list of processes
+/// couldn't be read, and that is a closed gate too: not being able to see the game is not the game being closed.
+pub fn gate(game_running: Option<bool>, session_active: bool) -> Gate {
     if session_active {
-        Gate::BenchmarkActive
-    } else if game_running {
-        Gate::GameRunning
-    } else {
-        Gate::Open
+        return Gate::BenchmarkActive;
+    }
+    match game_running {
+        Some(true) => Gate::GameRunning,
+        Some(false) => Gate::Open,
+        None => Gate::CantTell,
     }
 }
 
@@ -31,12 +33,16 @@ pub fn require_open(state: Gate) -> Result<(), String> {
         Gate::Open => Ok(()),
         Gate::GameRunning => Err("Close VALORANT first.".to_string()),
         Gate::BenchmarkActive => Err("Finish the benchmark first.".to_string()),
+        Gate::CantTell => {
+            Err("Kestrel couldn't check whether VALORANT is open. Try again.".to_string())
+        }
     }
 }
 
-/// Whether VALORANT is running, found by process name the way the benchmark finds it. Nothing opens its process.
-pub(crate) fn game_running() -> bool {
-    kestrel_probe::process::game_running(kestrel_bench::VALORANT.process_name)
+/// Whether VALORANT is running, found by process name the way the benchmark finds it, or None when the list of
+/// processes couldn't be read (the benchmark takes that for "no"; the gate doesn't). Nothing opens its process.
+pub(crate) fn game_listed() -> Option<bool> {
+    kestrel_probe::process::game_listed(kestrel_bench::VALORANT.process_name)
 }
 
 /// The engine for a PC and its journal. It touches neither, so `setup` can build it before the window exists and a
@@ -63,12 +69,13 @@ pub(crate) fn report_text(engine: &Engine, build: u32) -> String {
 
 /// What Copy diagnostics adds under `"tweaks"`: the report, whether Kestrel runs as another account than the one at
 /// the screen, and what System Protection reads (as `Readiness` is written: `"ready"`, `"protection-off"`,
-/// `"blocked-by-policy"` or `"unknown"`), so a test on a real PC shows the state without a `reg query`.
-pub fn diagnostics(engine: &Engine, pc: &dyn System, build: u32) -> serde_json::Value {
+/// `"blocked-by-policy"` or `"unknown"`), so a test on a real PC shows the state without a `reg query`. The engine
+/// only reads for both.
+pub fn diagnostics(engine: &Engine, build: u32) -> serde_json::Value {
     serde_json::json!({
         "report": report_text(engine, build),
-        "accountsDiffer": pc.account().differs(),
-        "systemProtection": pc.protection(),
+        "accountsDiffer": engine.accounts_differ(),
+        "systemProtection": engine.protection(),
     })
 }
 
@@ -112,10 +119,20 @@ mod tests {
 
     #[test]
     fn the_gate_names_the_benchmark_first() {
-        assert_eq!(gate(true, true), Gate::BenchmarkActive);
-        assert_eq!(gate(true, false), Gate::GameRunning);
-        assert_eq!(gate(false, true), Gate::BenchmarkActive);
-        assert_eq!(gate(false, false), Gate::Open);
+        assert_eq!(gate(Some(true), true), Gate::BenchmarkActive);
+        assert_eq!(gate(Some(true), false), Gate::GameRunning);
+        assert_eq!(gate(Some(false), false), Gate::Open);
+        assert_eq!(gate(Some(false), true), Gate::BenchmarkActive);
+    }
+
+    #[test]
+    fn a_process_list_that_cant_be_read_is_not_an_open_gate() {
+        assert_eq!(gate(None, false), Gate::CantTell);
+        assert_eq!(
+            gate(None, true),
+            Gate::BenchmarkActive,
+            "the benchmark is still named first"
+        );
     }
 
     #[test]
@@ -128,6 +145,10 @@ mod tests {
         assert_eq!(
             require_open(Gate::BenchmarkActive),
             Err("Finish the benchmark first.".to_string())
+        );
+        assert_eq!(
+            require_open(Gate::CantTell),
+            Err("Kestrel couldn't check whether VALORANT is open. Try again.".to_string())
         );
     }
 
@@ -177,7 +198,7 @@ mod tests {
             JournalFile::new(tmp.path().join("Kestrel"), Box::new(PlainFolder)),
         );
 
-        let tweaks = diagnostics(&built, &*pc, 26200);
+        let tweaks = diagnostics(&built, 26200);
 
         let header = format!(
             "Kestrel report · Kestrel {} · Windows build 26200 · ",
@@ -200,15 +221,15 @@ mod tests {
             (Readiness::Ready, "ready"),
         ] {
             pc.set_protection(readiness);
-            assert_eq!(diagnostics(&built, &*pc, 26200)["systemProtection"], name);
+            assert_eq!(diagnostics(&built, 26200)["systemProtection"], name);
         }
         pc.set_account(Account {
             signed_in: Some(SID.to_string()),
             this_process: Some("S-1-5-21-1-2-3-1002".to_string()),
         });
-        assert_eq!(diagnostics(&built, &*pc, 26200)["accountsDiffer"], true);
+        assert_eq!(diagnostics(&built, 26200)["accountsDiffer"], true);
         // Before a scan the build is 0, and the report still reads.
-        assert!(diagnostics(&built, &*pc, 0)["report"]
+        assert!(diagnostics(&built, 0)["report"]
             .as_str()
             .unwrap()
             .contains("Windows build 0 · "));

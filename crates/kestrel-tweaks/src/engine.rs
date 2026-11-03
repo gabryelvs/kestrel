@@ -70,6 +70,9 @@ pub enum Gate {
     Open,
     GameRunning,
     BenchmarkActive,
+    /// The app couldn't tell whether the game is open. That is a closed gate, not an open one: nothing is changed on a
+    /// guess.
+    CantTell,
 }
 
 /// What the Tweaks tab shows.
@@ -482,6 +485,16 @@ impl Engine {
             })
             .map(|record| record.tweak.as_str().to_string())
             .collect()
+    }
+
+    /// Whether Kestrel runs as another account than the one at the screen. It only reads, for Copy diagnostics.
+    pub fn accounts_differ(&self) -> bool {
+        self.system.account().differs()
+    }
+
+    /// What System Protection reads on the Windows drive. It only reads, for Copy diagnostics.
+    pub fn protection(&self) -> Readiness {
+        self.system.protection()
     }
 
     /// Whether any account has a change open, after settling the journal. The answer is the file's, not the settling's:
@@ -4810,7 +4823,12 @@ mod tests {
     #[test]
     fn the_view_passes_the_gate_on_and_lists_the_essential_rows_in_order() {
         let rig = Rig::on(arranged());
-        for gate in [Gate::Open, Gate::GameRunning, Gate::BenchmarkActive] {
+        for gate in [
+            Gate::Open,
+            Gate::GameRunning,
+            Gate::BenchmarkActive,
+            Gate::CantTell,
+        ] {
             let view = rig.engine.view(&input(), gate).unwrap();
             assert_eq!(view.gate, gate);
             assert_eq!(
@@ -4896,6 +4914,23 @@ mod tests {
         put_back_by_hand(&rig.pc, GameMode);
         assert!(!rig.engine.has_open_records(), "that was the last of them");
         assert_eq!(rig.story().last().unwrap(), "closed game-mode WentBack");
+    }
+
+    #[test]
+    fn the_accounts_and_system_protection_can_be_read_and_reading_writes_nothing() {
+        let rig = Rig::on(arranged());
+        assert!(!rig.engine.accounts_differ());
+        assert_eq!(rig.engine.protection(), Readiness::Ready);
+        rig.pc.set_protection(Readiness::ProtectionOff);
+        assert_eq!(rig.engine.protection(), Readiness::ProtectionOff);
+        rig.pc.set_protection(Readiness::BlockedByPolicy);
+        assert_eq!(rig.engine.protection(), Readiness::BlockedByPolicy);
+        assert!(rig.pc.writes().is_empty());
+        assert!(!rig.folder().exists(), "and not even the journal's folder");
+
+        let differing = Rig::on(with_differing_accounts(arranged()));
+        assert!(differing.engine.accounts_differ());
+        assert!(differing.pc.writes().is_empty());
     }
 
     // The Preview.
@@ -5799,6 +5834,7 @@ History
             (Gate::Open, "open"),
             (Gate::GameRunning, "game-running"),
             (Gate::BenchmarkActive, "benchmark-active"),
+            (Gate::CantTell, "cant-tell"),
         ] {
             let json = serde_json::to_string(&gate).unwrap();
             assert_eq!(json, format!("\"{text}\""));
