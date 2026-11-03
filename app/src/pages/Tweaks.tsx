@@ -16,6 +16,7 @@ import { RestoreStep } from '../components/tweaks/RestoreStep';
 import { RevertConfirm } from '../components/tweaks/RevertConfirm';
 import { TweakRow, type RowActions } from '../components/tweaks/TweakRow';
 import type { Tab } from '../components/TitleBar';
+import { planNoteSeen, planNoteWanted } from '../first-run/flag';
 import { STAGE, strings } from '../strings';
 
 const t = strings.tweaks;
@@ -37,6 +38,8 @@ export type Handlers = RowActions & {
   revert: () => void;
   benchmark: () => void;
   retry: () => void;
+  /** Not now on the first-run note: the note is done with, and the person goes Home. */
+  notNow: () => void;
 };
 
 type BodyProps = {
@@ -48,6 +51,8 @@ type BodyProps = {
   measure: MeasureNote | null;
   choices: Choices;
   flow: Flow;
+  /** The one-time note for a person whose first run ended here is still owed. It goes above everything and blocks nothing. */
+  firstRunNote: boolean;
   on: Handlers;
 };
 
@@ -102,10 +107,11 @@ function Slot({ stepKey, children }: { stepKey: string; children: ReactNode }) {
 }
 
 /**
- * The page once the view is read: notes, the Essential rows, the tiers to come, the buttons with the reason when Apply can't
- * run, the step Apply or an undo is at, and the report. It holds no state of its own, so a test can put any view in it.
+ * The page once the view is read: notes (the first-run one first), the Essential rows, the tiers to come, the buttons with the
+ * reason when Apply can't run, the step Apply or an undo is at, and the report. It holds no state of its own, so a test can put any
+ * view in it.
  */
-export function TweaksBody({ view, stale, report, measure, choices, flow: asked, on }: BodyProps) {
+export function TweaksBody({ view, stale, report, measure, choices, flow: asked, firstRunNote, on }: BodyProps) {
   // A question about a row that is no longer what it asked about is over: it can't be answered, and it would lock the page.
   const flow = currentFlow(asked, view.rows);
   // A closed gate, or rows that may be out of date: nothing that changes the PC may be pressed, and the reason stands beside the buttons.
@@ -117,6 +123,12 @@ export function TweaksBody({ view, stale, report, measure, choices, flow: asked,
   const panel = flowPanel(flow, view, on);
   return (
     <>
+      {firstRunNote && (
+        <div className="notice plan-note cut-s">
+          <p>{t.firstRunNote}</p>
+          <button className="btn btn-ghost btn-small cut-s" onClick={on.notNow}>{t.notNow}</button>
+        </div>
+      )}
       {measure && (
         <div className="notice cut-s measure">
           <p>{measureText(measure)}</p>
@@ -218,6 +230,8 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
   const [measure, setMeasure] = useState<MeasureNote | null>(null);
   const [choices, setChoices] = useState<Choices>({});
   const [flow, setFlow] = useState<Flow>({ step: 'idle' });
+  // A new person's first run ends at this tab (first-run/flag.ts). Read when the tab opens; it goes when it is answered or the plan is applied.
+  const [firstRunNote, setFirstRunNote] = useState(planNoteWanted);
   const newest = useRef(0);
 
   /**
@@ -258,6 +272,12 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
   }, [rereads, reload]);
 
   const rows = load.state === 'ready' ? load.view.rows : [];
+
+  /** The first-run note has done its job: not asked for again, and gone from the page. */
+  const noteDone = () => {
+    planNoteSeen();
+    setFirstRunNote(false);
+  };
 
   /** A command was refused or failed: say so where the person pressed, read the page again, and leave nothing spinning. */
   const fail = async (error: unknown, where: { id?: TweakId; settings?: Settings } = {}) => {
@@ -303,6 +323,9 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
         if (next.question.kind === 'failed') void reload();
         return;
       case 'applied':
+        // The plan went to the engine, whatever each item came to: the note has done its job. A question, a refusal or a Cancel never
+        // gets here, so they leave it up. Every way into Apply (Apply, Turn on and create, Continue) ends in this one place.
+        noteDone();
         await reload();
         setChoices((current) =>
           forgetChoices(
@@ -377,7 +400,11 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
       if (load.state === 'failed') setLoad({ state: 'loading' });
       void reload();
     },
+    notNow: () => {
+      noteDone();
+      onTab('home');
+    },
   };
 
-  return <TweaksPage load={load} report={report} measure={measure} choices={choices} flow={flow} on={on} />;
+  return <TweaksPage load={load} report={report} measure={measure} choices={choices} flow={flow} firstRunNote={firstRunNote} on={on} />;
 }

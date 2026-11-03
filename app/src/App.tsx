@@ -4,7 +4,7 @@ import { quietRescan } from './api/rescan';
 import type { BiosTopic, Report, TweakId } from './api/types';
 import { Banner } from './components/Banner';
 import { TitleBar, type Tab } from './components/TitleBar';
-import { FirstRun } from './first-run/FirstRun';
+import { FirstRun, type FirstRunNext } from './first-run/FirstRun';
 import { firstRunDone, markFirstRunDone } from './first-run/flag';
 import { Benchmark } from './pages/Benchmark';
 import { ComingSoon } from './pages/ComingSoon';
@@ -83,7 +83,7 @@ export function App() {
     setTab(next);
   };
 
-  const finishFirstRun = (report: Report, next: 'home' | 'benchmark') => {
+  const finishFirstRun = (report: Report, next: FirstRunNext) => {
     markFirstRunDone();
     setScan({ state: 'ready', report });
     setFirstRun(false);
@@ -116,7 +116,7 @@ export function App() {
           {report && tab === 'toolbox' && <Toolbox guide={report.guide} focus={guideTopic} appVersion={report.appVersion} />}
           {report && tab === 'tweaks' && <Tweaks focus={tweakFocus} onFocusUsed={() => setTweakFocus(null)} onRescan={rescanQuietly} onTab={chooseTab} />}
           {report && tab === 'lockIn' && <ComingSoon {...strings.comingSoon.lockIn} />}
-          {report && tab === 'benchmark' && <Benchmark />}
+          {report && tab === 'benchmark' && <Benchmark onTab={chooseTab} />}
         </main>
       )}
     </div>

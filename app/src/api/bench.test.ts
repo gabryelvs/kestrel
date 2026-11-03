@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { canStartRun, contextRows, flagText, graphShape, metricText, passLabel, pct, sessionHeadline, settingsText, spreadText, tweakList, tweakName, variesTooMuch, verdictTone } from './bench';
+import {
+  canStartRun, contextRows, flagText, graphShape, metricText, passLabel, pct, sessionHeadline, settingsText, showsSeeYourPlan, spreadText, tweakList, tweakName, variesTooMuch,
+  verdictTone,
+} from './bench';
 import type { BenchContext, BenchState, ValorantSettings } from './types';
 
 const base: BenchState = {
@@ -116,6 +119,16 @@ describe('bench helpers', () => {
       expect(canStartRun({ ...base, startMode, phase: 'failed', message: 'x' })).toBe(false);
       expect(canStartRun({ ...base, startMode, phase: 'cancelled' })).toBe(false);
     }
+  });
+
+  it('offers See your plan on the first saved benchmark only, and only while the plan note is wanted', () => {
+    expect(showsSeeYourPlan(1, true)).toBe(true);
+    // Nothing saved yet, or the list is not read yet: there is no result to put it on.
+    expect(showsSeeYourPlan(0, true)).toBe(false);
+    // The second result and every later one.
+    for (const saved of [2, 3, 20]) expect(showsSeeYourPlan(saved, true), `${saved} saved`).toBe(false);
+    // The first run was done before the note existed, or the note was seen: nobody is led anywhere.
+    for (const saved of [0, 1, 2, 20]) expect(showsSeeYourPlan(saved, false), `${saved} saved, not wanted`).toBe(false);
   });
 
   it('scales the frame-time graph to its slowest frame', () => {

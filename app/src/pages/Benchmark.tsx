@@ -1,14 +1,22 @@
 import { useCallback, useEffect, useState } from 'react';
+import { showsSeeYourPlan } from '../api/bench';
 import { benchDismiss, benchList, benchProfiles, benchStart, benchState, onBenchState } from '../api/client';
 import type { BenchmarkSummary, BenchState, GameProfile } from '../api/types';
 import { ResultDetail } from '../components/bench/ResultDetail';
 import { ResultsList } from '../components/bench/ResultsList';
 import { RouteCard } from '../components/bench/RouteCard';
 import { SessionPanel } from '../components/bench/SessionPanel';
+import type { Tab } from '../components/TitleBar';
+import { planNoteWanted } from '../first-run/flag';
 import { strings } from '../strings';
 
-/** The Benchmark tab: start a benchmark, follow the session, and look through saved results (newest first). */
-export function Benchmark() {
+/**
+ * The Benchmark tab: start a benchmark, follow the session, and look through saved results (newest first). A new person's first
+ * saved result also offers See your plan, which leads on to the Tweaks tab.
+ */
+export function Benchmark({ onTab }: { onTab: (tab: Tab) => void }) {
+  // Read once: only the first run's buttons ask for the plan note and only the Tweaks tab clears it, and neither is on screen while this tab is.
+  const [planWanted] = useState(planNoteWanted);
   const [profile, setProfile] = useState<GameProfile | null>(null);
   const [items, setItems] = useState<BenchmarkSummary[]>([]);
   const [session, setSession] = useState<BenchState | null>(null);
@@ -75,7 +83,15 @@ export function Benchmark() {
       {error && <p className="notice cut-s">{error}</p>}
       {session ? <SessionPanel state={session} onClose={close} /> : profile && <RouteCard profile={profile} starting={starting} onStart={() => void start()} />}
       <ResultsList items={items} selected={selected} onSelect={choose} />
-      {selected && <ResultDetail key={selected} id={selected} onChanged={() => void refresh()} revealWhenLoaded={revealId === selected} />}
+      {selected && (
+        <ResultDetail
+          key={selected}
+          id={selected}
+          onChanged={() => void refresh()}
+          revealWhenLoaded={revealId === selected}
+          onSeePlan={showsSeeYourPlan(items.length, planWanted) ? () => onTab('tweaks') : undefined}
+        />
+      )}
     </div>
   );
 }

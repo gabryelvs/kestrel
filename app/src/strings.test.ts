@@ -61,6 +61,12 @@ describe('the Tweaks tab’s words', () => {
     expect(t.laterTiers).toEqual(['Competitive', 'Extreme']);
   });
 
+  it('say, to a new person, what the plan is and that nothing changes until Apply, and nothing more', () => {
+    expect(t.firstRunNote).toBe('Here’s the plan Kestrel picked for your PC. Nothing changes until you press Apply.');
+    expect(t.notNow).toBe('Not now');
+    expect(strings.bench.seeYourPlan).toBe('See your plan');
+  });
+
   it('say that no settings were changed, not that nothing was, since a restore point may have been made', () => {
     expect(t.noSettingsChanged).toBe('No settings were changed.');
     expect(t.protectionMayHaveChanged).toBe('System Protection may have been turned on: check its row above.');

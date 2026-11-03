@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { Comparison } from '../../api/types';
-import { SpreadWarning, TweakChanges } from './ResultDetail';
+import { strings } from '../../strings';
+import { SeeYourPlan, SpreadWarning, TweakChanges } from './ResultDetail';
 
 /** The sentence Copy results prints too (kestrel-bench's text.rs), for a spread of 24.9%. */
 const warning = 'These runs vary by 24.9%, so only big changes will count as real. Close background apps and run again.';
@@ -71,5 +72,18 @@ describe('TweakChanges', () => {
 
   it('escapes what a file says', () => {
     expect(html({ tweaksAdded: ['<b>x</b>'] })).toBe('<p class="caution">Tweaks since then: added &lt;b&gt;x&lt;/b&gt;.</p>');
+  });
+});
+
+describe('SeeYourPlan', () => {
+  const html = renderToStaticMarkup(<SeeYourPlan onClick={() => undefined} />);
+
+  it('is one button, in the words of the first-run flow, and nothing else', () => {
+    expect(html).toBe('<div><button class="btn btn-primary cut-s">See your plan</button></div>');
+    expect(html).toContain(strings.bench.seeYourPlan);
+  });
+
+  it('promises nothing', () => {
+    expect(html).not.toMatch(/improv|faster|boost|speed ?up|\bgains?\b|increase/i);
   });
 });

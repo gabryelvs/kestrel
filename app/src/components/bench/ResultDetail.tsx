@@ -29,8 +29,25 @@ export function TweakChanges({ comparison }: { comparison: Comparison }) {
   );
 }
 
+/** The way on from a new person's first result to the plan on the Tweaks tab: one button. */
+export function SeeYourPlan({ onClick }: { onClick: () => void }) {
+  return (
+    <div>
+      <button className="btn btn-primary cut-s" onClick={onClick}>{strings.bench.seeYourPlan}</button>
+    </div>
+  );
+}
+
 /** One saved benchmark: its numbers, the comparison with the baseline, the graph, the context and the actions. */
-export function ResultDetail({ id, onChanged, revealWhenLoaded = false }: { id: string; onChanged: () => void; revealWhenLoaded?: boolean }) {
+export function ResultDetail({
+  id, onChanged, revealWhenLoaded = false, onSeePlan,
+}: {
+  id: string;
+  onChanged: () => void;
+  revealWhenLoaded?: boolean;
+  /** Given only for a new person's first saved result (`showsSeeYourPlan`): it offers See your plan, which goes to the Tweaks tab. */
+  onSeePlan?: () => void;
+}) {
   const b = strings.bench;
   const [detail, setDetail] = useState<BenchDetail | null>(null);
   // A failed first load replaces the panel; a failed action only adds a notice, so the result stays on screen.
@@ -108,6 +125,7 @@ export function ResultDetail({ id, onChanged, revealWhenLoaded = false }: { id: 
         </div>
       </div>
       <SpreadWarning spread={bench.result.spread.avgFps} />
+      {onSeePlan && <SeeYourPlan onClick={onSeePlan} />}
 
       {comparison && detail.baselineName && (
         <div className="comparison">

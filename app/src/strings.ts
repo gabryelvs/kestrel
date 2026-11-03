@@ -157,6 +157,9 @@ export const strings = {
     // The page. Per-tweak text (each row's reason, the Preview's values, the report) comes from Rust; these are the page's own words.
     title: 'Tweaks',
     intro: 'Kestrel picked these for your PC. Nothing changes until you press Apply.',
+    /** Shown once, above everything else, to a person whose first run ended here. It promises nothing. */
+    firstRunNote: 'Here’s the plan Kestrel picked for your PC. Nothing changes until you press Apply.',
+    notNow: 'Not now',
     loading: 'Reading your PC’s settings…',
     loadFailed: 'Kestrel couldn’t read the tweaks.',
     /** The rows were read before, and reading them again failed: they are kept, and may be out of date. The reason follows. */
@@ -284,6 +287,8 @@ export const strings = {
     keep: 'Keep anyway',
     cancel: 'Cancel',
     seeResult: 'See the result',
+    /** On a new person's first saved result: the way on to the Tweaks tab. */
+    seeYourPlan: 'See your plan',
     close: 'Close',
     runOk: 'OK',
     runKept: 'Kept',

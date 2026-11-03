@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { createSampleTweaks } from '../api/sample-tweaks';
-import type { Flow, ReportLoad } from '../api/tweaks';
+import { elementsOf } from '../api/test-support';
+import type { Flow, ReportLoad, ViewLoad } from '../api/tweaks';
 import type { ItemOutcome, PreviewView, Row, RowState, TweakId, TweaksView } from '../api/types';
 import { Outcomes } from '../components/tweaks/Outcomes';
 import { PreviewPanel } from '../components/tweaks/PreviewPanel';
@@ -34,7 +35,7 @@ const rowActions: RowActions = {
 };
 const on: Handlers = {
   ...rowActions, preview: nothing, apply: nothing, turnOn: nothing, goOn: nothing, cancel: nothing, askRevert: nothing, revert: nothing, benchmark: nothing,
-  retry: nothing,
+  retry: nothing, notNow: nothing,
 };
 
 const renderRow = (r: Row, over: Partial<Parameters<typeof TweakRow>[0]> = {}) =>
@@ -365,7 +366,7 @@ const ownerView = (): TweaksView => createSampleTweaks().view();
 const ready = (text = 'Kestrel report · test\nNo changes yet.'): ReportLoad => ({ state: 'ready', text });
 const idle: Flow = { step: 'idle' };
 const body = (over: Partial<Parameters<typeof TweaksBody>[0]> = {}) =>
-  renderToStaticMarkup(<TweaksBody view={ownerView()} report={ready()} measure={null} choices={{}} flow={idle} on={on} {...over} />);
+  renderToStaticMarkup(<TweaksBody view={ownerView()} report={ready()} measure={null} choices={{}} flow={idle} firstRunNote={false} on={on} {...over} />);
 
 describe('the page’s body', () => {
   it('shows the rows in order, in a panel, with the later tiers below', () => {
@@ -422,7 +423,7 @@ describe('the page’s body', () => {
     const closed = body({ view: { ...ownerView(), gate: 'game-running' } });
     expect(closed).toMatch(/<span class="tweak-gate wrap">Close VALORANT first\.<\/span>/);
     const stale = renderToStaticMarkup(
-      <TweaksPage load={{ state: 'ready', view: ownerView(), stale: `C:\\${'ProgramData\\'.repeat(12)}Kestrel belongs to another account.` }} report={ready()} measure={null} choices={{}} flow={idle} on={on} />,
+      <TweaksPage load={{ state: 'ready', view: ownerView(), stale: `C:\\${'ProgramData\\'.repeat(12)}Kestrel belongs to another account.` }} report={ready()} measure={null} choices={{}} flow={idle} firstRunNote={false} on={on} />,
     );
     expect(stale).toMatch(/<span class="tweak-gate wrap">Kestrel couldn’t read the tweaks again/);
   });
@@ -714,7 +715,7 @@ describe('the page’s body when the view couldn’t be read again', () => {
   const outcomes: ItemOutcome[] = [{ id: 'windowed-optimizations', title: 'Optimizations for windowed games', ok: true, message: 'Applied.' }];
   const page = (over: Partial<Parameters<typeof TweaksPage>[0]> = {}) =>
     renderToStaticMarkup(
-      <TweaksPage load={{ state: 'ready', view: ownerView(), stale: REASON }} report={ready()} measure={null} choices={{}} flow={{ step: 'applied', outcomes, restart: true }} on={on} {...over} />,
+      <TweaksPage load={{ state: 'ready', view: ownerView(), stale: REASON }} report={ready()} measure={null} choices={{}} flow={{ step: 'applied', outcomes, restart: true }} firstRunNote={false} on={on} {...over} />,
     );
 
   it('keeps the rows and the result on screen, with the reason beside the buttons and a way to try again', () => {
@@ -757,7 +758,7 @@ describe('the page’s body when the view couldn’t be read again', () => {
 
 describe('the whole page', () => {
   const page = (over: Partial<Parameters<typeof TweaksPage>[0]> = {}) =>
-    renderToStaticMarkup(<TweaksPage load={{ state: 'ready', view: ownerView() }} report={ready()} measure={null} choices={{}} flow={idle} on={on} {...over} />);
+    renderToStaticMarkup(<TweaksPage load={{ state: 'ready', view: ownerView() }} report={ready()} measure={null} choices={{}} flow={idle} firstRunNote={false} on={on} {...over} />);
 
   it('opens with the title and the sentence that nothing changes until Apply', () => {
     const html = page();
@@ -789,6 +790,116 @@ describe('the whole page', () => {
     pc.apply(['power-plan']);
     for (const html of [page(), page({ load: { state: 'ready', view: pc.view() } }), page({ measure: { kind: 'none' } })]) {
       expect(plain(html)).not.toMatch(/improv|faster|boost|speed up/i);
+    }
+  });
+});
+
+describe('the first-run note', () => {
+  const note = (over: Partial<Parameters<typeof TweaksBody>[0]> = {}) => body({ firstRunNote: true, ...over });
+  const page = (over: Partial<Parameters<typeof TweaksPage>[0]> = {}) =>
+    renderToStaticMarkup(<TweaksPage load={{ state: 'ready', view: ownerView() }} report={ready()} measure={null} choices={{}} flow={idle} firstRunNote on={on} {...over} />);
+  const words = 'Here’s the plan Kestrel picked for your PC. Nothing changes until you press Apply.';
+
+  it('shows the note, in those words, with its Not now, while it is wanted', () => {
+    const html = note();
+    expect(t.firstRunNote).toBe(words);
+    expect(count(html, words)).toBe(1);
+    expect(buttons(html).filter((b) => b.text === 'Not now')).toEqual([{ text: 'Not now', disabled: false }]);
+    expect(html).toMatch(/<p>Here’s the plan[^<]*<\/p><button class="btn btn-ghost btn-small cut-s">Not now<\/button>/);
+  });
+
+  it('says nothing of it, and has no Not now, once it isn’t wanted', () => {
+    const html = body({ firstRunNote: false });
+    expect(html).not.toContain(t.firstRunNote);
+    expect(html).not.toContain('Here’s the plan');
+    expect(button(html, t.notNow)).toBeUndefined();
+  });
+
+  it('sits at the top of the body: above the measure note, the notices about accounts and interruptions, and the rows', () => {
+    const view = { ...ownerView(), otherAccount: true, pendingOtherAccounts: 1, interrupted: ['Kestrel was interrupted while changing Game Mode. It finished.'] };
+    const html = note({ view, measure: { kind: 'none' } });
+    // The body opens with it: nothing comes before it.
+    expect(html.startsWith(`<div class="notice plan-note cut-s"><p>${words}</p>`)).toBe(true);
+    const at = html.indexOf(words);
+    for (const later of [t.measureNone, t.otherAccount, 'Another account has 1 change', 'was interrupted', t.essential, '>Kestrel power plan<', t.report]) {
+      expect(html.indexOf(later), later).toBeGreaterThan(at);
+    }
+  });
+
+  it('sits under the intro on the page, before the rows', () => {
+    const html = page();
+    expect(html.indexOf(t.intro)).toBeGreaterThan(0);
+    expect(html.indexOf(t.intro)).toBeLessThan(html.indexOf(words));
+    expect(html.indexOf(words)).toBeLessThan(html.indexOf(t.essential));
+  });
+
+  it('blocks nothing: every other button and box is there, in the same order and state, as without it', () => {
+    const choices = { 'power-plan': true };
+    const without = body({ choices });
+    const withNote = note({ choices });
+    expect(buttons(withNote).filter((b) => b.text !== t.notNow)).toEqual(buttons(without));
+    expect(boxes(withNote)).toEqual(boxes(without));
+    expect(button(withNote, 'Preview 1 change')?.disabled).toBe(false);
+    expect(button(note(), 'Preview 0 changes')?.disabled).toBe(true);
+    // The rows, ticks and the report are all still there.
+    expect(withNote.replace(`<div class="notice plan-note cut-s"><p>${words}</p><button class="btn btn-ghost btn-small cut-s">Not now</button></div>`, '')).toBe(without);
+  });
+
+  it('leaves a closed gate to close what it closes, and says its reason as before', () => {
+    for (const gate of ['game-running', 'benchmark-active', 'cant-tell'] as const) {
+      const view = { ...ownerView(), gate };
+      const choices = { 'power-plan': true };
+      const html = note({ view, choices });
+      expect(button(html, 'Preview 1 change')?.disabled, gate).toBe(true);
+      expect(buttons(html).filter((b) => b.text !== t.notNow), gate).toEqual(buttons(body({ view, choices })));
+      expect(html, gate).toContain(strings.tweaks.gate[gate]);
+    }
+  });
+
+  it('is shown whatever step the page is at, and its Not now is never turned off, since all it does is leave', () => {
+    const preview: PreviewView = { items: [planItem], restore: 'ready' };
+    const flows: Flow[] = [
+      idle,
+      { step: 'busy', text: t.applying },
+      { step: 'preview', preview },
+      { step: 'ask-revert' },
+      { step: 'failed', message: 'Close VALORANT first.', settings: 'unchanged' },
+    ];
+    for (const flow of flows) {
+      const html = note({ flow });
+      expect(html, flow.step).toContain(words);
+      expect(button(html, t.notNow)?.disabled, flow.step).toBe(false);
+    }
+    const closed = note({ view: { ...ownerView(), gate: 'game-running' }, flow: { step: 'busy', text: t.applying } });
+    expect(button(closed, t.notNow)?.disabled).toBe(false);
+  });
+
+  it('is not shown before there are rows to be the plan: while the tweaks load, or when they can’t be read', () => {
+    for (const load of [{ state: 'loading' }, { state: 'failed', message: 'C:\\ProgramData\\Kestrel belongs to another account.' }] as ViewLoad[]) {
+      const html = page({ load });
+      expect(html, load.state).not.toContain(words);
+      expect(button(html, t.notNow), load.state).toBeUndefined();
+    }
+  });
+
+  it('is shown over rows that may be out of date, since the plan is still on the page', () => {
+    const html = page({ load: { state: 'ready', view: ownerView(), stale: 'x' } });
+    expect(html).toContain(words);
+    expect(button(html, t.notNow)?.disabled).toBe(false);
+  });
+
+  it('presses through to the page’s Not now', () => {
+    const calls: string[] = [];
+    const tree = TweaksBody({ view: ownerView(), report: ready(), measure: null, choices: {}, flow: idle, firstRunNote: true, on: { ...on, notNow: () => void calls.push('not now') } });
+    const notNow = elementsOf(tree, 'button').filter((b) => b.props.children === t.notNow);
+    expect(notNow).toHaveLength(1);
+    notNow[0].props.onClick?.();
+    expect(calls).toEqual(['not now']);
+  });
+
+  it('promises nothing, whichever way the page is shown', () => {
+    for (const html of [note(), page(), page({ measure: { kind: 'none' } })]) {
+      expect(plain(html)).not.toMatch(/improv|faster|boost|speed up|\bgains?\b/i);
     }
   });
 });

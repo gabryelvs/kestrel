@@ -60,6 +60,12 @@ export const passLabel = (pass: number): string => strings.bench.passLabel(pass)
  */
 export const canStartRun = (s: BenchState): boolean => s.phase === 'waiting' && s.countdown === null && s.gameRunning;
 
+/**
+ * Whether a result offers See your plan: it is the first one saved (the only one in the list) and the Tweaks tab still owes its
+ * first-run note. A person whose first run is done, a second result and an empty or unread list get nothing.
+ */
+export const showsSeeYourPlan = (savedCount: number, noteWanted: boolean): boolean => savedCount === 1 && noteWanted;
+
 /** One sentence telling the player what happens now or what to do next. */
 export function sessionHeadline(s: BenchState): string {
   const b = strings.bench;
