@@ -96,7 +96,7 @@ pub(super) fn protection() -> Readiness {
     parse::readiness(
         &registry::read_policy_dword(POLICY_KEY, DISABLE_SR),
         &registry::read_policy_dword(POLICY_KEY, DISABLE_CONFIG),
-        &registry::machine_value(CLIENTS_KEY, CLIENTS_VALUE),
+        &registry::machine_value_in_key(CLIENTS_KEY, CLIENTS_VALUE),
         system_volume().ok().as_deref(),
     )
 }

@@ -151,16 +151,21 @@ pub fn mouse_strings(values: [i32; 3]) -> [(&'static str, String); 3] {
 }
 
 /// Whether System Protection is on for the Windows drive, from what can be read about it. `disable_sr` and
-/// `disable_config` are the policy values, `clients` is the type and bytes of the `SPP\Clients` value that lists the
-/// protected volumes, and `volume` is the Windows drive's volume name, if Windows gave it.
+/// `disable_config` are the policy values, and `volume` is the Windows drive's volume name, if Windows gave it.
+/// `clients` is the value under `SPP\Clients` that lists the protected volumes, as its type and bytes: `Absent` when the
+/// key isn't there, and `Value(None)` when the key is there and the value isn't.
 ///
 /// Only a policy that is set blocks, whatever became of the other reads. A policy that couldn't be read isn't no
-/// policy, and a list or a volume that couldn't be read says nothing, so those are `Unknown`. So is a value that isn't
-/// there: only a list that can be read and doesn't name the drive is `ProtectionOff`.
+/// policy, and a list or a volume that couldn't be read says nothing, so those are `Unknown`.
+///
+/// A list that doesn't name the drive is `ProtectionOff`, and so is no list under a key that is there, which is how
+/// Sophia Script and the published REG file for turning protection off read it. If that's wrong, the dialog offers to
+/// turn on what is already on, and `Enable` on an enabled drive does no harm. A key that isn't there says nothing: a
+/// Windows with no System Restore may have none.
 pub fn readiness(
     disable_sr: &Read<u32>,
     disable_config: &Read<u32>,
-    clients: &Read<(u32, Vec<u8>)>,
+    clients: &Read<Option<(u32, Vec<u8>)>>,
     volume: Option<&str>,
 ) -> Readiness {
     let policies = [disable_sr, disable_config];
@@ -173,17 +178,18 @@ pub fn readiness(
     if policies.iter().any(|read| matches!(read, Read::Failed(_))) {
         return Readiness::Unknown;
     }
-    let (Some(guid), Read::Value((kind, bytes))) = (volume.and_then(volume_guid), clients) else {
-        return Readiness::Unknown;
-    };
-    let Some(list) = protected_volumes(*kind, bytes) else {
+    let Some(guid) = volume.and_then(volume_guid) else {
         return Readiness::Unknown;
     };
     let guid = guid.to_ascii_lowercase();
-    if list.to_ascii_lowercase().contains(&guid) {
-        Readiness::Ready
-    } else {
-        Readiness::ProtectionOff
+    match clients {
+        Read::Value(Some((kind, bytes))) => match protected_volumes(*kind, bytes) {
+            Some(list) if list.to_ascii_lowercase().contains(&guid) => Readiness::Ready,
+            Some(_) => Readiness::ProtectionOff,
+            None => Readiness::Unknown,
+        },
+        Read::Value(None) => Readiness::ProtectionOff,
+        Read::Absent | Read::Failed(_) => Readiness::Unknown,
     }
 }
 
@@ -268,16 +274,18 @@ fn instant_of_wmi_time(text: &str) -> Option<DateTime<Utc>> {
     Some(as_written.checked_sub_signed(ahead)?.and_utc())
 }
 
-/// What `SystemRestore.Enable` or `Disable` answered. Microsoft says zero is success and anything else is an error
-/// code, whose number the person gets.
+/// What `SystemRestore.Enable` or `Disable` answered: whether to go on to the read of System Protection that settles
+/// it, or fail now. Microsoft says zero is success and anything else is an error code, whose number the person gets.
+/// 1717, the interface is unknown, goes on too: PowerShell's own cmdlets let it past for both methods, because the drive
+/// can change all the same, and the read is the truth either way.
 pub fn method_answer(method: &str, answer: u32) -> Result<(), String> {
-    if answer == 0 {
-        Ok(())
-    } else {
-        Err(format!(
+    const INTERFACE_UNKNOWN: u32 = 1717;
+    match answer {
+        0 | INTERFACE_UNKNOWN => Ok(()),
+        other => Err(format!(
             "Windows refused: SystemRestore.{method} answered {}.",
-            hex(answer)
-        ))
+            hex(other)
+        )),
     }
 }
 
@@ -627,18 +635,27 @@ mod tests {
         bytes
     }
 
-    fn clients_with(entries: &[&str]) -> Read<(u32, Vec<u8>)> {
-        Read::Value((REG_MULTI_SZ, multi_string(entries)))
+    /// What the key and value that list the protected volumes read as: `Absent` when the key isn't there, and
+    /// `Value(None)` when it is and the value isn't.
+    type Clients = Read<Option<(u32, Vec<u8>)>>;
+
+    /// A value of this type holding these bytes.
+    fn held(kind: u32, bytes: Vec<u8>) -> Clients {
+        Read::Value(Some((kind, bytes)))
+    }
+
+    fn clients_with(entries: &[&str]) -> Clients {
+        held(REG_MULTI_SZ, multi_string(entries))
     }
 
     /// What the System Protection reads say with no policy set and the Windows drive's volume known.
-    fn with_no_policy(clients: &Read<(u32, Vec<u8>)>) -> Readiness {
+    fn with_no_policy(clients: &Clients) -> Readiness {
         readiness(&Read::Absent, &Read::Absent, clients, Some(VOLUME))
     }
 
     #[test]
     fn the_value_from_a_real_pc_says_its_drive_is_protected() {
-        let clients = Read::Value((REG_MULTI_SZ, CLIENTS_FROM_A_PC.to_vec()));
+        let clients = held(REG_MULTI_SZ, CLIENTS_FROM_A_PC.to_vec());
         assert_eq!(with_no_policy(&clients), Readiness::Ready);
         // That is a list of strings, which the policy reads refuse as "not a string value".
         assert!(matches!(
@@ -655,10 +672,10 @@ mod tests {
             clients_with(&[OTHER_VOLUME, entry]),
             clients_with(&[entry, OTHER_VOLUME]),
             // In one string, however it is separated.
-            Read::Value((
+            held(
                 REG_SZ,
                 wide_bytes(&format!("{OTHER_VOLUME};some text;{entry};")),
-            )),
+            ),
         ] {
             assert_eq!(with_no_policy(&clients), Readiness::Ready);
         }
@@ -692,9 +709,9 @@ mod tests {
             clients_with(&[OTHER_VOLUME]),
             // What's left when nothing is listed, and what some guides have people write there.
             clients_with(&[]),
-            Read::Value((REG_MULTI_SZ, Vec::new())),
+            held(REG_MULTI_SZ, Vec::new()),
             clients_with(&["1"]),
-            Read::Value((REG_SZ, wide_bytes(""))),
+            held(REG_SZ, wide_bytes("")),
         ] {
             assert_eq!(with_no_policy(&clients), Readiness::ProtectionOff);
         }
@@ -710,15 +727,31 @@ mod tests {
     }
 
     #[test]
+    fn a_value_that_isnt_there_under_a_key_that_is_means_nothing_is_protected() {
+        // It's how Sophia Script reads it, and the published REG file for turning protection off deletes the value.
+        assert_eq!(with_no_policy(&Read::Value(None)), Readiness::ProtectionOff);
+    }
+
+    #[test]
+    fn a_key_that_isnt_there_says_nothing() {
+        // A Windows with no System Restore may not have one.
+        assert_eq!(with_no_policy(&Read::Absent), Readiness::Unknown);
+    }
+
+    #[test]
+    fn a_read_that_failed_says_nothing() {
+        let failed = Read::Failed("Windows wouldn't read it".to_string());
+        assert_eq!(with_no_policy(&failed), Readiness::Unknown);
+    }
+
+    #[test]
     fn with_no_readable_list_nobody_can_say() {
         for clients in [
-            Read::Absent,
-            Read::Failed("Windows wouldn't read it".to_string()),
             // A value of another type, and bytes that aren't wide text.
-            Read::Value((REG_DWORD, 1u32.to_le_bytes().to_vec())),
-            Read::Value((REG_BINARY, multi_string(&[VOLUME]))),
-            Read::Value((REG_MULTI_SZ, vec![0x41, 0, 0x42])),
-            Read::Value((REG_MULTI_SZ, vec![0x3D, 0xD8, 0, 0])),
+            held(REG_DWORD, 1u32.to_le_bytes().to_vec()),
+            held(REG_BINARY, multi_string(&[VOLUME])),
+            held(REG_MULTI_SZ, vec![0x41, 0, 0x42]),
+            held(REG_MULTI_SZ, vec![0x3D, 0xD8, 0, 0]),
         ] {
             assert_eq!(with_no_policy(&clients), Readiness::Unknown, "{clients:?}");
         }
@@ -726,19 +759,21 @@ mod tests {
 
     #[test]
     fn with_no_volume_nobody_can_say() {
-        let listed = clients_with(&[VOLUME]);
-        for volume in [
-            None,
-            Some(""),
-            Some("C:\\"),
-            Some(r"\\?\Volume{not-a-guid}\"),
-            Some(r"\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416\"),
-        ] {
-            assert_eq!(
-                readiness(&Read::Absent, &Read::Absent, &listed, volume),
-                Readiness::Unknown,
-                "{volume:?}"
-            );
+        // Whatever the list says, the empty one included: a failed read of the volume decides nothing.
+        for clients in [clients_with(&[VOLUME]), Read::Value(None)] {
+            for volume in [
+                None,
+                Some(""),
+                Some("C:\\"),
+                Some(r"\\?\Volume{not-a-guid}\"),
+                Some(r"\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416\"),
+            ] {
+                assert_eq!(
+                    readiness(&Read::Absent, &Read::Absent, &clients, volume),
+                    Readiness::Unknown,
+                    "{clients:?}, {volume:?}"
+                );
+            }
         }
     }
 
@@ -791,6 +826,10 @@ mod tests {
         );
         assert_eq!(
             readiness(&Read::Value(1), &failed, &Read::Absent, None),
+            Readiness::BlockedByPolicy
+        );
+        assert_eq!(
+            readiness(&Read::Value(1), &Read::Absent, &Read::Value(None), None),
             Readiness::BlockedByPolicy
         );
     }
@@ -989,14 +1028,25 @@ mod tests {
     }
 
     #[test]
+    fn a_wmi_methods_answer_of_1717_goes_on_to_the_read_that_settles_it() {
+        // The interface is unknown. PowerShell's own cmdlets let this one past, for both methods.
+        assert_eq!(method_answer("Enable", 1717), Ok(()));
+        assert_eq!(method_answer("Disable", 1717), Ok(()));
+    }
+
+    #[test]
     fn any_other_answer_is_a_failure_with_its_number() {
         assert_eq!(
             method_answer("Enable", 0x8007_0422),
             Err("Windows refused: SystemRestore.Enable answered 0x80070422.".to_string())
         );
         assert_eq!(
-            method_answer("Disable", 1717),
-            Err("Windows refused: SystemRestore.Disable answered 0x000006B5.".to_string())
+            method_answer("Disable", 1056),
+            Err("Windows refused: SystemRestore.Disable answered 0x00000420.".to_string())
         );
+        // Beside it, and the same number as an HRESULT, are other answers.
+        for other in [1716, 1718, 0x8007_06B5] {
+            assert!(method_answer("Enable", other).is_err(), "{other}");
+        }
     }
 }

@@ -8,9 +8,9 @@
 //!
 //! To arrange a PC, use the `set_*` and `add_*` methods. They are the test's own hands, not changes Kestrel made, so
 //! they never appear in `writes()` and the failure switches don't stop them. The switches (`fail_*`, `ignore_*`,
-//! `protection_lands_on`, `lie_on_readback`) make what goes through `System` go wrong. Failures are told apart from
-//! absence: a read that is made to fail is `Read::Failed` even when the value isn't there. Once set, a switch stays
-//! until `clear_failures`.
+//! `protection_lands_on`, `protection_fails_and_lands_on`, `lie_on_readback`) make what goes through `System` go wrong.
+//! Failures are told apart from absence: a read that is made to fail is `Read::Failed` even when the value isn't there.
+//! Once set, a switch stays until `clear_failures`.
 //!
 //! `writes()` records what changed, one line per change made through `System`, in the order they happened; a refused
 //! change is not a change. `dump()` is the comparable state of the PC itself, without that log and the switches.
@@ -159,6 +159,8 @@ struct Failures {
     lying: BTreeSet<String>,
     /// What switching System Protection really leaves, whatever was asked for.
     protection_lands_on: Option<Readiness>,
+    /// The same, for a switch that says it failed.
+    protection_fails_and_lands_on: Option<Readiness>,
     /// Setting the mouse says it worked and changes nothing.
     mouse_ignored: bool,
 }
@@ -289,6 +291,12 @@ impl Inner {
         if let Some(lands_on) = self.failures.protection_lands_on {
             self.state.protection = lands_on;
             return Ok(());
+        }
+        if let Some(lands_on) = self.failures.protection_fails_and_lands_on {
+            self.state.protection = lands_on;
+            return Err(io::Error::other(
+                "told that switching System Protection fails",
+            ));
         }
         self.state.protection = to;
         self.log.push(line.to_string());
@@ -553,6 +561,12 @@ impl FakeSystem {
     /// Switching System Protection says it worked, and it ends up as this, whatever was asked for.
     pub fn protection_lands_on(&self, readiness: Readiness) {
         self.lock().failures.protection_lands_on = Some(readiness);
+    }
+
+    /// Switching System Protection says it failed, and it ends up as this all the same, as when a wait for Windows runs
+    /// out and Windows then gets there.
+    pub fn protection_fails_and_lands_on(&self, readiness: Readiness) {
+        self.lock().failures.protection_fails_and_lands_on = Some(readiness);
     }
 
     /// Deleting this plan fails.
@@ -1661,6 +1675,28 @@ mod tests {
         pc.clear_failures();
         pc.turn_protection_off().unwrap();
         assert_eq!(pc.protection(), Readiness::ProtectionOff);
+    }
+
+    #[test]
+    fn system_protection_told_to_fail_and_land_says_it_failed() {
+        let pc = FakeSystem::new();
+        pc.set_protection(Readiness::ProtectionOff);
+        pc.protection_fails_and_lands_on(Readiness::Ready);
+
+        assert!(pc.turn_protection_on().is_err());
+
+        assert_eq!(pc.protection(), Readiness::Ready);
+        assert!(pc.writes().is_empty());
+
+        // A refusal still comes first.
+        pc.set_protection(Readiness::ProtectionOff);
+        pc.fail_write(PROTECTION);
+        assert!(pc.turn_protection_on().is_err());
+        assert_eq!(pc.protection(), Readiness::ProtectionOff);
+
+        pc.clear_failures();
+        pc.turn_protection_on().unwrap();
+        assert_eq!(pc.writes(), ["protection on"]);
     }
 
     #[test]

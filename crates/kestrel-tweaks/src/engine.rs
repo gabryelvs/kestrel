@@ -422,7 +422,9 @@ impl Engine {
     /// has nothing to turn on and gets no record. Protection a policy blocks, or that can't be read, is left alone.
     ///
     /// `System::turn_protection_on` comes back once protection reads on, so the next look at the record finds it
-    /// holding. If it fails, its reason is both the outcome's detail and the error.
+    /// holding. If it fails, protection is read again. If that reads on, as when a wait for Windows ran out just before
+    /// Windows got there, it is on and Kestrel did that, so it counts, and it gets its row and its undo. Otherwise the
+    /// failure's reason is both the outcome's detail and the error.
     pub fn turn_protection_on(&self) -> io::Result<()> {
         let _lock = self.journal.lock()?;
         match self.system.protection() {
@@ -441,13 +443,14 @@ impl Engine {
         };
         self.journal.append(&change.intent(&now()))?;
         match self.system.turn_protection_on() {
-            Ok(()) => {
-                self.note(&change.outcome(true, None));
-                Ok(())
-            }
-            Err(why) => {
+            Err(why) if self.system.protection() != Readiness::Ready => {
                 self.note(&change.outcome(false, Some(why.to_string())));
                 Err(why)
+            }
+            // It worked, or it said it failed and protection is on all the same.
+            _ => {
+                self.note(&change.outcome(true, None));
+                Ok(())
             }
         }
     }
@@ -4266,6 +4269,69 @@ mod tests {
         rig.pc.clear_failures();
         rig.engine.turn_protection_on().unwrap();
         assert_eq!(rig.state(SystemProtection), Applied);
+    }
+
+    #[test]
+    fn a_turn_on_that_fails_and_comes_on_anyway_is_kestrels_to_undo() {
+        // Protection is on and Kestrel did that, so it gets its row and its undo, and nobody is told it failed.
+        let rig = protection_is_off();
+        rig.pc.protection_fails_and_lands_on(Readiness::Ready);
+
+        rig.engine.turn_protection_on().unwrap();
+
+        assert_eq!(rig.pc.protection(), Readiness::Ready);
+        assert_eq!(
+            rig.story(),
+            says(&[("intent", SystemProtection), ("applied", SystemProtection)])
+        );
+        let history = rig.journal().read().unwrap().history;
+        let Entry::Outcome {
+            applied: true,
+            detail: None,
+            ..
+        } = &history[1]
+        else {
+            panic!("a plain success, not {:?}", history[1]);
+        };
+        assert_eq!(rig.state(SystemProtection), Applied);
+
+        rig.pc.clear_failures();
+        let undone = rig.undo(SystemProtection);
+        assert!(undone.ok, "{}", undone.message);
+        assert_eq!(rig.pc.protection(), Readiness::ProtectionOff);
+        assert!(rig.open().is_empty());
+    }
+
+    #[test]
+    fn a_turn_on_that_fails_and_doesnt_read_on_leaves_no_record_and_says_why() {
+        for lands_on in [
+            Readiness::ProtectionOff,
+            Readiness::Unknown,
+            Readiness::BlockedByPolicy,
+        ] {
+            let rig = protection_is_off();
+            rig.pc.protection_fails_and_lands_on(lands_on);
+
+            let why = rig.engine.turn_protection_on().unwrap_err();
+
+            assert!(why.to_string().contains("told that switching"), "{why}");
+            assert_eq!(
+                rig.story(),
+                says(&[("intent", SystemProtection), ("failed", SystemProtection)]),
+                "{lands_on:?}"
+            );
+            let history = rig.journal().read().unwrap().history;
+            let Entry::Outcome {
+                applied: false,
+                detail: Some(detail),
+                ..
+            } = &history[1]
+            else {
+                panic!("the outcome should say why, not {:?}", history[1]);
+            };
+            assert_eq!(*detail, why.to_string(), "{lands_on:?}");
+            assert!(rig.open().is_empty(), "{lands_on:?}");
+        }
     }
 
     #[test]
