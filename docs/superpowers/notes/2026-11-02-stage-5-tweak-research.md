@@ -175,7 +175,7 @@ TrayTrigger documents why: blind appending produced `SwapEffectUpgradeEnable=0;S
 
 | Item | Detail |
 | --- | --- |
-| Mechanism | `SystemParametersInfoW(SPI_SETMOUSE (4), 0, &[i32;3] {0,0,0}, SPIF_UPDATEINIFILE (1) \| SPIF_SENDCHANGE (2))`. Array order is threshold1, threshold2, acceleration (DOC) |
+| Mechanism | `SystemParametersInfoW(SPI_SETMOUSE (4), 0, &[i32;3] {0,0,0}, SPIF_UPDATEINIFILE (1))`, then `SendNotifyMessageW` (Kestrel dropped `SPIF_SENDCHANGE (2)`, which can block on a hung window). Array order is threshold1, threshold2, acceleration (DOC) |
 | Registry equivalent | `HKCU\Control Panel\Mouse`, **REG_SZ** `MouseSpeed`, `MouseThreshold1`, `MouseThreshold2`. Off: `0/0/0`. On (default): `1/6/10` (procmon capture in win-config). WinUtil once wrote these as numbers and had to fix it (PR #5188) |
 | Read | `SPI_GETMOUSE (3)` for live state, plus the registry for persisted state. Report any mismatch |
 | Verify | Both reads; Mouse Properties > Pointer Options |
