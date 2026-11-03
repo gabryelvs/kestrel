@@ -176,6 +176,11 @@ export interface BenchContext {
   gpuPnpDeviceId: string | null;
   /** The highest PCIe link seen during the runs (kestrel-bench's GpuLink has PcieLink's shape). */
   gpuLink: PcieLink | null;
+  /**
+   * The ids of the tweaks that were active when the benchmark ran. null means unknown (saved before tweaks existed), which is
+   * not the same as []: no tweaks. Strings rather than TweakIds, because a file from a newer Kestrel can name a tweak this one doesn't.
+   */
+  appliedTweaks: string[] | null;
 }
 export interface Benchmark {
   id: string;
@@ -202,7 +207,18 @@ export interface BenchmarkSummary {
 export type MetricId = 'avg-fps' | 'low1-fps' | 'low01-fps' | 'stutters-per-min' | 'pc-latency-ms';
 export type Verdict = 'real-gain' | 'real-loss' | 'noise';
 export interface MetricDelta { metric: MetricId; baseline: number; current: number; deltaPct: number | null; verdict: Verdict }
-export interface Comparison { baselineId: string; currentId: string; metrics: MetricDelta[]; settingsDiffer: string[]; routeMismatch: boolean }
+export interface Comparison {
+  baselineId: string;
+  currentId: string;
+  metrics: MetricDelta[];
+  settingsDiffer: string[];
+  /** Tweak ids active in this result but not in the baseline, and the other way round. Both are empty when either result has no list. */
+  tweaksAdded: string[];
+  tweaksRemoved: string[];
+  /** The power plan's name in the baseline and in this result, when both are known and they differ. */
+  powerPlanChange: [string, string] | null;
+  routeMismatch: boolean;
+}
 export interface BenchDetail { benchmark: Benchmark; graph: number[]; comparison: Comparison | null; baselineName: string | null }
 export interface GameProfile { id: string; name: string; processName: string; route: { version: number; captureSeconds: number; switchAtSeconds: number } }
 export type SessionPhase =

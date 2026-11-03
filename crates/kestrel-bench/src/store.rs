@@ -495,6 +495,80 @@ mod tests {
     }
 
     #[test]
+    fn a_benchmark_from_before_stage_5_loads_with_no_tweak_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("20261013-191500");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("summary.json"), SAVED_BY_0_2_0).unwrap();
+        let store = Store::new(dir.path());
+        let old = store
+            .get("20261013-191500")
+            .expect("a benchmark saved before stage 5 loads");
+        assert_eq!(
+            old.context.applied_tweaks, None,
+            "no list means unknown, not an empty list"
+        );
+        // The file really has no such key: this is the old shape, not a null the test wrote.
+        assert!(!SAVED_BY_0_2_0.contains("appliedTweaks"));
+        // Nothing else about it changed.
+        assert_eq!(old.context.windows_build, 26200);
+        assert_eq!(
+            old.context.power_plan.as_deref(),
+            Some("EXM Free Power Plan V8")
+        );
+    }
+
+    #[test]
+    fn the_active_tweaks_survive_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let mut none_known = bench("2026-10-13T20:00:00Z", 410.0);
+        let mut empty = bench("2026-10-13T20:05:00Z", 410.0);
+        empty.context.applied_tweaks = Some(Vec::new());
+        let mut some = bench("2026-10-13T20:10:00Z", 410.0);
+        // A name this build doesn't know comes back as written.
+        some.context.applied_tweaks = Some(vec![
+            "game-mode".into(),
+            "power-plan".into(),
+            "from-the-future".into(),
+        ]);
+        let ids: Vec<String> = [&mut none_known, &mut empty, &mut some]
+            .into_iter()
+            .map(|b| store.save(b, &[]).unwrap())
+            .collect();
+        for (id, saved) in ids.iter().zip([&none_known, &empty, &some]) {
+            let back = store.get(id).unwrap();
+            assert_eq!(&back, saved);
+            assert_eq!(back.context.applied_tweaks, saved.context.applied_tweaks);
+        }
+        // Unknown and none stay apart: a list with nothing in it is not a missing list.
+        assert_eq!(store.get(&ids[0]).unwrap().context.applied_tweaks, None);
+        assert_eq!(
+            store.get(&ids[1]).unwrap().context.applied_tweaks,
+            Some(Vec::new())
+        );
+        // The UI reads this name (camelCase, like every other field).
+        let json = |id: &str| -> serde_json::Value {
+            serde_json::from_slice(
+                &std::fs::read(dir.path().join(id).join("summary.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            json(&ids[2])["context"]["appliedTweaks"],
+            serde_json::json!(["game-mode", "power-plan", "from-the-future"])
+        );
+        assert_eq!(
+            json(&ids[1])["context"]["appliedTweaks"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            json(&ids[0])["context"]["appliedTweaks"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn the_card_and_its_link_survive_a_save_and_a_load() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());

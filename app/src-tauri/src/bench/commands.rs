@@ -145,6 +145,9 @@ pub fn context_from(report: &Report) -> Context {
             .find(|d| d.is_primary && !d.is_virtual)
             .map(|d| d.current_hz),
         game_settings: None,
+        // Not from the scan: the active tweaks come from the tweak engine, so the list stays unknown (None) until
+        // whoever starts the benchmark fills it in.
+        applied_tweaks: None,
     }
 }
 

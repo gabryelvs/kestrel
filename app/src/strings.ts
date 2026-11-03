@@ -1,3 +1,5 @@
+import type { TweakId } from './api/types';
+
 /** The stage each later feature arrives in (decision 66). kestrel-core's health.rs keeps COMPETITIVE_STAGE. */
 export const STAGE = { tweaks: 5, competitive: 6, lockIn: 7, fixes: 8 } as const;
 
@@ -142,6 +144,18 @@ export const strings = {
     lockIn: { stage: STAGE.lockIn, title: 'Lock In', body: 'A tiny helper that boosts your PC while VALORANT runs and undoes everything when you quit.' },
   },
   diagnostics: { copy: 'Copy diagnostics', copied: 'Copied. Paste it in chat.', failed: 'Couldn’t copy. Try again.' },
+  tweaks: {
+    /** The tweaks' titles. kestrel-tweaks' catalog.rs gives the same ones to the report, so a change there is a change here. */
+    names: {
+      'power-plan': 'Kestrel power plan',
+      'game-mode': 'Game Mode',
+      'background-recording': 'Background recording off',
+      'windowed-optimizations': 'Optimizations for windowed games',
+      'gpu-preference': 'GPU preference',
+      'pointer-precision': 'Enhance pointer precision off',
+      'system-protection': 'System Protection',
+    } satisfies Record<TweakId, string>,
+  },
   bench: {
     title: 'Benchmark',
     intro: 'Measures how smoothly VALORANT runs on a fixed route in the Range. Kestrel only listens to the frames Windows shows; it never touches the game.',
@@ -195,6 +209,13 @@ export const strings = {
     versus: (name: string) => `Compared with ${name}`,
     verdict: { 'real-gain': 'Real gain', 'real-loss': 'Real loss', noise: 'Within noise' },
     settingsDiffer: (list: string) => `VALORANT settings changed since then: ${list}. Part of the difference may come from them.`,
+    // kestrel-bench's text.rs puts the same facts in Copy results, with the ids as written.
+    tweaksChanged: (changes: string) => `Tweaks since then: ${changes}.`,
+    tweaksAdded: (list: string) => `added ${list}`,
+    tweaksRemoved: (list: string) => `removed ${list}`,
+    planChanged: (from: string, to: string) => `Power plan since then: ${from} → ${to}.`,
+    // The same sentence as in Copy results (kestrel-bench's text.rs), with the spread as the tile shows it.
+    spreadWarning: (text: string) => `These runs vary by ${text}, so only big changes will count as real. Close background apps and run again.`,
     routeMismatch: 'Different route version, so these results aren’t compared.',
     graph: 'Frame times of the middle run',
     graphAxis: 'ms per frame, lower is smoother',

@@ -1,5 +1,5 @@
 // Sample benchmarks and a fake session for the browser preview (UI work on the Mac). Never used inside Kestrel.
-import type { BenchDetail, BenchState, Benchmark, BenchmarkSummary, GameProfile, RunRecord } from './types';
+import type { BenchContext, BenchDetail, BenchState, Benchmark, BenchmarkSummary, GameProfile, RunRecord } from './types';
 
 export const sampleProfile: GameProfile = {
   id: 'valorant', name: 'VALORANT', processName: 'VALORANT-Win64-Shipping.exe',
@@ -12,11 +12,14 @@ const run = (avg: number, low1: number, low01: number, latency: number): RunReco
   kept: false,
 });
 
-const context = {
+const context: BenchContext = {
   powerPlan: 'EXM Free Power Plan V8', ramMts: 3600, gpu: 'NVIDIA GeForce RTX 3060 Ti', gpuDriver: '610.74',
   windowsBuild: 26200, displayHz: 360, gameSettings: null,
   gpuPnpDeviceId: 'PCI\\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\\4&2B0D3A0E&0&0008', gpuLink: { gen: 4, width: 16 },
+  appliedTweaks: [],
 };
+// The second sample ran with Kestrel's power plan and Game Mode on.
+const tweakedContext: BenchContext = { ...context, powerPlan: 'Kestrel', appliedTweaks: ['power-plan', 'game-mode'] };
 
 const benchmarks: Benchmark[] = [
   {
@@ -31,7 +34,7 @@ const benchmarks: Benchmark[] = [
     kestrelVersion: '0.2.0', presentmonVersion: '2.6.0',
     runs: [run(428, 301, 208, 9.2), run(433, 305, 214, 9.1), run(440, 309, 211, 8.9)],
     result: { metrics: run(433, 305, 214, 9.1).metrics, spread: { avgFps: 0.0277, low1Fps: 0.0262, low01Fps: 0.028 } },
-    context,
+    context: tweakedContext,
   },
 ];
 let baselineId = 'sample-1';
@@ -50,6 +53,12 @@ export function sampleList(): BenchmarkSummary[] {
   }));
 }
 
+// What the real comparison (kestrel-bench's result.rs) says about tweaks and the plan, for the sample's two sides: the ids
+// `list` has and `other` lacks, each once, and nothing at all when either side has no list; the plan names when they differ.
+const only = (list: string[] | null, other: string[] | null): string[] =>
+  list && other ? list.filter((tweak, at) => !other.includes(tweak) && list.indexOf(tweak) === at) : [];
+const planChange = (was: string | null, now: string | null): [string, string] | null => (was && now && was !== now ? [was, now] : null);
+
 export function sampleDetail(id: string): BenchDetail {
   const benchmark = benchmarks.find((b) => b.id === id);
   if (!benchmark) throw new Error('That benchmark doesn’t exist.');
@@ -58,6 +67,9 @@ export function sampleDetail(id: string): BenchDetail {
   // Fixed verdicts for the sample, except that a ~0% change (the fake session saves a copy of the starting point) is noise.
   const comparison = baseline && {
     baselineId: baseline.id, currentId: id, settingsDiffer: [], routeMismatch: false,
+    tweaksAdded: only(benchmark.context.appliedTweaks, baseline.context.appliedTweaks),
+    tweaksRemoved: only(baseline.context.appliedTweaks, benchmark.context.appliedTweaks),
+    powerPlanChange: planChange(baseline.context.powerPlan, benchmark.context.powerPlan),
     metrics: [
       { metric: 'avg-fps' as const, baseline: baseline.result.metrics.avgFps, current: benchmark.result.metrics.avgFps, deltaPct: delta(baseline.result.metrics.avgFps, benchmark.result.metrics.avgFps), verdict: 'real-gain' as const },
       { metric: 'low1-fps' as const, baseline: baseline.result.metrics.low1Fps, current: benchmark.result.metrics.low1Fps, deltaPct: delta(baseline.result.metrics.low1Fps, benchmark.result.metrics.low1Fps), verdict: 'real-gain' as const },

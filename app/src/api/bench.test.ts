@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canStartRun, contextRows, flagText, graphShape, metricText, passLabel, pct, sessionHeadline, settingsText, spreadText, verdictTone } from './bench';
+import { canStartRun, contextRows, flagText, graphShape, metricText, passLabel, pct, sessionHeadline, settingsText, spreadText, tweakList, tweakName, variesTooMuch, verdictTone } from './bench';
 import type { BenchContext, BenchState, ValorantSettings } from './types';
 
 const base: BenchState = {
@@ -28,7 +28,7 @@ describe('bench helpers', () => {
   it('lists the PC at the time, with the PCIe link measured under load', () => {
     const ctx: BenchContext = {
       powerPlan: 'EXM Free Power Plan V8', ramMts: 3600, gpu: 'NVIDIA GeForce RTX 3060 Ti', gpuDriver: '610.74', windowsBuild: 26200,
-      displayHz: 360, gameSettings: null, gpuPnpDeviceId: 'PCI\\VEN_10DE&DEV_2489', gpuLink: { gen: 4, width: 16 },
+      displayHz: 360, gameSettings: null, gpuPnpDeviceId: 'PCI\\VEN_10DE&DEV_2489', gpuLink: { gen: 4, width: 16 }, appliedTweaks: null,
     };
     expect(contextRows(ctx)).toEqual([
       ['Power plan', 'EXM Free Power Plan V8'], ['RAM', '3600 MT/s'], ['Graphics', 'NVIDIA GeForce RTX 3060 Ti · 610.74'],
@@ -36,6 +36,31 @@ describe('bench helpers', () => {
     ]);
     // Saved by v0.2.0, or Windows didn't report the link during the runs.
     expect(contextRows({ ...ctx, gpuPnpDeviceId: null, gpuLink: null })[3]).toEqual(['PCIe link under load', 'Not reported']);
+  });
+
+  it('flags runs that vary by more than 10%, as kestrel-bench does', () => {
+    expect(spreadText(0.249)).toBe('24.9%');
+    expect(variesTooMuch(0.249)).toBe(true);
+    expect(variesTooMuch(0.1001)).toBe(true);
+    expect(variesTooMuch(0.1)).toBe(false);
+    expect(variesTooMuch(0.0999)).toBe(false);
+    expect(variesTooMuch(0.05)).toBe(false);
+    expect(variesTooMuch(0)).toBe(false);
+    expect(variesTooMuch(Number.NaN)).toBe(false);
+  });
+
+  it('names a tweak by its title, and an id it does not know by the id itself', () => {
+    expect(tweakName('power-plan')).toBe('Kestrel power plan');
+    expect(tweakName('game-mode')).toBe('Game Mode');
+    expect(tweakName('system-protection')).toBe('System Protection');
+    // From an older or a newer Kestrel: shown as saved, never dropped and never a crash.
+    expect(tweakName('from-the-future')).toBe('from-the-future');
+    expect(tweakName('')).toBe('');
+    expect(tweakName('Game Mode')).toBe('Game Mode');
+    // Names every object has are not titles.
+    for (const id of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf']) expect(tweakName(id)).toBe(id);
+    expect(tweakList(['game-mode', 'from-the-future', 'power-plan'])).toBe('Game Mode, from-the-future, Kestrel power plan');
+    expect(tweakList([])).toBe('');
   });
 
   it('signs percentages and colours verdicts', () => {

@@ -32,6 +32,19 @@ export const pct = (n: number): string => {
 /** A spread ratio (0.0317) as a percentage: "3.2%". */
 export const spreadText = (ratio: number): string => `${(ratio * 100).toFixed(1)}%`;
 
+/** Whether runs this far apart (a ratio, 0.249 is 24.9%) are too spread out to trust a small change: strictly above 10%, as kestrel-bench's `varies_too_much`. */
+export const variesTooMuch = (spread: number): boolean => spread > 0.1;
+
+/** A tweak's title for the page, or the id as saved when this Kestrel has no title for it (a file from an older or a newer Kestrel). */
+export function tweakName(id: string): string {
+  // Own properties only, so an id like "constructor" in a hand-edited file isn't taken for a title.
+  const titles: Record<string, string> = strings.tweaks.names;
+  return Object.prototype.hasOwnProperty.call(titles, id) ? titles[id] : id;
+}
+
+/** Tweaks named for the page, in the order given: "Game Mode, Kestrel power plan". */
+export const tweakList = (ids: string[]): string => ids.map(tweakName).join(', ');
+
 export const verdictTone = (v: Verdict): 'good' | 'bad' | 'neutral' => (v === 'real-gain' ? 'good' : v === 'real-loss' ? 'bad' : 'neutral');
 export const verdictText = (v: Verdict): string => strings.bench.verdict[v];
 
