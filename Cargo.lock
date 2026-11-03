@@ -1972,6 +1972,7 @@ dependencies = [
  "kestrel-bench",
  "kestrel-core",
  "kestrel-probe",
+ "kestrel-tweaks",
  "serde",
  "serde_json",
  "tauri",

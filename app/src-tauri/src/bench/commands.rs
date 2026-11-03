@@ -10,6 +10,7 @@ use kestrel_bench::{
     Store, ValorantSettings, PROFILES,
 };
 use kestrel_core::Report;
+use kestrel_tweaks::Engine;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -151,6 +152,16 @@ pub fn context_from(report: &Report) -> Context {
     }
 }
 
+/// The context a benchmark starts with: the scan's, and the tweaks that are applied right now. The list is the engine's
+/// `applied_ids`, which is empty when it can't read its journal; a benchmark with no list at all (`None`) is only one
+/// saved before stage 5.
+pub fn context_with_tweaks(report: &Report, engine: &Engine) -> Context {
+    Context {
+        applied_tweaks: Some(engine.applied_ids()),
+        ..context_from(report)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchDetail {
@@ -202,8 +213,11 @@ pub fn bench_state(controller: State<'_, Controller>) -> Result<Option<BenchStat
 #[tauri::command]
 pub async fn bench_start(app: AppHandle, profile: String) -> Result<BenchState, String> {
     let report = crate::latest_report(&app).await?;
+    // The engine reads its journal and Windows, so not on a worker of the async runtime.
+    let engine = app.state::<Arc<Engine>>().inner().clone();
+    let context = crate::tweaks::blocking(move || context_with_tweaks(&report, &engine)).await?;
     let controller = app.state::<Controller>();
-    controller.start(&profile, context_from(&report))
+    controller.start(&profile, context)
 }
 
 #[tauri::command(async)]
@@ -331,6 +345,43 @@ mod tests {
         }
         let c = context_from(&kestrel_core::build_report(snapshot, date, "test"));
         assert_eq!(c.gpu_pnp_device_id, None);
+    }
+
+    #[test]
+    fn a_benchmark_starts_knowing_which_tweaks_are_active() {
+        use kestrel_core::tweak_id::TweakId;
+        use kestrel_tweaks::fake::{FakeSystem, SID};
+        use kestrel_tweaks::journal::{JournalFile, PlainFolder};
+        use kestrel_tweaks::targets::{AUTO_GAME_MODE, GAME_BAR_KEY};
+        use kestrel_tweaks::PlanInput;
+
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        let report = kestrel_core::build_report(kestrel_core::owner_pc_fixture(), date, "test");
+        let dir = tempfile::tempdir().unwrap();
+        let pc = Arc::new(FakeSystem::new());
+        pc.set_dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE, 0);
+        let engine = Engine::new(
+            pc,
+            JournalFile::new(dir.path().join("Kestrel"), Box::new(PlainFolder)),
+        );
+
+        // No tweaks is a list with nothing in it, which is not the same as not knowing.
+        assert_eq!(
+            context_with_tweaks(&report, &engine).applied_tweaks,
+            Some(Vec::new())
+        );
+        let input = PlanInput::from_snapshot(&report.snapshot, None);
+        assert!(engine.apply(&input, &[TweakId::GameMode]).unwrap()[0].ok);
+        let context = context_with_tweaks(&report, &engine);
+        assert_eq!(context.applied_tweaks, Some(vec!["game-mode".to_string()]));
+        // The rest is the scan's.
+        assert_eq!(
+            Context {
+                applied_tweaks: None,
+                ..context
+            },
+            context_from(&report)
+        );
     }
 
     fn saved(store: &Store, created_at: &str, avg: f64) -> String {
