@@ -388,7 +388,12 @@ fn restore_point_line(outcome: &RestoreOutcome) -> String {
     match outcome {
         RestoreOutcome::Created { sequence } => format!("Restore point created (#{sequence})"),
         RestoreOutcome::Reused { sequence, time } => {
-            format!("Restore point reused from {} (#{sequence})", when(time))
+            let time = when(time);
+            if time.trim().is_empty() {
+                format!("Restore point reused (#{sequence})")
+            } else {
+                format!("Restore point reused from {time} (#{sequence})")
+            }
         }
         RestoreOutcome::Skipped => "Restore point skipped".to_string(),
         RestoreOutcome::Failed { reason } => {
@@ -693,6 +698,27 @@ History
                     },
                 )],
                 vec![at_18_12("Restore point reused from 2026-11-02 09:00 (#56)")],
+            ),
+            // A point Windows gave no time for.
+            (
+                vec![restore_point(
+                    &t,
+                    RestoreOutcome::Reused {
+                        sequence: 56,
+                        time: String::new(),
+                    },
+                )],
+                vec![at_18_12("Restore point reused (#56)")],
+            ),
+            (
+                vec![restore_point(
+                    &t,
+                    RestoreOutcome::Reused {
+                        sequence: 56,
+                        time: " \n ".to_string(),
+                    },
+                )],
+                vec![at_18_12("Restore point reused (#56)")],
             ),
             (
                 vec![restore_point(&t, RestoreOutcome::Skipped)],

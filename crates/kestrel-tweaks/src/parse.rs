@@ -151,21 +151,24 @@ pub fn mouse_strings(values: [i32; 3]) -> [(&'static str, String); 3] {
 }
 
 /// Whether System Protection is on for the Windows drive, from what can be read about it. `disable_sr` and
-/// `disable_config` are the policy values, and `volume` is the Windows drive's volume name, if Windows gave it.
-/// `clients` is the value under `SPP\Clients` that lists the protected volumes, as its type and bytes: `Absent` when the
-/// key isn't there, and `Value(None)` when the key is there and the value isn't.
+/// `disable_config` are the policy values, `clients` is the type and bytes of the value under `SPP\Clients` that lists
+/// the protected volumes, and `volume` is the Windows drive's volume name, if Windows gave it.
 ///
 /// Only a policy that is set blocks, whatever became of the other reads. A policy that couldn't be read isn't no
-/// policy, and a list or a volume that couldn't be read says nothing, so those are `Unknown`.
+/// policy, and a list that couldn't be read says nothing, so those are `Unknown`.
 ///
-/// A list that doesn't name the drive is `ProtectionOff`, and so is no list under a key that is there, which is how
-/// Sophia Script and the published REG file for turning protection off read it. If that's wrong, the dialog offers to
-/// turn on what is already on, and `Enable` on an enabled drive does no harm. A key that isn't there says nothing: a
-/// Windows with no System Restore may have none.
+/// No list at all, with the value or its whole key not there, is `ProtectionOff`, and there is no volume to compare it
+/// with. That's how Sophia Script reads it, the published REG file for turning protection off deletes the value, and a
+/// PC that never turned protection on may have no key. Anything else would keep the offer from that PC, and keep a row
+/// that can't close if `Disable` removes it. The price is small: a Windows with no System Restore gets an offer that
+/// fails with a sentence, and if a PC really has protection on with no list, `Enable` does no harm.
+///
+/// A list has to be compared with the volume, so without one it is `Unknown`. A list that names the drive is `Ready`,
+/// and one that doesn't is `ProtectionOff`.
 pub fn readiness(
     disable_sr: &Read<u32>,
     disable_config: &Read<u32>,
-    clients: &Read<Option<(u32, Vec<u8>)>>,
+    clients: &Read<(u32, Vec<u8>)>,
     volume: Option<&str>,
 ) -> Readiness {
     let policies = [disable_sr, disable_config];
@@ -178,18 +181,22 @@ pub fn readiness(
     if policies.iter().any(|read| matches!(read, Read::Failed(_))) {
         return Readiness::Unknown;
     }
-    let Some(guid) = volume.and_then(volume_guid) else {
+    let (kind, bytes) = match clients {
+        Read::Value((kind, bytes)) => (*kind, bytes),
+        Read::Absent => return Readiness::ProtectionOff,
+        Read::Failed(_) => return Readiness::Unknown,
+    };
+    let (Some(guid), Some(list)) = (volume.and_then(volume_guid), protected_volumes(kind, bytes))
+    else {
         return Readiness::Unknown;
     };
-    let guid = guid.to_ascii_lowercase();
-    match clients {
-        Read::Value(Some((kind, bytes))) => match protected_volumes(*kind, bytes) {
-            Some(list) if list.to_ascii_lowercase().contains(&guid) => Readiness::Ready,
-            Some(_) => Readiness::ProtectionOff,
-            None => Readiness::Unknown,
-        },
-        Read::Value(None) => Readiness::ProtectionOff,
-        Read::Absent | Read::Failed(_) => Readiness::Unknown,
+    if list
+        .to_ascii_lowercase()
+        .contains(&guid.to_ascii_lowercase())
+    {
+        Readiness::Ready
+    } else {
+        Readiness::ProtectionOff
     }
 }
 
@@ -276,8 +283,8 @@ fn instant_of_wmi_time(text: &str) -> Option<DateTime<Utc>> {
 
 /// What `SystemRestore.Enable` or `Disable` answered: whether to go on to the read of System Protection that settles
 /// it, or fail now. Microsoft says zero is success and anything else is an error code, whose number the person gets.
-/// 1717, the interface is unknown, goes on too: PowerShell's own cmdlets let it past for both methods, because the drive
-/// can change all the same, and the read is the truth either way.
+/// 1717, the interface is unknown, goes on too: PowerShell's own cmdlets let it past for both methods, because the
+/// drive can change all the same, and the read is the truth either way.
 pub fn method_answer(method: &str, answer: u32) -> Result<(), String> {
     const INTERFACE_UNKNOWN: u32 = 1717;
     match answer {
@@ -635,13 +642,12 @@ mod tests {
         bytes
     }
 
-    /// What the key and value that list the protected volumes read as: `Absent` when the key isn't there, and
-    /// `Value(None)` when it is and the value isn't.
-    type Clients = Read<Option<(u32, Vec<u8>)>>;
+    /// What the value that lists the protected volumes reads as.
+    type Clients = Read<(u32, Vec<u8>)>;
 
     /// A value of this type holding these bytes.
     fn held(kind: u32, bytes: Vec<u8>) -> Clients {
-        Read::Value(Some((kind, bytes)))
+        Read::Value((kind, bytes))
     }
 
     fn clients_with(entries: &[&str]) -> Clients {
@@ -727,21 +733,31 @@ mod tests {
     }
 
     #[test]
-    fn a_value_that_isnt_there_under_a_key_that_is_means_nothing_is_protected() {
-        // It's how Sophia Script reads it, and the published REG file for turning protection off deletes the value.
-        assert_eq!(with_no_policy(&Read::Value(None)), Readiness::ProtectionOff);
+    fn no_list_at_all_means_nothing_is_protected() {
+        // The value or its whole key not being there reads the same. It's how Sophia Script reads it, the published REG
+        // file for turning protection off deletes the value, and a PC that never turned it on may have no key.
+        assert_eq!(with_no_policy(&Read::Absent), Readiness::ProtectionOff);
     }
 
     #[test]
-    fn a_key_that_isnt_there_says_nothing() {
-        // A Windows with no System Restore may not have one.
-        assert_eq!(with_no_policy(&Read::Absent), Readiness::Unknown);
+    fn with_no_list_there_is_nothing_to_compare_a_volume_against() {
+        for volume in [None, Some(""), Some(r"\\?\Volume{not-a-guid}\")] {
+            assert_eq!(
+                readiness(&Read::Absent, &Read::Absent, &Read::Absent, volume),
+                Readiness::ProtectionOff,
+                "{volume:?}"
+            );
+        }
     }
 
     #[test]
     fn a_read_that_failed_says_nothing() {
         let failed = Read::Failed("Windows wouldn't read it".to_string());
         assert_eq!(with_no_policy(&failed), Readiness::Unknown);
+        assert_eq!(
+            readiness(&Read::Absent, &Read::Absent, &failed, None),
+            Readiness::Unknown
+        );
     }
 
     #[test]
@@ -759,8 +775,13 @@ mod tests {
 
     #[test]
     fn with_no_volume_nobody_can_say() {
-        // Whatever the list says, the empty one included: a failed read of the volume decides nothing.
-        for clients in [clients_with(&[VOLUME]), Read::Value(None)] {
+        // Whatever the value says, even that it lists nothing: with a value to compare against, a failed read of the
+        // volume decides nothing.
+        for clients in [
+            clients_with(&[VOLUME]),
+            clients_with(&[OTHER_VOLUME]),
+            clients_with(&[]),
+        ] {
             for volume in [
                 None,
                 Some(""),
@@ -829,8 +850,13 @@ mod tests {
             Readiness::BlockedByPolicy
         );
         assert_eq!(
-            readiness(&Read::Value(1), &Read::Absent, &Read::Value(None), None),
+            readiness(&Read::Value(1), &Read::Absent, &Read::Absent, None),
             Readiness::BlockedByPolicy
+        );
+        // And with no list a policy that can't be read is still not no policy.
+        assert_eq!(
+            readiness(&failed, &Read::Absent, &Read::Absent, Some(VOLUME)),
+            Readiness::Unknown
         );
     }
 

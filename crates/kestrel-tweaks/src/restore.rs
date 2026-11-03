@@ -38,7 +38,7 @@ const NOT_LISTED: &str = "Windows didn't list the new restore point.";
 #[cfg(any(windows, test))]
 const TOOK_TOO_LONG: &str = "Windows took too long to create the restore point.";
 const UNREADABLE_ANSWER: &str = "Kestrel's restore point helper gave an answer it can't read.";
-const HELPER_PANICKED: &str = "Kestrel's restore point helper ran into a bug.";
+const HELPER_PANICKED: &str = "Kestrel's restore point helper ran into a bug";
 
 /// What the person chose when Apply came to the restore point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,11 +78,12 @@ pub trait RestorePoints {
 
 /// Asks for a restore point, and says what came of it.
 ///
-/// Windows makes one point per 24 hours, and inside that window it says yes with the earlier point's number, which is
-/// `Reused`, with that point's time. Only a number above the one listed before the call is `Created`, and only once
-/// Windows lists it, which can lag the call: `wait` runs before each of up to 30 looks, so each wait sits between two
-/// reads of the list. If the first read fails nothing is asked for, because a point reused would then pass for a new
-/// one.
+/// Windows makes one point per 24 hours, and inside that window it says yes with an earlier point's number. Sequence
+/// numbers only rise, so an answer at or below the newest listed number is an earlier point: `Reused`, with the listed
+/// point's number and time, and nothing to wait for. Only a number above the one listed before the call is `Created`,
+/// and only once Windows lists it, which can lag the call: `wait` runs before each of up to 30 looks, so each wait sits
+/// between two reads of the list. If the first read fails nothing is asked for, because a point reused would then pass
+/// for a new one.
 pub fn make_point(
     points: &dyn RestorePoints,
     description: &str,
@@ -98,7 +99,7 @@ pub fn make_point(
         Err(CreateError::Other(reason)) => return RestoreOutcome::Failed { reason },
     };
     let floor = before.as_ref().map(|point| point.sequence);
-    if let Some(point) = before.filter(|point| point.sequence == answer) {
+    if let Some(point) = before.filter(|point| answer <= point.sequence) {
         return RestoreOutcome::Reused {
             sequence: point.sequence,
             time: point.time,
@@ -137,25 +138,47 @@ pub fn newest_of(points: impl IntoIterator<Item = Point>) -> Option<Point> {
 }
 
 /// Whether `SRSetRestorePointW` opened a new point, going by the list from just before it (`before`) and the number it
-/// answered with (`sequence`). The number already listed means Windows made nothing, and a sequence that wasn't opened
-/// mustn't be ended. A list that couldn't be read is a no: leaving a new point not ended does no harm, as Microsoft's
-/// sample says that call is only required of nested points.
-pub fn opened_a_new_point(before: &Result<Option<Point>, String>, sequence: i64) -> bool {
+/// answered with (`sequence`). Sequence numbers only rise, so only a number above the newest listed one is new, and a
+/// sequence that wasn't opened mustn't be ended. A list that couldn't be read is a no: leaving a new point not ended
+/// does no harm, as Microsoft's sample says that call is only required of nested points.
+fn opened_a_new_point(before: &Result<Option<Point>, String>, sequence: i64) -> bool {
     match before {
-        Ok(Some(point)) => i64::from(point.sequence) != sequence,
-        Ok(None) => true,
+        Ok(Some(point)) => sequence > i64::from(point.sequence),
+        Ok(None) => sequence > 0,
         Err(_) => false,
     }
 }
 
+/// What comes of the number `SRSetRestorePointW` answered `BEGIN_SYSTEM_CHANGE` with: the number, once it's known to be
+/// one a point can have, which comes before anything else is sent. `end` sends `END_SYSTEM_CHANGE`, and it's called
+/// only for a point opened here (see `opened_a_new_point`).
+pub fn after_begin(
+    before: &Result<Option<Point>, String>,
+    sequence: i64,
+    end: impl FnOnce(),
+) -> Result<u32, CreateError> {
+    let answer = u32::try_from(sequence).map_err(|_| {
+        CreateError::Other(format!(
+            "Windows answered with a restore point number no point can have: {sequence}."
+        ))
+    })?;
+    if opened_a_new_point(before, sequence) {
+        end();
+    }
+    Ok(answer)
+}
+
 /// What a failed `SRSetRestorePointW` means, from the status it leaves. Microsoft lists them on `STATEMGRSTATUS`.
 pub fn create_error(status: u32) -> CreateError {
+    const ERROR_SUCCESS: u32 = 0;
     const ERROR_BAD_ENVIRONMENT: u32 = 10;
     const ERROR_DISK_FULL: u32 = 112;
     const ERROR_SERVICE_DISABLED: u32 = 1058;
     const ERROR_TIMEOUT: u32 = 1460;
     let said = match status {
         ERROR_SERVICE_DISABLED => return CreateError::ProtectionOff,
+        // As an error's text this would say the operation succeeded.
+        ERROR_SUCCESS => "Windows refused the restore point and didn't say why.".to_string(),
         ERROR_BAD_ENVIRONMENT => "Windows doesn't make restore points in safe mode.".to_string(),
         ERROR_DISK_FULL => {
             "System Restore has paused because the disk is low on space.".to_string()
@@ -197,10 +220,10 @@ fn not_settled(wanted: Readiness, seen: Readiness) -> String {
         Readiness::Ready => "it's on",
         Readiness::ProtectionOff => "it's off",
         Readiness::BlockedByPolicy => "a policy blocks it",
-        Readiness::Unknown => "Kestrel can't tell",
+        Readiness::Unknown => "it can't be read",
     };
     let seconds = u64::from(POLLS) * POLL_WAIT.as_secs();
-    format!("Windows said it turned System Protection {turned}, and {seconds} seconds later {now}.")
+    format!("Kestrel asked Windows to turn System Protection {turned}, and {seconds} seconds later {now}.")
 }
 
 /// The helper: makes the point and prints how it went as one line of `RestoreOutcome` JSON, whatever happened, and that
@@ -221,9 +244,19 @@ fn made_here() -> RestoreOutcome {
     RestoreOutcome::Skipped
 }
 
-/// A bug in the helper is one more thing that can go wrong with a restore point, and the app gets a line about it.
+/// A bug in the helper is one more thing that can go wrong with a restore point, and the app gets a line about it. The
+/// helper's stderr goes nowhere, so the line carries the panic's message when it has one.
 fn surviving(work: impl FnOnce() -> RestoreOutcome + UnwindSafe) -> RestoreOutcome {
-    catch_unwind(work).unwrap_or_else(|_| failed(HELPER_PANICKED))
+    catch_unwind(work).unwrap_or_else(|panic| {
+        let said = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+        match said {
+            Some(said) => failed(&format!("{HELPER_PANICKED}: {said}")),
+            None => failed(&format!("{HELPER_PANICKED}.")),
+        }
+    })
 }
 
 /// The helper's line. A stdout that is closed loses it, which `println!` would make a panic; the app then has no answer
@@ -405,6 +438,25 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_below_the_newest_is_reused_with_the_newest_ones_number_and_time() {
+        // Sequence numbers only rise, so no new point is coming, and there is nothing to wait for.
+        for answer in [56, 55, 1, 0] {
+            let points = Scripted::new(vec![Ok(point(57))], Ok(answer));
+            let (outcome, waits) = made(&points);
+            assert_eq!(
+                outcome,
+                RestoreOutcome::Reused {
+                    sequence: 57,
+                    time: THEN.to_string()
+                },
+                "{answer}"
+            );
+            assert_eq!(points.reads.get(), 1, "no polling for {answer}");
+            assert_eq!(waits, 0, "{answer}");
+        }
+    }
+
+    #[test]
     fn success_without_a_listing_fails_after_thirty_polls() {
         let points = Scripted::new(vec![Ok(point(56))], Ok(57));
         let (outcome, waits) = made(&points);
@@ -496,15 +548,70 @@ mod tests {
     }
 
     #[test]
-    fn only_a_number_windows_hadnt_listed_was_opened_here() {
-        let before = |sequence| -> Listing { Ok(point(sequence)) };
-        assert!(!opened_a_new_point(&before(56), 56));
-        assert!(opened_a_new_point(&before(56), 57));
+    fn only_a_number_above_the_newest_listed_was_opened_here() {
+        let newest = |sequence| -> Listing { Ok(point(sequence)) };
+        assert!(opened_a_new_point(&newest(56), 57));
+        assert!(!opened_a_new_point(&newest(56), 56));
+        // Sequence numbers only rise, so these are earlier points.
+        assert!(!opened_a_new_point(&newest(56), 55));
+        assert!(!opened_a_new_point(&newest(56), 1));
+        // With nothing listed, only a number a point can have.
         assert!(opened_a_new_point(&Ok(None), 1));
+        assert!(!opened_a_new_point(&Ok(None), 0));
+        assert!(!opened_a_new_point(&Ok(None), -1));
         // Ending what wasn't opened here is what mustn't happen, and not ending a new one does no harm.
         assert!(!opened_a_new_point(&Err("No list.".to_string()), 57));
-        // A number no point could have is not the one listed.
-        assert!(opened_a_new_point(&before(56), i64::from(u32::MAX) + 57));
+    }
+
+    /// What `after_begin` comes to, and whether it sent `END_SYSTEM_CHANGE`.
+    fn after_answer(before: &Listing, answer: i64) -> (Result<u32, CreateError>, bool) {
+        let mut ended = false;
+        let said = after_begin(before, answer, || ended = true);
+        (said, ended)
+    }
+
+    #[test]
+    fn a_new_number_is_ended_and_comes_back() {
+        assert_eq!(after_answer(&Ok(point(56)), 57), (Ok(57), true));
+        assert_eq!(after_answer(&Ok(None), 1), (Ok(1), true));
+    }
+
+    #[test]
+    fn a_number_at_or_below_the_newest_comes_back_with_no_end() {
+        for answer in [56, 55, 1, 0] {
+            let said = u32::try_from(answer).unwrap();
+            assert_eq!(
+                after_answer(&Ok(point(56)), answer),
+                (Ok(said), false),
+                "{answer}"
+            );
+        }
+        assert_eq!(after_answer(&Ok(None), 0), (Ok(0), false));
+    }
+
+    #[test]
+    fn a_number_no_point_can_have_is_an_error_with_no_end() {
+        // The number is checked before anything is sent, or the second of these would end a sequence nothing opened.
+        let too_big = i64::from(u32::MAX) + 57;
+        assert_eq!(too_big, 4_294_967_352);
+        for answer in [-1, too_big, i64::MIN, i64::MAX] {
+            for before in [Ok(point(56)), Ok(None)] {
+                let (said, ended) = after_answer(&before, answer);
+                assert_eq!(
+                    said,
+                    Err(CreateError::Other(format!(
+                        "Windows answered with a restore point number no point can have: {answer}."
+                    )))
+                );
+                assert!(!ended, "{answer}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_that_couldnt_be_read_is_no_end_and_the_number_still_comes_back() {
+        let before = Err("No list.".to_string());
+        assert_eq!(after_answer(&before, 57), (Ok(57), false));
     }
 
     #[test]
@@ -531,6 +638,15 @@ mod tests {
             );
             assert!(said.ends_with(&format!("(os error {status})")), "{said}");
         }
+    }
+
+    #[test]
+    fn a_refusal_with_no_status_doesnt_read_as_success() {
+        // Zero is "the operation completed successfully" to Windows, which is the last thing to tell someone here.
+        assert_eq!(
+            create_error(0),
+            CreateError::Other("Windows refused the restore point and didn't say why.".to_string())
+        );
     }
 
     // Waiting for System Protection.
@@ -582,27 +698,27 @@ mod tests {
             (
                 Ready,
                 ProtectionOff,
-                "Windows said it turned System Protection on, and 30 seconds later it's off.",
+                "Kestrel asked Windows to turn System Protection on, and 30 seconds later it's off.",
             ),
             (
                 ProtectionOff,
                 Ready,
-                "Windows said it turned System Protection off, and 30 seconds later it's on.",
+                "Kestrel asked Windows to turn System Protection off, and 30 seconds later it's on.",
             ),
             (
                 Ready,
                 Unknown,
-                "Windows said it turned System Protection on, and 30 seconds later Kestrel can't tell.",
+                "Kestrel asked Windows to turn System Protection on, and 30 seconds later it can't be read.",
             ),
             (
                 ProtectionOff,
                 Unknown,
-                "Windows said it turned System Protection off, and 30 seconds later Kestrel can't tell.",
+                "Kestrel asked Windows to turn System Protection off, and 30 seconds later it can't be read.",
             ),
             (
                 Ready,
                 BlockedByPolicy,
-                "Windows said it turned System Protection on, and 30 seconds later a policy blocks it.",
+                "Kestrel asked Windows to turn System Protection on, and 30 seconds later a policy blocks it.",
             ),
         ] {
             let (settled, reads, waits) = settling(wanted, &[stays]);
@@ -679,14 +795,27 @@ mod tests {
 
     #[test]
     fn a_panic_in_the_helper_is_an_outcome_and_not_a_crash() {
-        let outcome = surviving(|| panic!("WMI said something no one expected"));
-        assert_eq!(
-            outcome,
-            failed("Kestrel's restore point helper ran into a bug.")
-        );
         assert_eq!(
             surviving(|| RestoreOutcome::Skipped),
             RestoreOutcome::Skipped
+        );
+        // Stderr goes nowhere, so the reason is the only place its message can reach anyone.
+        assert_eq!(
+            surviving(|| panic!("WMI said something no one expected")),
+            failed(
+                "Kestrel's restore point helper ran into a bug: WMI said something no one expected"
+            )
+        );
+        // A message with values in it comes as another type.
+        let number = 7;
+        assert_eq!(
+            surviving(move || panic!("WMI said {number}")),
+            failed("Kestrel's restore point helper ran into a bug: WMI said 7")
+        );
+        // And a panic needn't hold text at all.
+        assert_eq!(
+            surviving(|| std::panic::panic_any(7)),
+            failed("Kestrel's restore point helper ran into a bug.")
         );
     }
 

@@ -20,17 +20,13 @@ fn is_missing(error: &io::Error) -> bool {
     error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32)
 }
 
-/// Opens a key to read it. A key that isn't there is `Absent`. `shown` is the key without its hive, for a sentence.
-fn key_to_read(root: HKEY, path: &str, shown: &str) -> Read<RegKey> {
-    match RegKey::predef(root).open_subkey_with_flags(path, KEY_READ) {
-        Ok(key) => Read::Value(key),
-        Err(error) if is_missing(&error) => Read::Absent,
-        Err(error) => Read::Failed(parse::failed_read(shown, &error)),
-    }
-}
-
-/// Reads a value in an open key. A value that isn't there is `Absent`.
-fn value_in(key: &RegKey, name: &str) -> Read<RawValue> {
+/// Reads a value. A key or value that isn't there is `Absent`. `shown` is the key without its hive, for a sentence.
+fn raw_value(root: HKEY, path: &str, shown: &str, name: &str) -> Read<RawValue> {
+    let key = match RegKey::predef(root).open_subkey_with_flags(path, KEY_READ) {
+        Ok(key) => key,
+        Err(error) if is_missing(&error) => return Read::Absent,
+        Err(error) => return Read::Failed(parse::failed_read(shown, &error)),
+    };
     match key.get_raw_value(name) {
         Ok(value) => Read::Value((value.vtype as u32, value.bytes.into_owned())),
         Err(error) if is_missing(&error) => Read::Absent,
@@ -38,36 +34,13 @@ fn value_in(key: &RegKey, name: &str) -> Read<RawValue> {
     }
 }
 
-/// Reads a value. A key or value that isn't there is `Absent`.
-fn raw_value(root: HKEY, path: &str, shown: &str, name: &str) -> Read<RawValue> {
-    match key_to_read(root, path, shown) {
-        Read::Value(key) => value_in(&key, name),
-        Read::Absent => Read::Absent,
-        Read::Failed(why) => Read::Failed(why),
-    }
-}
-
 fn user_value(sid: &str, key: &str, name: &str) -> Read<RawValue> {
     raw_value(HKEY_USERS, &user_key_path(sid, key), key, name)
 }
 
-fn machine_value(key: &str, name: &str) -> Read<RawValue> {
+/// A value under `HKEY_LOCAL_MACHINE` as it is held, for the one that isn't a DWORD or a plain string.
+pub(super) fn machine_value(key: &str, name: &str) -> Read<RawValue> {
     raw_value(HKEY_LOCAL_MACHINE, key, key, name)
-}
-
-/// A value under `HKEY_LOCAL_MACHINE` as it is held, for the one that isn't a DWORD or a plain string and where it
-/// matters which of the two isn't there: `Absent` when the key isn't, and `Value(None)` when the key is and the value
-/// isn't.
-pub(super) fn machine_value_in_key(key: &str, name: &str) -> Read<Option<RawValue>> {
-    match key_to_read(HKEY_LOCAL_MACHINE, key, key) {
-        Read::Absent => Read::Absent,
-        Read::Failed(why) => Read::Failed(why),
-        Read::Value(opened) => match value_in(&opened, name) {
-            Read::Value(value) => Read::Value(Some(value)),
-            Read::Absent => Read::Value(None),
-            Read::Failed(why) => Read::Failed(why),
-        },
-    }
 }
 
 /// A value that is there, read as the type asked for.
@@ -372,18 +345,15 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_value_tells_a_key_that_isnt_there_from_a_value_that_isnt() {
+    fn a_machine_value_is_read_as_it_is_held_and_what_isnt_there_is_absent() {
         assert_eq!(
-            machine_value_in_key(r"SOFTWARE\Policies\Kestrel\NoSuchKey", "V"),
+            machine_value(r"SOFTWARE\Policies\Kestrel\NoSuchKey", "V"),
             Read::Absent
         );
         // Every Windows has this key, and this string in it.
         let key = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
-        assert_eq!(
-            machine_value_in_key(key, "KestrelNoSuchValue"),
-            Read::Value(None)
-        );
-        let Read::Value(Some((kind, bytes))) = machine_value_in_key(key, "ProductName") else {
+        assert_eq!(machine_value(key, "KestrelNoSuchValue"), Read::Absent);
+        let Read::Value((kind, bytes)) = machine_value(key, "ProductName") else {
             panic!("the value should read as it is held");
         };
         assert_eq!(kind, parse::REG_SZ);

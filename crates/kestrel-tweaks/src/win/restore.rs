@@ -53,8 +53,8 @@ use super::registry;
 use crate::journal::RestoreOutcome;
 use crate::parse;
 use crate::restore::{
-    create_error, make_point, newest_of, opened_a_new_point, protection_settles, CreateError,
-    Point, RestorePoints, DESCRIPTION, POLL_WAIT,
+    after_begin, create_error, make_point, newest_of, protection_settles, CreateError, Point,
+    RestorePoints, DESCRIPTION, POLL_WAIT,
 };
 use crate::system::Readiness;
 
@@ -96,7 +96,7 @@ pub(super) fn protection() -> Readiness {
     parse::readiness(
         &registry::read_policy_dword(POLICY_KEY, DISABLE_SR),
         &registry::read_policy_dword(POLICY_KEY, DISABLE_CONFIG),
-        &registry::machine_value_in_key(CLIENTS_KEY, CLIENTS_VALUE),
+        &registry::machine_value(CLIENTS_KEY, CLIENTS_VALUE),
         system_volume().ok().as_deref(),
     )
 }
@@ -466,10 +466,9 @@ impl RestorePoints for WinPoints {
         })))
     }
 
-    /// Opens a point with `BEGIN_SYSTEM_CHANGE`, and ends it with `END_SYSTEM_CHANGE` only if a new one opened: the
-    /// number answered when Windows skips making one belongs to an earlier point, which isn't this call's to end. The
-    /// point exists from the first call, so the second one failing changes nothing, and its result isn't looked at. It
-    /// reads the list for itself because `make_point`'s read isn't passed down to it.
+    /// Opens a point with `BEGIN_SYSTEM_CHANGE`, and ends it with `END_SYSTEM_CHANGE` only if a new one opened, which
+    /// is `after_begin`'s to say. The point exists from the first call, so the second one failing changes nothing, and
+    /// its result isn't looked at. It reads the list for itself because `make_point`'s read isn't passed down to it.
     fn create(&self, description: &str) -> Result<u32, CreateError> {
         let client = SrClient::load().map_err(CreateError::Other)?;
         let before = self.newest();
@@ -480,15 +479,10 @@ impl RestorePoints for WinPoints {
             szDescription: parse::restore_description(description),
         };
         let sequence = client.set(&spec).map_err(create_error)?;
-        if opened_a_new_point(&before, sequence) {
+        after_begin(&before, sequence, || {
             spec.dwEventType = END_SYSTEM_CHANGE;
             spec.llSequenceNumber = sequence;
             let _ = client.set(&spec);
-        }
-        u32::try_from(sequence).map_err(|_| {
-            CreateError::Other(format!(
-                "Windows answered with a restore point number no point can have: {sequence}."
-            ))
         })
     }
 }
