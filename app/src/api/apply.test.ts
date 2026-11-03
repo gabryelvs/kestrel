@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { runApply, settle, type ApplyAt, type ApplyCommands, type ApplyStep } from './apply';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { continueAt, runApply, settle, type ApplyAt, type ApplyCommands, type ApplyNext, type ApplyStep } from './apply';
+import { SCAN_WAIT_MS } from './rescan';
 import { createSampleTweaks } from './sample-tweaks';
+import { watchUnhandledRejections } from './test-support';
 import type { ItemOutcome, Readiness, RestoreOutcome } from './types';
 
 const flush = async () => {
@@ -112,7 +114,7 @@ describe('Apply, in order', () => {
       },
     });
     const next = await r.run('pressed');
-    expect(next).toEqual({ next: 'ask', question: { kind: 'failed', reason: 'System Protection is off.' } });
+    expect(next).toEqual({ next: 'ask', question: { kind: 'failed', reason: 'System Protection is off.', turnOnAsked: false } });
     expect(calls).toEqual(['restore:create']);
     expect(r.steps).toEqual(['restoring']);
   });
@@ -167,6 +169,9 @@ describe('Apply, in order', () => {
     const wentOn = rig();
     await wentOn.run('go-on');
     expect(wentOn.calls).not.toContain('restore:skip');
+    const wentOnAfterTurnOn = rig();
+    await wentOnAfterTurnOn.run('go-on-after-turn-on');
+    expect(wentOnAfterTurnOn.calls).not.toContain('restore:skip');
     // Continue without records the skip, and then applies.
     for (const readiness of ['protection-off', 'blocked-by-policy'] as const) {
       const r = rig(readiness);
@@ -175,6 +180,31 @@ describe('Apply, in order', () => {
       expect(r.steps).toEqual(['applying', 'rescanning']);
       expect(next.next).toBe('applied');
       expect(r.pc.report()).toContain('Restore point skipped');
+    }
+  });
+});
+
+describe('what Continue means', () => {
+  it('is Continue without at the questions about System Protection being off or a policy, which is the one way to skip', () => {
+    expect(continueAt({ kind: 'protection-off' })).toBe('without');
+    expect(continueAt({ kind: 'blocked-by-policy' })).toBe('without');
+  });
+
+  it('is going on, with no skip, after a point that failed, and remembers a turn-on that was asked for', () => {
+    expect(continueAt({ kind: 'failed', reason: 'Timed out.', turnOnAsked: false })).toBe('go-on');
+    expect(continueAt({ kind: 'failed', reason: 'Timed out.', turnOnAsked: true })).toBe('go-on-after-turn-on');
+  });
+
+  it('is what the question Apply asked comes back as, for each way a point can fail', async () => {
+    // The page does exactly this: the question out of one go is the answer's `at` for the next.
+    for (const [readiness, at, turnOnAsked] of [['ready', 'pressed', false], ['protection-off', 'turn-on', true]] as const) {
+      const r = rig(readiness, { restorePoint: async () => failedPoint('Timed out.') });
+      const asked = await r.run(at);
+      if (asked.next !== 'ask') throw new Error('Expected a question.');
+      expect(asked.question).toMatchObject({ kind: 'failed', turnOnAsked });
+      const refusing = rig(readiness, { apply: async (): Promise<ItemOutcome[]> => { throw 'Close VALORANT first.'; } });
+      const stopped = await refusing.run(continueAt(asked.question));
+      expect(stopped).toMatchObject({ next: 'stopped', settings: turnOnAsked ? 'protection-may-have-changed' : 'unchanged' });
     }
   });
 });
@@ -193,18 +223,20 @@ describe('Apply, when something is refused', () => {
       },
     });
     const next = await r.run('pressed');
-    expect(next).toEqual({ next: 'stopped', message: 'Kestrel is already changing settings in another window.', unchanged: true });
+    expect(next).toEqual({ next: 'stopped', message: 'Kestrel is already changing settings in another window.', settings: 'unchanged' });
     expect(calls).toEqual(['restore:create']);
   });
 
-  it('says the same of a skip that is rejected, but not of a turn-on, which may have changed System Protection', async () => {
+  it('says the same of a skip that is rejected, but not of a turn-on, which may have turned System Protection on', async () => {
     const reject = async () => {
       throw 'The journal is held by another process.';
     };
     const skipped = rig('blocked-by-policy', { restorePoint: reject });
-    expect(await skipped.run('without')).toEqual({ next: 'stopped', message: 'The journal is held by another process.', unchanged: true });
+    expect(await skipped.run('without')).toEqual({ next: 'stopped', message: 'The journal is held by another process.', settings: 'unchanged' });
     const turnedOn = rig('protection-off', { restorePoint: reject });
-    expect(await turnedOn.run('turn-on')).toEqual({ next: 'stopped', message: 'The journal is held by another process.', unchanged: false });
+    expect(await turnedOn.run('turn-on')).toEqual({
+      next: 'stopped', message: 'The journal is held by another process.', settings: 'protection-may-have-changed',
+    });
   });
 
   it('is turned away by a closed gate at the restore point, before anything is applied', async () => {
@@ -212,7 +244,7 @@ describe('Apply, when something is refused', () => {
       const r = rig();
       r.pc.setGate(gate);
       const next = await r.run('pressed');
-      expect(next, gate).toEqual({ next: 'stopped', message: said, unchanged: true });
+      expect(next, gate).toEqual({ next: 'stopped', message: said, settings: 'unchanged' });
       expect(r.calls, gate).toEqual(['restore:create']);
     }
   });
@@ -242,12 +274,55 @@ describe('Apply, when something is refused', () => {
       'pressed',
       () => undefined,
     );
-    expect(next).toEqual({ next: 'stopped', message: 'Close VALORANT first.', unchanged: true });
+    expect(next).toEqual({ next: 'stopped', message: 'Close VALORANT first.', settings: 'unchanged' });
     expect(calls).toEqual(['restore:create', APPLY]);
     pc.setGate('open');
     expect(pc.report()).toContain('Restore point created (#57)');
     expect(pc.report()).not.toContain('Applied');
     expect(pc.view().anyActive).toBe(false);
+  });
+
+  it('remembers, in the question about a failed point, whether it was asked to turn System Protection on', async () => {
+    const failing = { restorePoint: async () => failedPoint('Timed out.') };
+    expect(await rig('ready', failing).run('pressed')).toMatchObject({ question: { kind: 'failed', turnOnAsked: false } });
+    expect(await rig('protection-off', failing).run('turn-on')).toEqual({ next: 'ask', question: { kind: 'failed', reason: 'Timed out.', turnOnAsked: true } });
+  });
+
+  it('does not say no settings were changed when Turn on and create worked and the apply is then refused', async () => {
+    const r = rig('protection-off');
+    const { pc } = r;
+    // VALORANT starts while the restore point is made: System Protection is on, and the changes are refused.
+    const next = await runApply(
+      {
+        restorePoint: async (choice) => {
+          const outcome = pc.restorePoint(choice);
+          pc.setGate('game-running');
+          return outcome;
+        },
+        apply: async (ids) => pc.apply(ids),
+        rescan: async () => undefined,
+      },
+      r.preview,
+      'turn-on',
+      () => undefined,
+    );
+    expect(next).toEqual({ next: 'stopped', message: 'Close VALORANT first.', settings: 'protection-may-have-changed' });
+    // It did change something, which is why "No settings were changed." would have been false.
+    pc.setGate('open');
+    expect(pc.view().rows.some((row) => row.id === 'system-protection')).toBe(true);
+  });
+
+  it('says it too for Continue after a point that failed while turning System Protection on, and not after one that did not', async () => {
+    const refusing = { apply: async (): Promise<ItemOutcome[]> => { throw 'Close VALORANT first.'; } };
+    expect(await rig('ready', refusing).run('go-on-after-turn-on')).toEqual({ next: 'stopped', message: 'Close VALORANT first.', settings: 'protection-may-have-changed' });
+    expect(await rig('ready', refusing).run('go-on')).toEqual({ next: 'stopped', message: 'Close VALORANT first.', settings: 'unchanged' });
+  });
+
+  it('applies for Continue after a failed turn-on exactly as for any other Continue: no second restore point, no skip', async () => {
+    const r = rig();
+    const next = await r.run('go-on-after-turn-on');
+    expect(r.calls).toEqual([APPLY, 'rescan']);
+    expect(next.next).toBe('applied');
   });
 
   it('shows what each item came to when some are refused and some are not', async () => {
@@ -311,6 +386,71 @@ describe('scanning again after a change', () => {
     expect(next.next).toBe('applied');
     expect(calls).toEqual([]);
     expect(r.steps).toEqual(['restoring', 'applying']);
+  });
+});
+
+describe('a scan that never settles', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const never = () => new Promise<void>(() => undefined);
+
+  it('does not keep Apply from finishing: the result shows once the wait is over', async () => {
+    const r = rig('ready', { rescan: never });
+    let next: ApplyNext | undefined;
+    void r.run('pressed').then((found) => {
+      next = found;
+    });
+    await vi.advanceTimersByTimeAsync(SCAN_WAIT_MS - 1);
+    expect(next).toBeUndefined();
+    expect(r.steps).toEqual(['restoring', 'applying', 'rescanning']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(next).toMatchObject({ next: 'applied', restart: true });
+    expect(r.pc.view().anyActive).toBe(true);
+  });
+
+  it('waits no longer than that in settle either, which every button that changes something uses', async () => {
+    let done = false;
+    void settle([{ id: 'game-mode', title: 'Game Mode', ok: true, message: 'Undone.' }], never).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(SCAN_WAIT_MS - 1);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+  });
+
+  it('leaves no timer behind when the scan ends in time', async () => {
+    const ok: ItemOutcome = { id: 'game-mode', title: 'Game Mode', ok: true, message: 'Undone.' };
+    await settle([ok], async () => undefined);
+    expect(vi.getTimerCount()).toBe(0);
+    await settle([ok], async () => {
+      throw new Error('The scan failed.');
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('is no unhandled rejection when the scan fails after the wait is over', async () => {
+    const watch = watchUnhandledRejections();
+    try {
+      let fail!: (error: Error) => void;
+      const slow = new Promise<void>((_, reject) => {
+        fail = reject;
+      });
+      const waiting = settle([{ id: 'game-mode', title: 'Game Mode', ok: true, message: 'Undone.' }], () => slow);
+      await vi.advanceTimersByTimeAsync(SCAN_WAIT_MS);
+      await waiting;
+      fail(new Error('The scan failed, late.'));
+      await vi.advanceTimersByTimeAsync(10);
+      vi.useRealTimers();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(watch.seen).toEqual([]);
+    } finally {
+      watch.stop();
+    }
   });
 });
 

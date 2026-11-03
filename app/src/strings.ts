@@ -233,6 +233,8 @@ export const strings = {
     result: 'Result',
     /** Said when a command was refused before it changed a setting. A restore point may have been made, so it says less than "nothing". */
     noSettingsChanged: 'No settings were changed.',
+    /** Said when a turn-on was asked for and what came after was refused: System Protection's row, if there is one, is in the list above. */
+    protectionMayHaveChanged: 'System Protection may have been turned on: check its row above.',
     restartValorant: 'Restart VALORANT for these to take effect.',
     done: 'Measure it on your PC: run a benchmark and compare it with your starting point.',
     runBenchmark: 'Run a benchmark',

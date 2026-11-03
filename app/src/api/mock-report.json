@@ -2,7 +2,7 @@
   "appVersion": "0.3.0",
   "snapshot": {
     "schemaVersion": 2,
-    "collectedAt": "2026-11-02T17:21:30Z",
+    "collectedAt": "2026-11-03T05:49:42Z",
     "os": {
       "caption": "Microsoft Windows 11 Pro",
       "build": 26200,
@@ -374,7 +374,7 @@
       "severity": "medium",
       "status": "problem",
       "title": "Power plan is Balanced",
-      "detail": "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's plan is in the Tweaks tab.",
+      "detail": "This plan lets the CPU slow down between frames, which can hurt 1% lows. Kestrel's plan is in the Tweaks tab.",
       "fix": {
         "kind": "tweak",
         "tweak": "power-plan"

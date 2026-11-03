@@ -247,10 +247,10 @@ describe('RestoreStep', () => {
   });
 
   it('asks whether to go on when the restore point failed, with one full stop whichever way the reason ends', () => {
-    const stop = step({ kind: 'failed', reason: 'System Protection is off.' });
+    const stop = step({ kind: 'failed', reason: 'System Protection is off.', turnOnAsked: false });
     expect(stop).toContain('Couldn’t create a restore point: System Protection is off. Continue with Kestrel’s undo only?');
     expect(texts(stop)).toEqual(['Continue', 'Cancel']);
-    const none = step({ kind: 'failed', reason: 'Windows refused the request (os error 5)' });
+    const none = step({ kind: 'failed', reason: 'Windows refused the request (os error 5)', turnOnAsked: true });
     expect(none).toContain('Couldn’t create a restore point: Windows refused the request (os error 5). Continue with Kestrel’s undo only?');
     expect(stop).not.toContain('..');
     expect(none).not.toContain('..');
@@ -416,6 +416,15 @@ describe('the page’s body', () => {
     // And a way to read the page again once VALORANT is closed, beside the reason.
     expect(html).toMatch(/Close VALORANT first\.<\/span><button[^>]*>Try again<\/button>/);
     expect(button(html, t.tryAgain)?.disabled).toBe(false);
+  });
+
+  it('lets the reason beside the buttons wrap, since it can carry a command’s error as Rust wrote it', () => {
+    const closed = body({ view: { ...ownerView(), gate: 'game-running' } });
+    expect(closed).toMatch(/<span class="tweak-gate wrap">Close VALORANT first\.<\/span>/);
+    const stale = renderToStaticMarkup(
+      <TweaksPage load={{ state: 'ready', view: ownerView(), stale: `C:\\${'ProgramData\\'.repeat(12)}Kestrel belongs to another account.` }} report={ready()} measure={null} choices={{}} flow={idle} on={on} />,
+    );
+    expect(stale).toMatch(/<span class="tweak-gate wrap">Kestrel couldn’t read the tweaks again/);
   });
 
   it('offers Try again for every closed gate, and for none while it is open', () => {
@@ -638,18 +647,36 @@ describe('the page’s body, mid-flow', () => {
   });
 
   it('shows a refused Apply with its message, that no settings were changed and a way to close it, and never a spinner', () => {
-    const html = body({ flow: { step: 'failed', message: 'Close VALORANT first.', unchanged: true } });
+    const html = body({ flow: { step: 'failed', message: 'Close VALORANT first.', settings: 'unchanged' } });
     expect(html).toContain('Close VALORANT first.');
     expect(html).toContain('No settings were changed.');
     expect(html).not.toContain('Nothing was changed');
+    expect(html).not.toContain(t.protectionMayHaveChanged);
     expect(texts(html)).toContain(t.close);
     expect(html).not.toContain(t.applying);
     // The page is free again, not locked.
     expect(boxes(html)[0]).not.toContain('disabled');
   });
 
+  it('says plainly that System Protection may have been turned on when a turn-on was asked for, and not that no settings changed', () => {
+    const html = body({ flow: { step: 'failed', message: 'Close VALORANT first.', settings: 'protection-may-have-changed' } });
+    expect(html).toContain('Close VALORANT first.');
+    expect(html).toContain('System Protection may have been turned on: check its row above.');
+    expect(html).not.toContain(t.noSettingsChanged);
+    expect(texts(html)).toContain(t.close);
+    // The row it points at is in the list above the panel, where the person reads it.
+    const pc = createSampleTweaks();
+    pc.setRestore('protection-off');
+    pc.restorePoint('turn-on-and-create');
+    const shown = body({ view: pc.view(), flow: { step: 'failed', message: 'Close VALORANT first.', settings: 'protection-may-have-changed' } });
+    expect(shown.indexOf('>System Protection<')).toBeGreaterThan(0);
+    expect(shown.indexOf('>System Protection<')).toBeLessThan(shown.indexOf(t.protectionMayHaveChanged));
+  });
+
   it('does not claim nothing was changed for a failure that did not say so', () => {
-    expect(body({ flow: { step: 'failed', message: 'Kestrel is already changing settings in another window.' } })).not.toContain(t.noSettingsChanged);
+    const html = body({ flow: { step: 'failed', message: 'Kestrel is already changing settings in another window.' } });
+    expect(html).not.toContain(t.noSettingsChanged);
+    expect(html).not.toContain(t.protectionMayHaveChanged);
   });
 
   it('keeps the page free when a re-read shows that the row it was asking about changed back', () => {

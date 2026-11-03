@@ -4,8 +4,12 @@
  * that began after the call, which is what a scan after a change needs: one that began before could have read the old state.
  *
  * The answer never rejects, because a run that failed only ends itself: the next call (or the one that waited) runs again.
+ *
+ * With a `limitMs`, a run that is still going after that long is let go: its callers are answered, the next run may start, and the
+ * run itself is told (`letGo.aborted`) so that what it finds, if it ever lands, can be left out. Without one a run that never
+ * settles would keep every later call from starting.
  */
-export function coalesce(task: () => Promise<unknown>): () => Promise<void> {
+export function coalesce(task: (letGo: AbortSignal) => Promise<unknown>, limitMs = Number.POSITIVE_INFINITY): () => Promise<void> {
   type Run = { answered: Promise<void>; answer: () => void };
   const newRun = (): Run => {
     let answer!: () => void;
@@ -22,10 +26,24 @@ export function coalesce(task: () => Promise<unknown>): () => Promise<void> {
   const start = (run: Run) => {
     current = run;
     void (async () => {
+      const letGo = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await task();
+        // A run that is let go and fails later is not an unhandled rejection: the race is still listening to it.
+        await Promise.race([
+          task(letGo.signal),
+          new Promise<void>((resolve) => {
+            if (!Number.isFinite(limitMs)) return;
+            timer = setTimeout(() => {
+              letGo.abort();
+              resolve();
+            }, limitMs);
+          }),
+        ]);
       } catch {
         // A failed run only ends itself.
+      } finally {
+        clearTimeout(timer);
       }
       current = null;
       const next = following;

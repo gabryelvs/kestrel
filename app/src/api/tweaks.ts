@@ -109,8 +109,20 @@ export const restoreFailure = (outcome: RestoreOutcome): string | null => (outco
 export const needsRestart = (outcomes: ItemOutcome[], items: PreviewItem[]): boolean =>
   outcomes.some((outcome) => outcome.ok && items.some((item) => item.id === outcome.id && item.timing === 'next-launch'));
 
-/** The question Apply puts to the person at the restore point. */
-export type RestoreQuestion = { kind: 'protection-off' } | { kind: 'blocked-by-policy' } | { kind: 'failed'; reason: string };
+/**
+ * The question Apply puts to the person at the restore point. A failed point says whether it was asked to turn System Protection
+ * on first, which can have worked before the point failed: going on from there has to remember it.
+ */
+export type RestoreQuestion =
+  | { kind: 'protection-off' }
+  | { kind: 'blocked-by-policy' }
+  | { kind: 'failed'; reason: string; turnOnAsked: boolean };
+
+/**
+ * What a step that stopped can say of the PC, only where it is known: no settings were changed, or System Protection may have been
+ * turned on (the step before was asked to, and a restore point may have been made too, which is not a setting).
+ */
+export type Settings = 'unchanged' | 'protection-may-have-changed';
 
 // What the page is doing.
 
@@ -128,8 +140,8 @@ export type Flow =
   | { step: 'applied'; outcomes: ItemOutcome[]; restart: boolean }
   | { step: 'results'; outcomes: ItemOutcome[] }
   | { step: 'row-result'; id: TweakId; outcome: ItemOutcome }
-  /** A command was refused or failed. `unchanged` says no settings were changed, which is only claimed where it is known (see ApplyNext). */
-  | { step: 'failed'; message: string; id?: TweakId; unchanged?: boolean };
+  /** A command was refused or failed. `settings` says what is known of the PC, and is left out where nothing is. */
+  | { step: 'failed'; message: string; id?: TweakId; settings?: Settings };
 
 /** True while a command runs or a question waits: ticking, Preview and every row button are off, so nothing is asked twice. */
 export function flowLocks(flow: Flow): boolean {

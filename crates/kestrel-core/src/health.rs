@@ -620,7 +620,7 @@ fn power_plan(s: &SystemSnapshot) -> Finding {
     } else if guid == BALANCED || guid == POWER_SAVER {
         c.problem(
             format!("Power plan is {}", plan.name),
-            "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's plan is in the Tweaks tab.",
+            "This plan lets the CPU slow down between frames, which can hurt 1% lows. Kestrel's plan is in the Tweaks tab.",
             Fix::Tweak { tweak: TweakId::PowerPlan },
         )
     } else {
@@ -2503,7 +2503,7 @@ mod tests {
                 "{id} still names a stage"
             );
         }
-        assert_eq!(get(&f, "power-plan").detail, "This plan lets the CPU slow down between frames, which hurts 1% lows. Kestrel's plan is in the Tweaks tab.");
+        assert_eq!(get(&f, "power-plan").detail, "This plan lets the CPU slow down between frames, which can hurt 1% lows. Kestrel's plan is in the Tweaks tab.");
         // Only the fix changed on the other two: their titles and details are the ones they had.
         let wording = |id| (get(&f, id).title.as_str(), get(&f, id).detail.as_str());
         assert_eq!(

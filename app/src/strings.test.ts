@@ -63,6 +63,7 @@ describe('the Tweaks tab’s words', () => {
 
   it('say that no settings were changed, not that nothing was, since a restore point may have been made', () => {
     expect(t.noSettingsChanged).toBe('No settings were changed.');
+    expect(t.protectionMayHaveChanged).toBe('System Protection may have been turned on: check its row above.');
     expect(t.rescanning).toBe('Checking your PC again…');
     expect(t.rereadFailed).toBe('Kestrel couldn’t read the tweaks again, so these rows may be out of date.');
   });

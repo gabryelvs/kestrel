@@ -3,10 +3,10 @@ import {
   benchList, tweaksApply, tweaksApplyAgain, tweaksPreview, tweaksRemovePlan, tweaksReport, tweaksRestoreAnyway, tweaksRestorePoint, tweaksRevertAll,
   tweaksUndo, tweaksUsePlanAgain, tweaksView,
 } from '../api/client';
-import { runApply, settle, type ApplyAt, type ApplyNext, type ApplyStep } from '../api/apply';
+import { continueAt, runApply, settle, type ApplyAt, type ApplyNext, type ApplyStep } from '../api/apply';
 import {
   boundRow, canFocus, closedReason, currentFlow, errorText, flowLocks, forgetChoices, isTicked, measureNote, measureText, onlyTicked, rereadsOnFocus,
-  revertRows, rowNote, tickedIds, type Choices, type Flow, type MeasureNote, type ReportLoad, type ViewLoad,
+  revertRows, rowNote, tickedIds, type Choices, type Flow, type MeasureNote, type ReportLoad, type Settings, type ViewLoad,
 } from '../api/tweaks';
 import type { ItemOutcome, PreviewView, TweakId, TweaksView } from '../api/types';
 import { Outcomes } from '../components/tweaks/Outcomes';
@@ -82,7 +82,8 @@ function flowPanel(flow: Flow, view: TweaksView, on: Handlers): ReactNode {
       return inRow ? null : (
         <section className="panel failed-panel">
           <p className="notice cut-s wrap">{flow.message}</p>
-          {flow.unchanged && <p className="muted small">{t.noSettingsChanged}</p>}
+          {flow.settings === 'unchanged' && <p className="muted small">{t.noSettingsChanged}</p>}
+          {flow.settings === 'protection-may-have-changed' && <p className="small">{t.protectionMayHaveChanged}</p>}
           <div className="actions">
             <button className="btn btn-ghost cut-s" onClick={on.cancel}>{t.close}</button>
           </div>
@@ -160,7 +161,7 @@ export function TweaksBody({ view, stale, report, measure, choices, flow: asked,
         {view.anyActive && (
           <button className="btn btn-ghost cut-s" disabled={closed || locked} onClick={on.askRevert}>{t.revertEverything}</button>
         )}
-        {why && <span className="tweak-gate">{why}</span>}
+        {why && <span className="tweak-gate wrap">{why}</span>}
         {closed && <button className="btn btn-ghost btn-small cut-s" onClick={on.retry}>{t.tryAgain}</button>}
       </div>
       {panel && <Slot stepKey={`${flow.step}:${boundRow(flow) ?? ''}`}>{panel}</Slot>}
@@ -259,7 +260,7 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
   const rows = load.state === 'ready' ? load.view.rows : [];
 
   /** A command was refused or failed: say so where the person pressed, read the page again, and leave nothing spinning. */
-  const fail = async (error: unknown, where: { id?: TweakId; unchanged?: boolean } = {}) => {
+  const fail = async (error: unknown, where: { id?: TweakId; settings?: Settings } = {}) => {
     setFlow({ step: 'failed', message: errorText(error), ...where });
     await reload();
   };
@@ -269,7 +270,7 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
     try {
       setFlow({ step: 'preview', preview: await tweaksPreview(ids) });
     } catch (error) {
-      await fail(error, { unchanged: true });
+      await fail(error, { settings: 'unchanged' });
     }
   };
 
@@ -312,7 +313,7 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
         setFlow({ step: 'applied', outcomes: next.outcomes, restart: next.restart });
         return;
       case 'stopped':
-        setFlow({ step: 'failed', message: next.message, unchanged: next.unchanged });
+        setFlow({ step: 'failed', message: next.message, settings: next.settings });
         await reload();
         return;
     }
@@ -365,7 +366,7 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
     },
     // Continue after a failed point goes on; Continue without (System Protection off, or a policy) is the only skip.
     goOn: () => {
-      if (flow.step === 'restore') void go(flow.preview, flow.question.kind === 'failed' ? 'go-on' : 'without');
+      if (flow.step === 'restore') void go(flow.preview, continueAt(flow.question));
     },
     cancel,
     // With nothing it would undo (only rows something else changed), there is nothing to ask; the results say what was left alone.
