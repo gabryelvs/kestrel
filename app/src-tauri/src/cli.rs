@@ -294,6 +294,56 @@ mod tests {
         assert_eq!(HELPER_FLAG, "--restore-point");
     }
 
+    // The installer's hooks are compiled only by GitHub's Windows job (`tauri build`), so what can be known here is pinned
+    // here: the two tests below read the file the installer is given.
+
+    #[test]
+    fn the_installer_is_pointed_at_the_hooks_file() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let nsis = &config["bundle"]["windows"]["nsis"];
+        assert_eq!(
+            nsis["installMode"], "perMachine",
+            "the uninstaller runs elevated, so Kestrel.exe starts from it without a prompt"
+        );
+        let hooks = nsis["installerHooks"]
+            .as_str()
+            .expect("tauri.conf.json names the hooks file");
+        // Tauri resolves it against the folder that holds tauri.conf.json.
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(hooks);
+        assert!(file.is_file(), "{} isn't there", file.display());
+    }
+
+    #[test]
+    fn the_uninstaller_starts_the_flags_the_app_answers_and_checks_that_each_started() {
+        let hooks = include_str!("../windows/hooks.nsh");
+        let lines: Vec<&str> = hooks
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with(';'))
+            .collect();
+        for flag in [HAS_CHANGES, REVERT_ALL] {
+            let starts: Vec<usize> = (0..lines.len())
+                .filter(|&at| lines[at].starts_with("ExecWait") && lines[at].contains(flag))
+                .collect();
+            assert_eq!(starts.len(), 1, "hooks.nsh starts {flag} once");
+            // A program that can't be started leaves ExecWait's variable as it was, and NSIS's error flag, which stays
+            // set from whatever ran before, is the only sign of it. So the flag is cleared right before each start.
+            assert_eq!(
+                lines[starts[0] - 1],
+                "ClearErrors",
+                "{flag} is started after ClearErrors"
+            );
+        }
+        // The words the owner chose (decision 88).
+        for words in [
+            "Undo Kestrel's changes before removing it?",
+            "Kestrel couldn't undo everything. Check those settings in Windows.",
+        ] {
+            assert_eq!(hooks.matches(words).count(), 1, "hooks.nsh says: {words}");
+        }
+    }
+
     #[test]
     fn an_unrelated_flag_starts_the_app() {
         let tmp = tempfile::tempdir().unwrap();

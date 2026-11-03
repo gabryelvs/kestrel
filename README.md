@@ -7,6 +7,10 @@ holding your frames back, and (in later versions) applies reversible tweaks pick
 
 ## Status
 
+Stage 5 (v0.5.0): the Tweaks tab. Essential tweaks picked for your PC, each with why it was picked, a Preview of every
+change, Undo one at a time or for everything, a restore point, and a Kestrel report listing every change. Kestrel
+changes your PC only when you press Apply. Stage 4, the other games, waits until someone can test them.
+
 Stage 3 (v0.3.0): the Hardware tab. Every part of the PC that Windows reports without a driver, each core's clock
 live, and Copy specs for a short summary to paste anywhere. Four new Health Check items look at the graphics card's
 PCIe link, Resizable BAR and virtualization, with BIOS-guide steps for your board, and benchmarks record the PCIe
@@ -20,12 +24,11 @@ Stage 1 (v0.1.0): hardware detection, Health Check and BIOS guide.
 
 Next, in this order:
 
-- Stage 4: FiveM, Rainbow Six Siege and Warzone
-- Stage 5: the tweak engine, with reversible tweaks picked for your PC
 - Stage 6: the Competitive and Extreme tiers
 - Stage 7: Lock In
 - Stage 8: fixes and the troubleshooter
 - Stage 9: the redesign, as v1.0
+- The other games (FiveM, Rainbow Six Siege, Warzone), once someone can test them
 
 ## Install a test build
 

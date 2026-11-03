@@ -1,8 +1,8 @@
 {
-  "appVersion": "0.3.0",
+  "appVersion": "0.5.0",
   "snapshot": {
     "schemaVersion": 2,
-    "collectedAt": "2026-11-03T05:49:42Z",
+    "collectedAt": "2026-11-03T06:58:08Z",
     "os": {
       "caption": "Microsoft Windows 11 Pro",
       "build": 26200,
