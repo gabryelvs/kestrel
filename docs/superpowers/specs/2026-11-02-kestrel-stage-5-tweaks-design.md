@@ -125,14 +125,14 @@ replaces everything else in [current plan] with the settings of [base plan]. Und
 3. Each change: record the old value, write, read back. One failure doesn't stop the others; each item reports its own
    result.
 4. Kestrel scans again, so Health, Home and the next benchmark's "PC at the time" are current. Then the result: what
-   changed, "Restart VALORANT" if any change waits for the next launch, and a button to run a benchmark. The copy says
+   changed, "These take effect the next time VALORANT opens." if any change waits for the next launch, and a button to run a benchmark. The copy says
    "Measure it on your PC", never a promised number.
 
 ### Undo
 
 **Undo** on a row undoes that tweak. **Revert everything** lists what will be undone, asks once, and undoes in reverse
 order. System Protection stays on: turning it off deletes that drive's restore points, so it has its own row with that
-warning and is never part of Revert everything or the uninstaller's undo.
+warning, asks once before turning it off, and is never part of Revert everything or the uninstaller's undo.
 
 If a value holds something else now, Undo leaves it alone and the row says **Changed by something else**. **Restore
 anyway** asks first, then writes the old value. Revert everything leaves those rows as they are and says so.
@@ -176,8 +176,11 @@ which goes to Home; a flag next to the first-run flag remembers it.
 ### Uninstaller (decision 88)
 
 When Kestrel's changes are active, the uninstaller asks: "Undo Kestrel's changes before removing it?" Yes is the
-default. Yes runs Kestrel's own undo; if something can't be undone it says so, and the uninstall continues. A silent
-uninstall leaves changes in place. Ticking "Delete the application data" also removes `%ProgramData%\Kestrel`, after
+default. If Kestrel is running, the uninstaller closes it first, and cancelling there changes nothing. Yes runs Kestrel's
+own undo; if something can't be undone it says so, and the uninstall continues. When only System Protection is left, it
+says that stays on and why, rather than calling it a failure. A silent
+uninstall leaves changes in place. Ticking "Delete the application data" also removes the journal's files and an empty
+`%ProgramData%\Kestrel`, on a real uninstall only, after
 this question.
 
 Installing a newer version is not removing Kestrel: it doesn't ask and the changes stay. That covers `/UPDATE` and also
@@ -345,7 +348,7 @@ The journal is the real undo. The restore point is a bonus that Windows may late
 - **`app/src-tauri/src/tweaks/`**: commands and state, following `bench/`: `tweaks_plan`, `tweaks_preview`, `tweaks_apply`,
   `tweaks_undo`, `tweaks_revert_all`, `tweaks_report`, and the ones the rows' other buttons need. Commands return what
   changed and the page re-reads the view, since nothing changes in the background. One apply at a time; no platform call
-  under a lock; `spawn_blocking` for the slow parts. `get_diagnostics` adds the report and the account check.
+  under a lock; `spawn_blocking` for the slow parts. `get_diagnostics` adds the report, the account check, System Protection's state and each row's state and reason.
 - **`main.rs`** parses flags before starting Tauri: the restore-point helper, and the uninstaller's check and undo. It
   also calls `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR)` at start-up,
   from the stage-1 backlog, since Kestrel now writes to the system.
