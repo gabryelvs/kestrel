@@ -326,8 +326,8 @@ The journal is the real undo. The restore point is a bonus that Windows may late
   `SystemRestorePointCreationFrequency` is left alone.
 - **System Protection off (decision 89):** detected from
   `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SPP\Clients`, value `{09F7EDC5-294E-4180-AF6A-FB0E6A0E9513}`,
-  not containing the Windows drive's volume GUID (a value that isn't there counts as off), or from
-  `ERROR_SERVICE_DISABLED`. The dialog: "System Protection is off on
+  not containing the Windows drive's volume GUID (a key or value that isn't there counts as off). `ERROR_SERVICE_DISABLED`
+  from Windows after that is a failure, "System Protection is off.", shown with **Continue without** and **Cancel**. The dialog: "System Protection is off on
   your Windows drive. Turn it on and create a restore point? Windows will use some disk space for restore points."
   **Turn on and create**, **Continue
   without**, **Cancel**. Turning on uses WMI `SystemRestore.Enable` with that drive and is a journal entry with its own row. If
