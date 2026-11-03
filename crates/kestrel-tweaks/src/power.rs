@@ -265,7 +265,7 @@ fn verdict(sys: &dyn System, input: &PlanInput, open: Option<&OpenRecord>) -> Ve
         (
             RowState::Available,
             true,
-            format!("{name} lets the CPU slow down between frames. Expect a small gain at most, and measure it on your PC."),
+            format!("{name} lets the CPU slow down between frames. The difference may be small or none: measure it on your PC."),
         )
     } else if is_one_of(&active, &[HIGH_PERFORMANCE_PLAN, ULTIMATE_PLAN]) {
         (
@@ -840,7 +840,7 @@ mod tests {
             says(
                 Available,
                 true,
-                "Balanced lets the CPU slow down between frames. Expect a small gain at most, and measure it on your PC."
+                "Balanced lets the CPU slow down between frames. The difference may be small or none: measure it on your PC."
             )
         );
         pc.set_active(POWER_SAVER);
@@ -849,7 +849,7 @@ mod tests {
             says(
                 Available,
                 true,
-                "Power saver lets the CPU slow down between frames. Expect a small gain at most, and measure it on your PC."
+                "Power saver lets the CPU slow down between frames. The difference may be small or none: measure it on your PC."
             )
         );
         // It goes by the plan's GUID, and says the name Windows shows.
@@ -860,7 +860,7 @@ mod tests {
             says(
                 Available,
                 true,
-                "Equilibrado lets the CPU slow down between frames. Expect a small gain at most, and measure it on your PC."
+                "Equilibrado lets the CPU slow down between frames. The difference may be small or none: measure it on your PC."
             )
         );
     }

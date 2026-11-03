@@ -132,6 +132,18 @@ describe('TweakRow', () => {
     expect(renderRow(row('pointer-precision', 'changed-elsewhere'))).not.toContain(t.restoreAnywayAsk);
   });
 
+  it('asks nothing about a row that a re-read shows is no longer one something else changed, and shows its own buttons', () => {
+    // Restore anyway was pressed, and the view was read again before the answer: Yes and Cancel would act on the wrong thing.
+    for (const state of ['available', 'applied', 'already-set', 'plan-inactive', 'couldnt-read'] as const) {
+      const html = renderRow(row('pointer-precision', state), { asking: true });
+      expect(html, state).not.toContain(t.restoreAnywayAsk);
+      expect(texts(html), state).not.toContain(t.yesRestore);
+    }
+    expect(texts(renderRow(row('pointer-precision', 'applied'), { asking: true }))).toEqual([t.undo]);
+    expect(texts(renderRow(row('pointer-precision', 'plan-inactive'), { asking: true }))).toEqual([t.useAgain, t.removePlan]);
+    expect(texts(renderRow(row('pointer-precision', 'changed-elsewhere'), { asking: true }))).toEqual([t.yesRestore, t.cancel]);
+  });
+
   it('says what happened to the row where the person acted: a result plainly, a refusal in the warning colour', () => {
     const done = renderRow(row('game-mode', 'available'), { note: { ok: true, text: 'Undone.' } });
     expect(done).toMatch(/<p class="tweak-note[^"]*">Undone\.<\/p>/);
@@ -320,9 +332,22 @@ describe('ReportPanel', () => {
     expect(render({ state: 'ready', text: 'Applied <b>x</b>' })).toContain('Applied &lt;b&gt;x&lt;/b&gt;');
   });
 
-  it('warns that part of the history couldn’t be read, and only then', () => {
-    expect(render({ state: 'ready', text }, 2)).toContain(t.unreadable);
-    expect(render({ state: 'ready', text }, 0)).not.toContain(t.unreadable);
+  it('leaves the warning about unreadable history to the report itself, which ends with it', () => {
+    // kestrel-tweaks' report appends its own two lines when part of the journal couldn't be read; saying it twice would be noise.
+    const pc = createSampleTweaks();
+    pc.setUnreadable(2);
+    const html = render({ state: 'ready', text: pc.report() }, 2);
+    expect(count(html, 'Part of Kestrel&#x27;s history couldn&#x27;t be read.')).toBe(1);
+    expect(html).toContain('An interruption while Kestrel was writing is the usual cause of an unreadable line.');
+    expect(html).not.toContain(t.unreadable);
+    expect(render({ state: 'ready', text }, 2)).not.toContain(t.unreadable);
+  });
+
+  it('warns about unreadable history itself while there is no report text to say it, and only then', () => {
+    expect(render({ state: 'loading' }, 2)).toContain(t.unreadable);
+    expect(render({ state: 'failed', message: 'x' }, 2)).toContain(t.unreadable);
+    expect(render({ state: 'loading' }, 0)).not.toContain(t.unreadable);
+    expect(render({ state: 'failed', message: 'x' }, 0)).not.toContain(t.unreadable);
   });
 
   it('says it is reading, or why it couldn’t, with a way to try again and nothing to copy', () => {
@@ -388,13 +413,24 @@ describe('the page’s body', () => {
     expect(html).toContain('Close VALORANT first.');
     // The reason is text beside the button, not only a tooltip.
     expect(html).toMatch(/Preview 1 change<\/button><span[^>]*>Close VALORANT first\.<\/span>/);
-    expect(button(html, t.tryAgain)).toBeUndefined();
+    // And a way to read the page again once VALORANT is closed, beside the reason.
+    expect(html).toMatch(/Close VALORANT first\.<\/span><button[^>]*>Try again<\/button>/);
+    expect(button(html, t.tryAgain)?.disabled).toBe(false);
+  });
+
+  it('offers Try again for every closed gate, and for none while it is open', () => {
+    for (const gate of ['game-running', 'benchmark-active', 'cant-tell'] as const) {
+      const html = body({ view: { ...ownerView(), gate } });
+      expect(texts(html).filter((text) => text === t.tryAgain), gate).toHaveLength(1);
+    }
+    expect(button(body(), t.tryAgain)).toBeUndefined();
   });
 
   it('says to finish the benchmark when one is armed, and Preview is off too', () => {
     const html = body({ view: { ...ownerView(), gate: 'benchmark-active' }, choices: { 'power-plan': true } });
     expect(button(html, 'Preview 1 change')?.disabled).toBe(true);
     expect(html).toContain('Finish the benchmark first.');
+    expect(button(html, t.tryAgain)?.disabled).toBe(false);
   });
 
   it('treats a gate that can’t tell like a closed one, with a small Try again that reads the view again', () => {
@@ -460,8 +496,9 @@ describe('the page’s body', () => {
     const view = { ...ownerView(), otherAccount: true, pendingOtherAccounts: 2 };
     const html = body({ view });
     expect(html).toContain('Kestrel is running as another account. Changes go to the account signed in now.');
-    expect(html).toContain('Another account has 2 change(s) from Kestrel. Those wait until that account is signed in.');
+    expect(html).toContain('Another account has 2 changes from Kestrel. Those wait until that account is signed in.');
     expect(html.indexOf(t.otherAccount)).toBeLessThan(html.indexOf('>Kestrel power plan<'));
+    expect(body({ view: { ...view, pendingOtherAccounts: 1 } })).toContain('Another account has 1 change from Kestrel. It waits until that account is signed in.');
     const quiet = body();
     expect(quiet).not.toContain('another account');
     expect(quiet).not.toContain('Another account has');
@@ -478,11 +515,23 @@ describe('the page’s body', () => {
     expect(body()).not.toContain('was interrupted');
   });
 
-  it('warns about unreadable history in the report panel', () => {
-    const html = body({ view: { ...ownerView(), unreadableLines: 3 } });
-    expect(html).toContain(t.unreadable);
-    expect(html.indexOf(t.unreadable)).toBeGreaterThan(html.indexOf(t.preview(0)));
-    expect(body()).not.toContain(t.unreadable);
+  it('shows the report’s own warning about unreadable history, once, in the report panel', () => {
+    const pc = createSampleTweaks();
+    pc.setUnreadable(3);
+    const html = body({ view: pc.view(), report: ready(pc.report()) });
+    expect(count(html, 'Part of Kestrel&#x27;s history couldn&#x27;t be read.')).toBe(1);
+    expect(html.indexOf('Part of Kestrel&#x27;s history')).toBeGreaterThan(html.indexOf(t.preview(0)));
+    expect(html).not.toContain(t.unreadable);
+    expect(body()).not.toContain('history couldn');
+  });
+
+  it('says it itself while the report text isn’t there, and still has the report panel to say it in', () => {
+    const view = { ...ownerView(), unreadableLines: 3 };
+    for (const report of [{ state: 'loading' }, { state: 'failed', message: 'x' }] as ReportLoad[]) {
+      const html = body({ view, report });
+      expect(html, report.state).toContain(t.unreadable);
+      expect(html.indexOf(t.unreadable), report.state).toBeGreaterThan(html.indexOf(t.preview(0)));
+    }
   });
 
   it('shows the report last, below the buttons, with Copy report', () => {
@@ -588,10 +637,11 @@ describe('the page’s body, mid-flow', () => {
     expect(html).not.toContain('class="tweak-note');
   });
 
-  it('shows a refused Apply with its message, that nothing was changed and a way to close it, and never a spinner', () => {
+  it('shows a refused Apply with its message, that no settings were changed and a way to close it, and never a spinner', () => {
     const html = body({ flow: { step: 'failed', message: 'Close VALORANT first.', unchanged: true } });
     expect(html).toContain('Close VALORANT first.');
-    expect(html).toContain(t.nothingChanged);
+    expect(html).toContain('No settings were changed.');
+    expect(html).not.toContain('Nothing was changed');
     expect(texts(html)).toContain(t.close);
     expect(html).not.toContain(t.applying);
     // The page is free again, not locked.
@@ -599,7 +649,82 @@ describe('the page’s body, mid-flow', () => {
   });
 
   it('does not claim nothing was changed for a failure that did not say so', () => {
-    expect(body({ flow: { step: 'failed', message: 'Kestrel is already changing settings in another window.' } })).not.toContain(t.nothingChanged);
+    expect(body({ flow: { step: 'failed', message: 'Kestrel is already changing settings in another window.' } })).not.toContain(t.noSettingsChanged);
+  });
+
+  it('keeps the page free when a re-read shows that the row it was asking about changed back', () => {
+    // Restore anyway was pressed on the pointer row, and the view was read again: it is available now, so the question is over.
+    const html = body({ flow: { step: 'ask-restore-anyway', id: 'pointer-precision' }, choices: { 'power-plan': true } });
+    expect(html).not.toContain(t.restoreAnywayAsk);
+    expect(texts(html)).not.toContain(t.yesRestore);
+    expect(button(html, 'Preview 1 change')?.disabled).toBe(false);
+    for (const box of boxes(html)) expect(box).not.toContain('disabled');
+  });
+
+  it('keeps the question, and locks the rest, while the row is still one something else changed', () => {
+    const pc = createSampleTweaks();
+    pc.apply(['pointer-precision']);
+    pc.changeBehindItsBack('pointer-precision');
+    const html = body({ view: pc.view(), flow: { step: 'ask-restore-anyway', id: 'pointer-precision' }, choices: { 'power-plan': true } });
+    expect(html).toContain(t.restoreAnywayAsk);
+    expect(texts(html)).toEqual(expect.arrayContaining([t.yesRestore, t.cancel]));
+    expect(button(html, 'Preview 1 change')?.disabled).toBe(true);
+  });
+
+  it('says System Protection’s warning once, beside its Undo, and not again in the row’s own sentence', () => {
+    const pc = createSampleTweaks();
+    pc.setRestore('protection-off');
+    pc.restorePoint('turn-on-and-create');
+    const html = body({ view: pc.view() });
+    expect(count(plain(html), t.protectionWarning)).toBe(1);
+    expect(count(plain(html), 'deletes this drive')).toBe(1);
+    expect(plain(html)).toContain('System Protection is on because Kestrel turned it on.');
+  });
+});
+
+describe('the page’s body when the view couldn’t be read again', () => {
+  const REASON = 'C:\\ProgramData\\Kestrel belongs to another account. Delete it, then try again.';
+  const outcomes: ItemOutcome[] = [{ id: 'windowed-optimizations', title: 'Optimizations for windowed games', ok: true, message: 'Applied.' }];
+  const page = (over: Partial<Parameters<typeof TweaksPage>[0]> = {}) =>
+    renderToStaticMarkup(
+      <TweaksPage load={{ state: 'ready', view: ownerView(), stale: REASON }} report={ready()} measure={null} choices={{}} flow={{ step: 'applied', outcomes, restart: true }} on={on} {...over} />,
+    );
+
+  it('keeps the rows and the result on screen, with the reason beside the buttons and a way to try again', () => {
+    const html = page();
+    expect(html).toContain('Optimizations for windowed games');
+    expect(html).toContain(t.restartValorant);
+    expect(texts(html)).toContain(t.runBenchmark);
+    expect(html).toContain('class="tweak-row');
+    expect(html).toContain(`${t.rereadFailed} ${REASON}`);
+    expect(texts(html).filter((text) => text === t.tryAgain)).toHaveLength(1);
+    expect(html).not.toContain(t.loadFailed);
+  });
+
+  it('turns the buttons that change things off, since the rows may be out of date, but leaves ticking alone', () => {
+    const pc = createSampleTweaks();
+    pc.apply(['power-plan']);
+    const html = page({ load: { state: 'ready', view: pc.view(), stale: REASON } });
+    expect(button(html, t.undo)?.disabled).toBe(true);
+    expect(button(html, t.revertEverything)?.disabled).toBe(true);
+    expect(button(html, 'Preview 0 changes')?.disabled).toBe(true);
+    expect(boxes(html)[0]).not.toContain('disabled');
+    // The result's own buttons are not about the rows.
+    expect(button(html, t.runBenchmark)?.disabled).toBe(false);
+    expect(button(html, t.close)?.disabled).toBe(false);
+  });
+
+  it('shows the full-page failure only when there is no view at all', () => {
+    const html = page({ load: { state: 'failed', message: REASON } });
+    expect(html).toContain(t.loadFailed);
+    expect(html).not.toContain('tweak-row');
+    expect(html).not.toContain(t.restartValorant);
+  });
+
+  it('says nothing of it for a view that was read', () => {
+    const html = page({ load: { state: 'ready', view: ownerView() } });
+    expect(html).not.toContain(t.rereadFailed);
+    expect(button(html, t.tryAgain)).toBeUndefined();
   });
 });
 

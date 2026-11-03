@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  boundRow, canFocus, errorText, flowLocks, forgetChoices, gateReason, hasTickBox, isTicked, measureNote, measureText, needsRestart,
-  onlyTicked, restoreFailure, restoreRoute, revertRows, rowNote, tickedIds, type Flow,
+  boundRow, canFocus, closedReason, currentFlow, errorText, flowLocks, forgetChoices, gateReason, hasTickBox, isTicked, measureNote, measureText,
+  needsRestart, onlyTicked, restoreFailure, restoreRoute, revertRows, rereadsOnFocus, rowNote, tickedIds, type Flow, type ViewLoad,
 } from './tweaks';
 import type { BenchmarkSummary, ItemOutcome, PreviewItem, PreviewView, Row, RowState, TweakId, TweaksView } from './types';
 
@@ -268,5 +268,91 @@ describe('the text an error gives', () => {
     expect(errorText(42)).toBe('42');
     expect(errorText(undefined)).toBe('undefined');
     expect(errorText({ toString: () => 'odd' })).toBe('odd');
+  });
+});
+
+describe('why nothing that changes the PC may be pressed', () => {
+  const STALE = 'Kestrel couldn’t read the tweaks again, so these rows may be out of date.';
+
+  it('is the gate’s reason while it is closed, and nothing while it is open', () => {
+    expect(closedReason(view([]))).toBeNull();
+    expect(closedReason(view([], 'game-running'))).toBe('Close VALORANT first.');
+    expect(closedReason(view([], 'benchmark-active'))).toBe('Finish the benchmark first.');
+    expect(closedReason(view([], 'cant-tell'))).toBe('Kestrel couldn’t check whether VALORANT is open. Try again.');
+  });
+
+  it('is that the view couldn’t be read again, with the reason, whatever the gate said when it was last read', () => {
+    expect(closedReason(view([]), 'Access is denied (os error 5)')).toBe(`${STALE} Access is denied (os error 5)`);
+    expect(closedReason(view([], 'game-running'), 'The journal is held.')).toBe(`${STALE} The journal is held.`);
+    // An error with no words is still an error.
+    expect(closedReason(view([]), '')).toBe(`${STALE} `.trim());
+  });
+});
+
+describe('coming back to the window', () => {
+  const ready = (gate: TweaksView['gate'], stale?: string): ViewLoad => ({ state: 'ready', view: view([], gate), ...(stale === undefined ? {} : { stale }) });
+  const preview: PreviewView = { items: [], restore: 'ready' };
+  const waiting: Flow[] = [
+    { step: 'idle' },
+    { step: 'preview', preview },
+    { step: 'restore', preview, question: { kind: 'blocked-by-policy' } },
+    { step: 'ask-restore-anyway', id: 'game-mode' },
+    { step: 'ask-revert' },
+    { step: 'applied', outcomes: [], restart: false },
+    { step: 'results', outcomes: [] },
+    { step: 'row-result', id: 'game-mode', outcome: outcome('game-mode', true, 'Undone.') },
+    { step: 'failed', message: 'Close VALORANT first.' },
+  ];
+  const running: Flow[] = [{ step: 'busy', text: 'Applying…' }, { step: 'busy', text: 'Working…', id: 'game-mode' }];
+
+  it('reads the page again while a gate is closed, which is the one thing the person can clear from outside', () => {
+    for (const gate of ['game-running', 'benchmark-active', 'cant-tell'] as const) {
+      for (const flow of waiting) expect(rereadsOnFocus(ready(gate), flow), `${gate} ${flow.step}`).toBe(true);
+    }
+  });
+
+  it('leaves an open gate alone: there is nothing to clear', () => {
+    for (const flow of [...waiting, ...running]) expect(rereadsOnFocus(ready('open'), flow), flow.step).toBe(false);
+  });
+
+  it('never reads it again while a command is under way, whatever the gate says', () => {
+    for (const gate of ['open', 'game-running', 'benchmark-active', 'cant-tell'] as const) {
+      for (const flow of running) expect(rereadsOnFocus(ready(gate), flow), gate).toBe(false);
+    }
+    expect(rereadsOnFocus({ state: 'failed', message: 'x' }, running[0])).toBe(false);
+    expect(rereadsOnFocus(ready('open', 'x'), running[1])).toBe(false);
+  });
+
+  it('also reads it again when the view couldn’t be read, or couldn’t be read again, since that is cleared from outside too', () => {
+    expect(rereadsOnFocus({ state: 'failed', message: 'x' }, { step: 'idle' })).toBe(true);
+    expect(rereadsOnFocus(ready('open', 'x'), { step: 'idle' })).toBe(true);
+  });
+
+  it('does not start a read while the first is still under way', () => {
+    expect(rereadsOnFocus({ state: 'loading' }, { step: 'idle' })).toBe(false);
+  });
+});
+
+describe('a question that no longer applies', () => {
+  const asking: Flow = { step: 'ask-restore-anyway', id: 'pointer-precision' };
+
+  it('stays while its row is still one something else changed', () => {
+    expect(currentFlow(asking, [row('pointer-precision', 'changed-elsewhere')])).toBe(asking);
+  });
+
+  it('is over once the row went back, was undone or applied again by a re-read, or is gone, so it cannot lock the page', () => {
+    for (const state of ['available', 'applied', 'already-set', 'not-needed', 'blocked-by-policy', 'plan-inactive', 'couldnt-read'] as const) {
+      expect(currentFlow(asking, [row('pointer-precision', state)]), state).toEqual({ step: 'idle' });
+    }
+    expect(currentFlow(asking, [row('game-mode', 'changed-elsewhere')])).toEqual({ step: 'idle' });
+    expect(currentFlow(asking, [])).toEqual({ step: 'idle' });
+  });
+
+  it('leaves every other step as it is', () => {
+    const others: Flow[] = [
+      { step: 'idle' }, { step: 'busy', text: 'Working…', id: 'pointer-precision' }, { step: 'ask-revert' },
+      { step: 'row-result', id: 'pointer-precision', outcome: outcome('pointer-precision', true) }, { step: 'failed', message: 'x', id: 'pointer-precision' },
+    ];
+    for (const flow of others) expect(currentFlow(flow, []), flow.step).toBe(flow);
   });
 });

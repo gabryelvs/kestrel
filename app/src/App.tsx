@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { coalesce } from './api/coalesce';
 import { getReport, inTauri, isElevated, rescan } from './api/client';
 import type { BiosTopic, Report, TweakId } from './api/types';
 import { Banner } from './components/Banner';
@@ -53,12 +54,17 @@ export function App() {
 
   // After an Apply or an undo, the scan is stale: Health, Home and the next benchmark's "PC at the time" must see what changed. The
   // Tweaks page keeps its result on screen, and the loading screen of Scan again would take the page away, so this scans quietly.
-  const rescanQuietly = () => {
-    void rescan().then(
-      (report) => setScan((current) => (current.state === 'ready' ? { state: 'ready', report } : current)),
-      () => undefined,
-    );
-  };
+  // The scans never overlap (two could land out of order, in the UI and in the app's own copy of the report): one runs at a time, and
+  // changes made meanwhile share the one more that follows. The page waits for its scan, so a benchmark started right after records
+  // the PC as it is now; a scan that fails leaves the old report and answers all the same.
+  const rescanQuietly = useMemo(
+    () =>
+      coalesce(async () => {
+        const report = await rescan();
+        setScan((current) => (current.state === 'ready' ? { state: 'ready', report } : current));
+      }),
+    [],
+  );
 
   const openGuide = (topic: BiosTopic) => {
     refresh();

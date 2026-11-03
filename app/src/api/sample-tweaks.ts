@@ -35,8 +35,11 @@ const LEFT_ALONE = 'Something else changed this after Kestrel did. Kestrel left 
 const NOT_ON_THIS_PC = "Kestrel doesn't change this on this PC.";
 const ALREADY_SET = 'Already set.';
 const PROTECTION_STAYS = "System Protection stays on: turning it off deletes this drive's restore points.";
-const PROTECTION_ON = "System Protection is on because Kestrel turned it on. Turning it off deletes this drive's restore points.";
+const PROTECTION_ON = 'System Protection is on because Kestrel turned it on.';
 const PLAN_IN_USE = "Kestrel's plan is in use, so it can't be removed. Switch to another plan first.";
+// The two lines kestrel-tweaks' report ends with when part of the journal couldn't be read (report.rs).
+const UNREADABLE_CAUSE = 'An interruption while Kestrel was writing is the usual cause of an unreadable line.';
+const UNREADABLE = "Part of Kestrel's history couldn't be read.";
 
 // What a plan row says for the plan in use (power.rs).
 const SLOW_PLANS = ['Balanced', 'Power saver'];
@@ -47,7 +50,7 @@ type Verdict = { state: RowState; ticked: boolean; why: string };
 /** The plan row while Kestrel hasn't changed the plan. */
 function planVerdict(plan: string): Verdict {
   if (SLOW_PLANS.includes(plan)) {
-    return { state: 'available', ticked: true, why: `${plan} lets the CPU slow down between frames. Expect a small gain at most, and measure it on your PC.` };
+    return { state: 'available', ticked: true, why: `${plan} lets the CPU slow down between frames. The difference may be small or none: measure it on your PC.` };
   }
   if (FAST_PLANS.includes(plan)) {
     return { state: 'available', ticked: false, why: "You're already on a fast plan. Kestrel's also turns off USB and PCIe power saving." };
@@ -140,6 +143,7 @@ export function createSampleTweaks({ clock = () => new Date() }: { clock?: () =>
   let readiness: Readiness = 'ready';
   let activePlan = OWNER_PLAN;
   let lastPoint = 56;
+  let unreadable = 0;
   /** Kestrel's open records, oldest first. */
   const open = new Map<TweakId, OpenRecord>();
   /** The report's History, newest first. */
@@ -209,7 +213,7 @@ export function createSampleTweaks({ clock = () => new Date() }: { clock?: () =>
         otherAccount: false,
         pendingOtherAccounts: 0,
         interrupted: [],
-        unreadableLines: 0,
+        unreadableLines: unreadable,
         anyActive: [...open.keys()].some((id) => id !== 'system-protection'),
       };
     },
@@ -309,9 +313,12 @@ export function createSampleTweaks({ clock = () => new Date() }: { clock?: () =>
         .reverse()
         .filter(([, record]) => record.standing === 'applied')
         .map(([id, record]) => `  ${strings.tweaks.names[id]}: ${record.before} → ${record.after} (${record.at})`);
-      if (active.length === 0 && history.length === 0) return `${header}\nNo changes yet.`;
       const finished = history.map((line) => `  ${line}`);
-      return [header, 'Active', ...(active.length > 0 ? active : ['  Nothing is active.']), 'History', ...(finished.length > 0 ? finished : ['  No finished changes yet.'])].join('\n');
+      const story =
+        active.length === 0 && history.length === 0
+          ? ['No changes yet.']
+          : ['Active', ...(active.length > 0 ? active : ['  Nothing is active.']), 'History', ...(finished.length > 0 ? finished : ['  No finished changes yet.'])];
+      return [header, ...story, ...(unreadable > 0 ? [UNREADABLE_CAUSE, UNREADABLE] : [])].join('\n');
     },
 
     // The PC's own side: what the person doesn't do from the tab.
@@ -322,6 +329,10 @@ export function createSampleTweaks({ clock = () => new Date() }: { clock?: () =>
     /** System Protection is on (`ready`), off, or decided by a policy. */
     setRestore(next: Readiness): void {
       readiness = next;
+    },
+    /** Lines of the journal that couldn't be read, which the view counts and the report ends by saying. */
+    setUnreadable(count: number): void {
+      unreadable = count;
     },
     /** Another tool changes a setting Kestrel changed. Only the five settings can be: the plan and System Protection have their own rows. */
     changeBehindItsBack(id: TweakId): void {

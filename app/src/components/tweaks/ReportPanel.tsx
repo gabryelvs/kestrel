@@ -9,6 +9,9 @@ type Props = { report: ReportLoad; unreadable: number; onRetry: () => void };
 /**
  * The Kestrel report, newest first, with Copy report. The text is Rust's, already laid out (its placeholder lines are
  * indented like entries), so it is shown as it is and never parsed. Copy report copies what is on screen.
+ *
+ * When part of the journal couldn't be read, the report text itself ends with two lines saying so (kestrel-tweaks' report.rs).
+ * The page's own warning is only for while that text isn't here: still being read, or not readable.
  */
 export function ReportPanel({ report, unreadable, onRetry }: Props) {
   return (
@@ -17,7 +20,7 @@ export function ReportPanel({ report, unreadable, onRetry }: Props) {
         <h2 className="label">{t.report}</h2>
         {report.state === 'ready' && <CopyButton label={t.copyReport} getText={() => report.text} copied={t.copied} failed={t.copyFailed} />}
       </div>
-      {unreadable > 0 && <p className="notice cut-s wrap">{t.unreadable}</p>}
+      {unreadable > 0 && report.state !== 'ready' && <p className="notice cut-s wrap">{t.unreadable}</p>}
       {report.state === 'loading' && <p className="muted small">{t.reportLoading}</p>}
       {report.state === 'failed' && (
         <>

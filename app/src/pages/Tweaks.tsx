@@ -3,11 +3,12 @@ import {
   benchList, tweaksApply, tweaksApplyAgain, tweaksPreview, tweaksRemovePlan, tweaksReport, tweaksRestoreAnyway, tweaksRestorePoint, tweaksRevertAll,
   tweaksUndo, tweaksUsePlanAgain, tweaksView,
 } from '../api/client';
+import { runApply, settle, type ApplyAt, type ApplyNext, type ApplyStep } from '../api/apply';
 import {
-  boundRow, canFocus, errorText, flowLocks, forgetChoices, gateReason, isTicked, measureNote, measureText, needsRestart, onlyTicked, restoreFailure,
-  restoreRoute, revertRows, rowNote, tickedIds, type Choices, type Flow, type MeasureNote, type ReportLoad, type ViewLoad,
+  boundRow, canFocus, closedReason, currentFlow, errorText, flowLocks, forgetChoices, isTicked, measureNote, measureText, onlyTicked, rereadsOnFocus,
+  revertRows, rowNote, tickedIds, type Choices, type Flow, type MeasureNote, type ReportLoad, type ViewLoad,
 } from '../api/tweaks';
-import type { ItemOutcome, PreviewView, RestoreChoice, TweakId, TweaksView } from '../api/types';
+import type { ItemOutcome, PreviewView, TweakId, TweaksView } from '../api/types';
 import { Outcomes } from '../components/tweaks/Outcomes';
 import { PreviewPanel } from '../components/tweaks/PreviewPanel';
 import { ReportPanel } from '../components/tweaks/ReportPanel';
@@ -18,6 +19,9 @@ import type { Tab } from '../components/TitleBar';
 import { STAGE, strings } from '../strings';
 
 const t = strings.tweaks;
+
+/** What the page says while Apply waits on a command. */
+const STEP_TEXT: Record<ApplyStep, string> = { restoring: t.restoring, applying: t.applying, rescanning: t.rescanning };
 
 /** Everything a button on the page can ask for. The page below decides what each one does. */
 export type Handlers = RowActions & {
@@ -37,6 +41,8 @@ export type Handlers = RowActions & {
 
 type BodyProps = {
   view: TweaksView;
+  /** Reading the view again failed, with this reason, and `view` is the last good one: it may be out of date. */
+  stale?: string;
   report: ReportLoad;
   /** The note above the rows, if the starting point needs one. */
   measure: MeasureNote | null;
@@ -76,7 +82,7 @@ function flowPanel(flow: Flow, view: TweaksView, on: Handlers): ReactNode {
       return inRow ? null : (
         <section className="panel failed-panel">
           <p className="notice cut-s wrap">{flow.message}</p>
-          {flow.unchanged && <p className="muted small">{t.nothingChanged}</p>}
+          {flow.unchanged && <p className="muted small">{t.noSettingsChanged}</p>}
           <div className="actions">
             <button className="btn btn-ghost cut-s" onClick={on.cancel}>{t.close}</button>
           </div>
@@ -98,11 +104,14 @@ function Slot({ stepKey, children }: { stepKey: string; children: ReactNode }) {
  * The page once the view is read: notes, the Essential rows, the tiers to come, the buttons with the reason when Apply can't
  * run, the step Apply or an undo is at, and the report. It holds no state of its own, so a test can put any view in it.
  */
-export function TweaksBody({ view, report, measure, choices, flow, on }: BodyProps) {
-  const closed = view.gate !== 'open';
+export function TweaksBody({ view, stale, report, measure, choices, flow: asked, on }: BodyProps) {
+  // A question about a row that is no longer what it asked about is over: it can't be answered, and it would lock the page.
+  const flow = currentFlow(asked, view.rows);
+  // A closed gate, or rows that may be out of date: nothing that changes the PC may be pressed, and the reason stands beside the buttons.
+  const why = closedReason(view, stale);
+  const closed = why !== null;
   const locked = flowLocks(flow);
   const ticked = tickedIds(view.rows, choices);
-  const why = gateReason(view.gate);
   const asking = flow.step === 'ask-restore-anyway' ? flow.id : null;
   const panel = flowPanel(flow, view, on);
   return (
@@ -152,7 +161,7 @@ export function TweaksBody({ view, report, measure, choices, flow, on }: BodyPro
           <button className="btn btn-ghost cut-s" disabled={closed || locked} onClick={on.askRevert}>{t.revertEverything}</button>
         )}
         {why && <span className="tweak-gate">{why}</span>}
-        {view.gate === 'cant-tell' && <button className="btn btn-ghost btn-small cut-s" onClick={on.retry}>{t.tryAgain}</button>}
+        {closed && <button className="btn btn-ghost btn-small cut-s" onClick={on.retry}>{t.tryAgain}</button>}
       </div>
       {panel && <Slot stepKey={`${flow.step}:${boundRow(flow) ?? ''}`}>{panel}</Slot>}
       <ReportPanel report={report} unreadable={view.unreadableLines} onRetry={on.retry} />
@@ -180,7 +189,7 @@ export function TweaksPage({ load, ...rest }: PageProps) {
           </div>
         </section>
       )}
-      {load.state === 'ready' && <TweaksBody view={load.view} {...rest} />}
+      {load.state === 'ready' && <TweaksBody view={load.view} stale={load.stale} {...rest} />}
     </div>
   );
 }
@@ -189,8 +198,11 @@ type Props = {
   /** The tweak a Fix button asked for: its Preview opens, if it can be applied. */
   focus: TweakId | null;
   onFocusUsed: () => void;
-  /** Something changed, so the scan is stale: Health, Home and the next benchmark's "PC at the time" need a new one. */
-  onRescan: () => void;
+  /**
+   * Something changed, so the scan is stale: Health, Home and the next benchmark's "PC at the time" need a new one. Answers when a scan
+   * that started after the change is done, however it ended, and the page waits for that before it shows what was done.
+   */
+  onRescan: () => Promise<void>;
   onTab: (tab: Tab) => void;
 };
 
@@ -207,13 +219,22 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
   const [flow, setFlow] = useState<Flow>({ step: 'idle' });
   const newest = useRef(0);
 
-  /** Reads the view and the report again. The newest read wins, so a slow old one never shows over a newer one. */
+  /**
+   * Reads the view and the report again. The newest read wins, so a slow old one never shows over a newer one. A view that can't be
+   * read again is kept and marked, so what was just done stays on screen; only a view that was never read is a failure.
+   */
   const reload = useCallback(async () => {
     newest.current += 1;
     const mine = newest.current;
     const [view, text] = await Promise.allSettled([tweaksView(), tweaksReport()]);
     if (mine !== newest.current) return;
-    setLoad(view.status === 'fulfilled' ? { state: 'ready', view: view.value } : { state: 'failed', message: errorText(view.reason) });
+    setLoad((current) =>
+      view.status === 'fulfilled'
+        ? { state: 'ready', view: view.value }
+        : current.state === 'ready'
+          ? { ...current, stale: errorText(view.reason) }
+          : { state: 'failed', message: errorText(view.reason) },
+    );
     setReport(text.status === 'fulfilled' ? { state: 'ready', text: text.value } : { state: 'failed', message: errorText(text.reason) });
   }, []);
 
@@ -225,6 +246,15 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
       () => undefined,
     );
   }, [reload]);
+
+  // What a closed gate (VALORANT open) or an unreadable view waits for happens outside Kestrel, so coming back to the window reads it again.
+  const rereads = rereadsOnFocus(load, flow);
+  useEffect(() => {
+    if (!rereads) return;
+    const back = () => void reload();
+    window.addEventListener('focus', back);
+    return () => window.removeEventListener('focus', back);
+  }, [rereads, reload]);
 
   const rows = load.state === 'ready' ? load.view.rows : [];
 
@@ -254,46 +284,46 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
     // Once per Fix: the parent clears `focus` as it is used, so this does not run again for the same one.
   }, [focus, load]);
 
-  /** The changes of a Preview, after the restore point step. */
-  const applyChanges = async (preview: PreviewView) => {
-    setFlow({ step: 'busy', text: t.applying });
+  /** One go at Apply (the order is in `runApply`), and what the page shows for how it came out. */
+  const go = async (preview: PreviewView, at: ApplyAt) => {
+    let next: ApplyNext;
     try {
-      const ids = preview.items.map((item) => item.id);
-      const outcomes = await tweaksApply(ids);
-      if (outcomes.some((outcome) => outcome.ok)) onRescan();
-      await reload();
-      setChoices((current) => forgetChoices(current, ids));
-      setFlow({ step: 'applied', outcomes, restart: needsRestart(outcomes, preview.items) });
+      next = await runApply({ restorePoint: tweaksRestorePoint, apply: tweaksApply, rescan: onRescan }, preview, at, (step) =>
+        setFlow({ step: 'busy', text: STEP_TEXT[step] }),
+      );
     } catch (error) {
-      // The restore point may have been made, but the command that changes the settings refused: nothing was changed.
-      await fail(error, { unchanged: true });
-    }
-  };
-
-  /** The restore point step, then the changes. A failed point is a question (go on without?), not an error; an error stops here. */
-  const makeRestorePoint = async (choice: RestoreChoice, preview: PreviewView) => {
-    setFlow({ step: 'busy', text: choice === 'skip' ? t.applying : t.restoring });
-    try {
-      const why = restoreFailure(await tweaksRestorePoint(choice));
-      if (why !== null) {
-        setFlow({ step: 'restore', preview, question: { kind: 'failed', reason: why } });
-        // Turning System Protection on may have worked before the point failed.
-        void reload();
-        return;
-      }
-    } catch (error) {
-      await fail(error, { unchanged: true });
+      await fail(error);
       return;
     }
-    await applyChanges(preview);
+    switch (next.next) {
+      case 'ask':
+        setFlow({ step: 'restore', preview, question: next.question });
+        // Turning System Protection on may have worked before the point failed.
+        if (next.question.kind === 'failed') void reload();
+        return;
+      case 'applied':
+        await reload();
+        setChoices((current) =>
+          forgetChoices(
+            current,
+            preview.items.map((item) => item.id),
+          ),
+        );
+        setFlow({ step: 'applied', outcomes: next.outcomes, restart: next.restart });
+        return;
+      case 'stopped':
+        setFlow({ step: 'failed', message: next.message, unchanged: next.unchanged });
+        await reload();
+        return;
+    }
   };
 
-  /** A row's own button: its outcome is said in that row. */
+  /** A row's own button: its outcome is said in that row, once the scan that follows a change is done. */
   const act = async (id: TweakId, command: () => Promise<ItemOutcome>) => {
     setFlow({ step: 'busy', text: t.working, id });
     try {
       const outcome = await command();
-      if (outcome.ok) onRescan();
+      await settle([outcome], onRescan);
       await reload();
       setChoices((current) => forgetChoices(current, [id]));
       setFlow({ step: 'row-result', id, outcome });
@@ -306,7 +336,7 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
     setFlow({ step: 'busy', text: t.undoing });
     try {
       const outcomes = await tweaksRevertAll();
-      if (outcomes.some((outcome) => outcome.ok)) onRescan();
+      await settle(outcomes, onRescan);
       await reload();
       setChoices({});
       setFlow({ step: 'results', outcomes });
@@ -328,19 +358,14 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
     removePlan: () => void act('power-plan', tweaksRemovePlan),
     preview: () => void openPreview(tickedIds(rows, choices)),
     apply: () => {
-      if (flow.step !== 'preview') return;
-      const route = restoreRoute(flow.preview.restore);
-      if (route === 'create') void makeRestorePoint('create', flow.preview);
-      else setFlow({ step: 'restore', preview: flow.preview, question: { kind: route === 'turn-on' ? 'protection-off' : 'blocked-by-policy' } });
+      if (flow.step === 'preview') void go(flow.preview, 'pressed');
     },
     turnOn: () => {
-      if (flow.step === 'restore') void makeRestorePoint('turn-on-and-create', flow.preview);
+      if (flow.step === 'restore') void go(flow.preview, 'turn-on');
     },
+    // Continue after a failed point goes on; Continue without (System Protection off, or a policy) is the only skip.
     goOn: () => {
-      if (flow.step !== 'restore') return;
-      // A failed point is already in the journal. Going on without a question asked of Windows records that it was skipped.
-      if (flow.question.kind === 'failed') void applyChanges(flow.preview);
-      else void makeRestorePoint('skip', flow.preview);
+      if (flow.step === 'restore') void go(flow.preview, flow.question.kind === 'failed' ? 'go-on' : 'without');
     },
     cancel,
     // With nothing it would undo (only rows something else changed), there is nothing to ask; the results say what was left alone.

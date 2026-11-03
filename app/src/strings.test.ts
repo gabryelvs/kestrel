@@ -46,7 +46,10 @@ describe('the Tweaks tab’s words', () => {
     expect(t.preview(0)).toBe('Preview 0 changes');
     expect(t.preview(3)).toBe('Preview 3 changes');
     expect(t.otherAccount).toBe('Kestrel is running as another account. Changes go to the account signed in now.');
-    expect(t.otherPending(2)).toBe('Another account has 2 change(s) from Kestrel. Those wait until that account is signed in.');
+    // Pluralised as the Preview button is: one change waits, several wait.
+    expect(t.otherPending(1)).toBe('Another account has 1 change from Kestrel. It waits until that account is signed in.');
+    expect(t.otherPending(2)).toBe('Another account has 2 changes from Kestrel. Those wait until that account is signed in.');
+    expect(t.otherPending(14)).toBe('Another account has 14 changes from Kestrel. Those wait until that account is signed in.');
     expect(t.restoring).toBe('Creating a restore point… this can take a minute.');
     expect(t.protectionOff).toBe(
       'System Protection is off on your Windows drive. Turn it on and create a restore point? Windows will use some disk space for restore points.',
@@ -56,6 +59,12 @@ describe('the Tweaks tab’s words', () => {
     expect(t.revertConfirm).toBe('Undo every change on this list?');
     expect(t.protectionWarning).toBe('Turning System Protection off deletes this drive’s restore points.');
     expect(t.laterTiers).toEqual(['Competitive', 'Extreme']);
+  });
+
+  it('say that no settings were changed, not that nothing was, since a restore point may have been made', () => {
+    expect(t.noSettingsChanged).toBe('No settings were changed.');
+    expect(t.rescanning).toBe('Checking your PC again…');
+    expect(t.rereadFailed).toBe('Kestrel couldn’t read the tweaks again, so these rows may be out of date.');
   });
 
   it('label every row state, impact and timing the tab can show', () => {

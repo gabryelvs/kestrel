@@ -48,7 +48,7 @@ const NOT_KEPT: &str = "Windows didn't keep the change.";
 const OLD_VALUE_NOT_KEPT: &str = "Windows didn't keep the old value.";
 const PLAN_NOT_SWITCHED: &str = "Windows didn't switch to Kestrel's plan.";
 const NO_OWNER: &str = "The journal doesn't say whose setting this is, so Kestrel left it alone.";
-const PROTECTION_ON: &str = "System Protection is on because Kestrel turned it on. Turning it off deletes this drive's restore points.";
+const PROTECTION_ON: &str = "System Protection is on because Kestrel turned it on.";
 const PROTECTION_STAYS: &str =
     "System Protection stays on: turning it off deletes this drive's restore points.";
 const PROTECTION_UNKNOWN: &str =
@@ -1248,7 +1248,7 @@ mod tests {
     const ALREADY_SET_TEXT: &str = "Already set.";
     const LEFT_ALONE_TEXT: &str =
         "Something else changed this after Kestrel did. Kestrel left it alone.";
-    const PROTECTION_WHY_TEXT: &str = "System Protection is on because Kestrel turned it on. Turning it off deletes this drive's restore points.";
+    const PROTECTION_WHY_TEXT: &str = "System Protection is on because Kestrel turned it on.";
 
     /// A desktop on Windows 11 25H2 with two graphics chips, VALORANT where Riot puts it, and windowed fullscreen.
     fn input() -> PlanInput {

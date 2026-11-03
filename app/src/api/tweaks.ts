@@ -5,8 +5,15 @@ import { strings } from '../strings';
 import { spreadText, variesTooMuch } from './bench';
 import type { BenchmarkSummary, Gate, ItemOutcome, PreviewItem, PreviewView, Readiness, RestoreOutcome, Row, TweakId, TweaksView } from './types';
 
-/** What the tab reads from the commands: the view and the report text are read together, each can fail on its own. */
-export type ViewLoad = { state: 'loading' } | { state: 'failed'; message: string } | { state: 'ready'; view: TweaksView };
+/**
+ * What the tab reads from the commands: the view and the report text are read together, each can fail on its own. `failed` is
+ * only for a view that was never read. When a view was read and reading it again failed, the last good one is kept as `view` and
+ * `stale` says why it may be out of date, so what was just done (a result, a note) stays on screen.
+ */
+export type ViewLoad =
+  | { state: 'loading' }
+  | { state: 'failed'; message: string }
+  | { state: 'ready'; view: TweaksView; stale?: string };
 export type ReportLoad = { state: 'loading' } | { state: 'failed'; message: string } | { state: 'ready'; text: string };
 
 // Measure first.
@@ -69,6 +76,15 @@ export const revertRows = (rows: Row[]): Row[] =>
 /** Why Apply and Undo are off, or null while the gate is open. Every gate but `open` is closed. */
 export const gateReason = (gate: Gate): string | null => (gate === 'open' ? null : strings.tweaks.gate[gate]);
 
+/**
+ * Why nothing that changes the PC may be pressed, or null while it may: a closed gate, or a view that couldn't be read again and
+ * so may be out of date (the gate in it is as old as the view). Both are shown beside the buttons and both have a Try again.
+ */
+export function closedReason(view: TweaksView, stale?: string): string | null {
+  if (stale !== undefined) return `${strings.tweaks.rereadFailed} ${stale}`.trim();
+  return gateReason(view.gate);
+}
+
 // Apply and the restore point.
 
 export type RestoreRoute = 'create' | 'turn-on' | 'blocked';
@@ -112,7 +128,7 @@ export type Flow =
   | { step: 'applied'; outcomes: ItemOutcome[]; restart: boolean }
   | { step: 'results'; outcomes: ItemOutcome[] }
   | { step: 'row-result'; id: TweakId; outcome: ItemOutcome }
-  /** A command was refused or failed. `unchanged` says nothing was changed: true of every step before the changes are made. */
+  /** A command was refused or failed. `unchanged` says no settings were changed, which is only claimed where it is known (see ApplyNext). */
   | { step: 'failed'; message: string; id?: TweakId; unchanged?: boolean };
 
 /** True while a command runs or a question waits: ticking, Preview and every row button are off, so nothing is asked twice. */
@@ -131,6 +147,31 @@ export function flowLocks(flow: Flow): boolean {
     case 'failed':
       return false;
   }
+}
+
+/**
+ * Whether coming back to the window reads the page again: while it shows something that is cleared from outside (VALORANT closed,
+ * a folder deleted) and no command is under way. It starts no read while the first is still being read.
+ */
+export function rereadsOnFocus(load: ViewLoad, flow: Flow): boolean {
+  if (flow.step === 'busy') return false;
+  switch (load.state) {
+    case 'loading':
+      return false;
+    case 'failed':
+      return true;
+    case 'ready':
+      return load.view.gate !== 'open' || load.stale !== undefined;
+  }
+}
+
+/**
+ * The step as it stands against the rows now. A question about a row (Restore anyway) is over once a re-read shows that row no longer
+ * changed by something else: it can no longer be answered, and a step that waits for an answer locks the page.
+ */
+export function currentFlow(flow: Flow, rows: Row[]): Flow {
+  if (flow.step !== 'ask-restore-anyway') return flow;
+  return rows.some((row) => row.id === flow.id && row.state === 'changed-elsewhere') ? flow : { step: 'idle' };
 }
 
 /** The row a step is about, if it is about one. */

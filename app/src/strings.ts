@@ -159,6 +159,8 @@ export const strings = {
     intro: 'Kestrel picked these for your PC. Nothing changes until you press Apply.',
     loading: 'Reading your PC’s settings…',
     loadFailed: 'Kestrel couldn’t read the tweaks.',
+    /** The rows were read before, and reading them again failed: they are kept, and may be out of date. The reason follows. */
+    rereadFailed: 'Kestrel couldn’t read the tweaks again, so these rows may be out of date.',
     tryAgain: 'Try again',
     essential: 'Essential',
     /** The tiers that come later. The page puts `comingSoon.arrives(STAGE.competitive)` beside each name. */
@@ -167,7 +169,8 @@ export const strings = {
     measureSpread: (pct: string) => `Your starting point’s runs vary by ${pct}, so small changes won’t show. Run a clean one before applying.`,
     openBenchmark: 'Open Benchmark',
     otherAccount: 'Kestrel is running as another account. Changes go to the account signed in now.',
-    otherPending: (n: number) => `Another account has ${n} change(s) from Kestrel. Those wait until that account is signed in.`,
+    otherPending: (n: number) =>
+      n === 1 ? 'Another account has 1 change from Kestrel. It waits until that account is signed in.' : `Another account has ${n} changes from Kestrel. Those wait until that account is signed in.`,
     states: {
       available: 'Available',
       'already-set': 'Already set',
@@ -226,8 +229,10 @@ export const strings = {
     // After a button.
     applying: 'Applying…',
     undoing: 'Undoing…',
+    rescanning: 'Checking your PC again…',
     result: 'Result',
-    nothingChanged: 'Nothing was changed.',
+    /** Said when a command was refused before it changed a setting. A restore point may have been made, so it says less than "nothing". */
+    noSettingsChanged: 'No settings were changed.',
     restartValorant: 'Restart VALORANT for these to take effect.',
     done: 'Measure it on your PC: run a benchmark and compare it with your starting point.',
     runBenchmark: 'Run a benchmark',

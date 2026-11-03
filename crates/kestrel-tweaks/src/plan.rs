@@ -269,7 +269,7 @@ fn windowed(sys: &dyn System, input: &PlanInput, sid: &str) -> Verdict {
         (
             RowState::Available,
             true,
-            "Lets windowed modes present frames the faster way. Your VALORANT runs in a windowed mode.",
+            "Lets windowed modes present frames with the newer flip model. Your VALORANT runs in a windowed mode.",
         )
     } else {
         (
@@ -384,7 +384,7 @@ mod tests {
     const RECORDING_OFF: &str = "Background recording is already off.";
     const WINDOWED_ON: &str = "Already on.";
     const WINDOWED_MODE: &str =
-        "Lets windowed modes present frames the faster way. Your VALORANT runs in a windowed mode.";
+        "Lets windowed modes present frames with the newer flip model. Your VALORANT runs in a windowed mode.";
     const WINDOWED_NOT_MODE: &str = "Only matters in windowed modes.";
     const ONE_GPU: &str = "One graphics card: nothing to choose.";
     const NO_VALORANT: &str = "VALORANT not found.";

@@ -25,7 +25,10 @@ type Props = {
   locked: boolean;
   /** The gate is closed, so nothing that changes the PC may be pressed. Ticking changes nothing, so the box stays. */
   closed: boolean;
-  /** Restore anyway was pressed, and the row is waiting for the answer. */
+  /**
+   * Restore anyway was pressed, and the row is waiting for the answer. It only asks while the row is still one something else
+   * changed: a re-read in between can show otherwise, and Yes would then be an answer to nothing.
+   */
   asking: boolean;
   /** What happened to this row's last button, said where the person pressed it. */
   note: RowNote | null;
@@ -38,6 +41,7 @@ const BUTTON = 'btn btn-ghost btn-small cut-s';
 export function TweakRow({ row, ticked, locked, closed, asking, note, on }: Props) {
   const off = locked || closed;
   const boxId = `tick-${row.id}`;
+  const question = asking && row.state === 'changed-elsewhere';
   return (
     <li className={`tweak-row tweak-${row.state}`} data-tweak={row.id}>
       <div className="tweak-box">
@@ -53,10 +57,10 @@ export function TweakRow({ row, ticked, locked, closed, asking, note, on }: Prop
         </div>
         <p className="tweak-why muted small wrap">{row.why}</p>
         {note && <p className={`tweak-note small wrap${note.ok ? '' : ' tone-warn'}`}>{note.text}</p>}
-        {asking && <p className="tweak-ask small wrap">{t.restoreAnywayAsk}</p>}
+        {question && <p className="tweak-ask small wrap">{t.restoreAnywayAsk}</p>}
       </div>
       <div className="tweak-actions">
-        {asking ? (
+        {question ? (
           <>
             <button className={BUTTON} disabled={closed} onClick={() => on.restoreAnyway(row.id)}>{t.yesRestore}</button>
             <button className={BUTTON} onClick={on.stopAsking}>{t.cancel}</button>

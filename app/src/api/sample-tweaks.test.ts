@@ -293,6 +293,17 @@ describe('Kestrel’s plan when another plan is picked', () => {
     expect(states(pc)['power-plan']).toBe('available');
   });
 
+  it('offers a slow built-in plan ticked, in words that promise nothing', () => {
+    const { pc } = owner();
+    pc.pickPlan('Balanced');
+    expect(pc.view().rows[0]).toMatchObject({
+      state: 'available', ticked: true,
+      why: 'Balanced lets the CPU slow down between frames. The difference may be small or none: measure it on your PC.',
+    });
+    pc.pickPlan('Power saver');
+    expect(pc.view().rows[0].why).toBe('Power saver lets the CPU slow down between frames. The difference may be small or none: measure it on your PC.');
+  });
+
   it('offers a fast plan unticked, and any other plan with a nudge to measure', () => {
     const { pc } = owner();
     pc.pickPlan('High performance');
@@ -329,6 +340,8 @@ describe('the restore point', () => {
     const view = pc.view();
     const row = view.rows.find((r) => r.id === 'system-protection');
     expect(row).toMatchObject({ state: 'applied', ticked: false, impact: 'none-in-game', timing: 'now' });
+    // The warning about the restore points is the page's, beside Undo, so the row's own sentence doesn't say it too.
+    expect(row?.why).toBe('System Protection is on because Kestrel turned it on.');
     expect(view.rows[view.rows.length - 1].id).toBe('system-protection');
     // It is never part of Revert everything: no button for it, and nothing for the button to do.
     expect(view.anyActive).toBe(false);
@@ -348,6 +361,36 @@ describe('the restore point', () => {
     expect(pc.restorePoint('turn-on-and-create')).toMatchObject({ result: 'failed' });
     expect(pc.view().rows.some((r) => r.id === 'system-protection')).toBe(false);
     expect(pc.restorePoint('skip')).toEqual({ result: 'skipped' });
+  });
+});
+
+describe('a journal with lines that couldn’t be read', () => {
+  const CAUSE = 'An interruption while Kestrel was writing is the usual cause of an unreadable line.';
+  const WARNING = 'Part of Kestrel\'s history couldn\'t be read.';
+
+  it('is counted in the view, and the report ends with its own two warning lines, as kestrel-tweaks’ report does', () => {
+    const { pc } = owner();
+    pc.setUnreadable(2);
+    expect(pc.view().unreadableLines).toBe(2);
+    expect(pc.report()).toBe(`${HEADER}\nNo changes yet.\n${CAUSE}\n${WARNING}`);
+  });
+
+  it('puts them after the History of a report that has one', () => {
+    const { pc } = owner();
+    pc.apply(['power-plan']);
+    pc.setUnreadable(1);
+    const lines = pc.report().split('\n');
+    expect(lines.slice(-2)).toEqual([CAUSE, WARNING]);
+    expect(lines[lines.length - 3]).toContain('Applied Kestrel power plan');
+    expect(lines.filter((line) => line === WARNING)).toHaveLength(1);
+  });
+
+  it('says nothing more once there are none', () => {
+    const { pc } = owner();
+    pc.setUnreadable(3);
+    pc.setUnreadable(0);
+    expect(pc.view().unreadableLines).toBe(0);
+    expect(pc.report()).toBe(`${HEADER}\nNo changes yet.`);
   });
 });
 
