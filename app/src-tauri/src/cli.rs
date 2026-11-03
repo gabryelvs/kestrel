@@ -294,8 +294,23 @@ mod tests {
         assert_eq!(HELPER_FLAG, "--restore-point");
     }
 
-    // The installer's hooks are compiled only by GitHub's Windows job (`tauri build`), so what can be known here is pinned
-    // here: the two tests below read the file the installer is given.
+    // The installer's hooks and the launch check are compiled and run only by GitHub's Windows job, so what can be known
+    // here is pinned here: the tests below read the files that job is given.
+
+    const HOOKS: &str = include_str!("../windows/hooks.nsh");
+
+    /// The lines of one macro in the hooks file, without comments, blank lines or indentation.
+    fn hook(name: &str) -> Vec<&'static str> {
+        let header = format!("!macro {name}");
+        HOOKS
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| *line != header)
+            .skip(1)
+            .take_while(|line| *line != "!macroend")
+            .filter(|line| !line.is_empty() && !line.starts_with(';'))
+            .collect()
+    }
 
     #[test]
     fn the_installer_is_pointed_at_the_hooks_file() {
@@ -316,23 +331,24 @@ mod tests {
 
     #[test]
     fn the_uninstaller_starts_the_flags_the_app_answers_and_checks_that_each_started() {
-        let hooks = include_str!("../windows/hooks.nsh");
-        let lines: Vec<&str> = hooks
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with(';'))
-            .collect();
+        let lines = hook("NSIS_HOOK_PREUNINSTALL");
         for flag in [HAS_CHANGES, REVERT_ALL] {
             let starts: Vec<usize> = (0..lines.len())
                 .filter(|&at| lines[at].starts_with("ExecWait") && lines[at].contains(flag))
                 .collect();
             assert_eq!(starts.len(), 1, "hooks.nsh starts {flag} once");
             // A program that can't be started leaves ExecWait's variable as it was, and NSIS's error flag, which stays
-            // set from whatever ran before, is the only sign of it. So the flag is cleared right before each start.
+            // set from whatever ran before, is the only sign of it. So the flag is cleared right before each start...
             assert_eq!(
                 lines[starts[0] - 1],
                 "ClearErrors",
                 "{flag} is started after ClearErrors"
+            );
+            // ...and looked at right after it, before the exit code is.
+            assert!(
+                lines[starts[0] + 1].contains("${Errors}"),
+                "{flag}'s start is followed by a look at the error flag, not {}",
+                lines[starts[0] + 1]
             );
         }
         // The words the owner chose (decision 88).
@@ -340,7 +356,80 @@ mod tests {
             "Undo Kestrel's changes before removing it?",
             "Kestrel couldn't undo everything. Check those settings in Windows.",
         ] {
-            assert_eq!(hooks.matches(words).count(), 1, "hooks.nsh says: {words}");
+            assert_eq!(HOOKS.matches(words).count(), 1, "hooks.nsh says: {words}");
+        }
+    }
+
+    #[test]
+    fn deleting_the_application_data_removes_the_journals_files_by_name_and_never_recurses() {
+        // `RMDir /r` descends into anything marked as a folder, a junction included, and a standard user may have made
+        // ProgramData\Kestrel one before Kestrel ever ran (the journal's folder check refuses it for that reason). So
+        // the uninstaller deletes the files the journal keeps, by name, and removes the folder only if that leaves it
+        // empty. What the journal keeps is what a real Apply leaves in its folder, so a third file fails this test.
+        let rig = Rig::new();
+        rig.apply_game_mode();
+        let mut kept: Vec<String> = std::fs::read_dir(&rig.dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        assert!(
+            !kept.is_empty(),
+            "an Apply leaves its journal in the folder"
+        );
+
+        let after = hook("NSIS_HOOK_POSTUNINSTALL");
+        let place = |line: &str| {
+            after
+                .iter()
+                .position(|&each| each == line)
+                .unwrap_or_else(|| panic!("hooks.nsh has no `{line}` for the application data"))
+        };
+        // `$APPDATA` under `all` is ProgramData as the shell names it, as the Rust side does, whatever the environment
+        // says. Tauri's own block, under this same condition, has just switched to the current user for its folders,
+        // and nothing after the hook uses a shell folder, so that is what is put back.
+        let mut wanted = vec!["SetShellVarContext all".to_string()];
+        wanted.extend(
+            kept.iter()
+                .map(|name| format!(r#"Delete "$APPDATA\Kestrel\{name}""#)),
+        );
+        wanted.push(r#"RMDir "$APPDATA\Kestrel""#.to_string());
+        wanted.push("SetShellVarContext current".to_string());
+        let places: Vec<usize> = wanted.iter().map(|line| place(line)).collect();
+        assert!(
+            places.windows(2).all(|pair| pair[0] < pair[1]),
+            "in this order: {wanted:?}"
+        );
+        // And nothing more: no other delete, nothing recursive, nothing taken from the environment.
+        let removals = after
+            .iter()
+            .filter(|line| line.starts_with("Delete") || line.starts_with("RMDir"))
+            .count();
+        assert_eq!(removals, kept.len() + 1, "{after:?}");
+        assert!(
+            after
+                .iter()
+                .all(|line| !line.contains("/r") && !line.contains('%')),
+            "{after:?}"
+        );
+    }
+
+    #[test]
+    fn the_launch_check_gives_every_call_of_the_exe_a_command_after_it() {
+        // PowerShell starts a GUI-subsystem program that ends a pipeline in the background, even inside @(): it doesn't
+        // wait for it, read its output or set $LASTEXITCODE. So each call has a command after it. The first Windows run
+        // read nothing from `@(& $exe --restore-point)`, and the exit code it then checked was the call before's.
+        let ci = include_str!("../../../.github/workflows/ci.yml");
+        for flag in [HAS_CHANGES, REVERT_ALL, HELPER_FLAG] {
+            let call = format!("& $exe {flag}");
+            let calls: Vec<&str> = ci.lines().filter(|line| line.contains(&call)).collect();
+            assert_eq!(calls.len(), 1, "ci.yml calls the exe with {flag} once");
+            let rest = calls[0].split(&call).nth(1).unwrap().trim_start();
+            assert!(
+                rest.starts_with('|'),
+                "{flag} is followed by a command in: {}",
+                calls[0].trim()
+            );
         }
     }
 

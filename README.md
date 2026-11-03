@@ -1,7 +1,7 @@
 # Kestrel
 
 A free, honest FPS optimiser for VALORANT on Windows. Kestrel detects your hardware, finds what's
-holding your frames back, and (in later versions) applies reversible tweaks picked for your PC.
+holding your frames back, and applies reversible tweaks picked for your PC.
 
 > Kestrel is not affiliated with Riot Games. VALORANT is a trademark of Riot Games, Inc.
 
@@ -14,11 +14,11 @@ changes your PC only when you press Apply. Stage 4, the other games, waits until
 Stage 3 (v0.3.0): the Hardware tab. Every part of the PC that Windows reports without a driver, each core's clock
 live, and Copy specs for a short summary to paste anywhere. Four new Health Check items look at the graphics card's
 PCIe link, Resizable BAR and virtualization, with BIOS-guide steps for your board, and benchmarks record the PCIe
-link under load. Kestrel still changes nothing on your PC.
+link under load. At this stage Kestrel changed nothing on your PC.
 
 Stage 2 (v0.2.0): the benchmark. A warm-up and 3 runs on a fixed route in VALORANT's Range measure average FPS,
 1% and 0.1% lows, stutters and PC latency, and compare every later result with your starting point. Kestrel
-changes nothing on your PC; it only saves benchmark results in its own folder.
+changed nothing on your PC; it only saved benchmark results in its own folder.
 
 Stage 1 (v0.1.0): hardware detection, Health Check and BIOS guide.
 

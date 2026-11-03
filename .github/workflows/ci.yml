@@ -136,8 +136,9 @@ jobs:
           # named first, so that the flags aren't blamed for it.
           if (Test-Path $folder) { throw "$folder exists before Kestrel was asked anything: an earlier step left it" }
 
-          # Kestrel.exe is a GUI-subsystem program, so PowerShell waits for it, and sets $LASTEXITCODE, only because its
-          # output goes into a pipe. Every call below keeps one.
+          # Kestrel.exe is a GUI-subsystem program, and PowerShell starts one that ends a pipeline in the background, even
+          # inside @(): it doesn't wait for it, read its output or set $LASTEXITCODE. So every call below has a command
+          # after it, which makes PowerShell read the output, wait for the exit and keep its code.
           & $exe --tweaks-has-changes | Out-Null
           if ($LASTEXITCODE -ne 1) { throw "--tweaks-has-changes should exit 1 with no changes, got $LASTEXITCODE" }
           & $exe --tweaks-revert-all | Out-Null
@@ -146,7 +147,7 @@ jobs:
 
           # The restore point helper prints one line of JSON and exits 0 whatever Windows said. A runner has no System
           # Restore, so the result is most likely "failed"; which result it is isn't checked, only that the line reads.
-          $lines = @(& $exe --restore-point)
+          $lines = @(& $exe --restore-point | Write-Output)
           if ($LASTEXITCODE -ne 0) { throw "--restore-point should exit 0, got $LASTEXITCODE" }
           if ($lines.Count -ne 1) { throw "--restore-point should print one line, printed $($lines.Count): $($lines -join ' | ')" }
           try { $answer = $lines[0] | ConvertFrom-Json -ErrorAction Stop }

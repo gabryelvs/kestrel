@@ -30,10 +30,19 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
-  ; "Delete the application data" also removes the undo history, after the question above.
+  ; "Delete the application data" also removes the undo history, after the question above. The journal's two files are
+  ; deleted by name and the folder goes only if that leaves it empty (so one with anything else in it stays). RMDir /r
+  ; would go into anything marked as a folder, a junction included, and a standard user may have made this path one
+  ; before Kestrel ever ran. $APPDATA under "all" is ProgramData as the shell names it, which is where Kestrel's own code
+  ; looks, whatever the environment says.
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode <> 1
-    ExpandEnvStrings $0 "%ProgramData%\Kestrel"
-    RMDir /r "$0"
+    SetShellVarContext all
+    Delete "$APPDATA\Kestrel\journal.jsonl"
+    Delete "$APPDATA\Kestrel\journal.lock"
+    RMDir "$APPDATA\Kestrel"
+    ; Tauri's block just above, under this same condition, switched to the current user for its own folders, and nothing
+    ; after this hook uses a shell folder, so that is what is put back.
+    SetShellVarContext current
   ${EndIf}
 !macroend
