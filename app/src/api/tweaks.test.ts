@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  boundRow, canFocus, closedReason, currentFlow, errorText, flowLocks, forgetChoices, gateReason, hasTickBox, isTicked, measureNote, measureText,
-  needsRestart, onlyTicked, restoreFailure, restoreRoute, revertRows, rereadsOnFocus, rowNote, tickedIds, type Flow, type ViewLoad,
+  boundRow, canFocus, closedReason, currentFlow, errorText, flowIsBusy, flowLocks, forgetChoices, gateReason, hasTickBox, isTicked, measureNote, measureText,
+  needsRestart, onlyTicked, reportBusy, restoreFailure, restoreRoute, revertRows, rereadsOnFocus, rowNote, tickedIds, type Flow, type ViewLoad,
 } from './tweaks';
 import type { BenchmarkSummary, ItemOutcome, PreviewItem, PreviewView, Row, RowState, TweakId, TweaksView } from './types';
 
@@ -175,7 +175,7 @@ describe('the restore point step', () => {
   });
 });
 
-describe('Restart VALORANT', () => {
+describe('saying the changes take effect the next time VALORANT opens', () => {
   const items = [item('power-plan', 'now'), item('windowed-optimizations', 'next-launch'), item('pointer-precision', 'next-sign-in')];
 
   it('is needed when a change that took waits for the next launch, by the timing the Preview showed', () => {
@@ -214,6 +214,7 @@ describe('what the page is doing', () => {
     { step: 'preview', preview },
     { step: 'restore', preview, question: { kind: 'protection-off' } },
     { step: 'ask-restore-anyway', id: 'game-mode' },
+    { step: 'ask-protection-off' },
     { step: 'ask-revert' },
   ];
   const resting: Flow[] = [
@@ -254,10 +255,45 @@ describe('what the page is doing', () => {
     expect(boundRow({ step: 'row-result', id: 'power-plan', outcome: outcome('power-plan', true) })).toBe('power-plan');
     expect(boundRow({ step: 'failed', id: 'power-plan', message: 'x' })).toBe('power-plan');
     expect(boundRow({ step: 'ask-restore-anyway', id: 'power-plan' })).toBe('power-plan');
+    expect(boundRow({ step: 'ask-protection-off' })).toBe('system-protection');
     expect(boundRow({ step: 'busy', text: 'Applying…' })).toBeNull();
     expect(boundRow({ step: 'failed', message: 'x' })).toBeNull();
     expect(boundRow(idle)).toBeNull();
     expect(boundRow({ step: 'ask-revert' })).toBeNull();
+  });
+});
+
+describe('what holds the tabs', () => {
+  const preview: PreviewView = { items: [], restore: 'ready' };
+
+  it('is a command under way, whatever it is waiting on and whichever row it is about', () => {
+    expect(flowIsBusy({ step: 'busy', text: 'Creating a restore point… this can take a minute.' })).toBe(true);
+    expect(flowIsBusy({ step: 'busy', text: 'Checking your PC again…' })).toBe(true);
+    expect(flowIsBusy({ step: 'busy', text: 'Working…', id: 'system-protection' })).toBe(true);
+  });
+
+  it('is nothing else: a person may leave a question or a result, which they have seen', () => {
+    const others: Flow[] = [
+      { step: 'idle' }, { step: 'preview', preview }, { step: 'restore', preview, question: { kind: 'protection-off' } }, { step: 'ask-restore-anyway', id: 'game-mode' },
+      { step: 'ask-protection-off' }, { step: 'ask-revert' }, { step: 'applied', outcomes: [], restart: false }, { step: 'results', outcomes: [] },
+      { step: 'row-result', id: 'game-mode', outcome: outcome('game-mode', true) }, { step: 'failed', message: 'Close VALORANT first.' },
+    ];
+    for (const flow of others) expect(flowIsBusy(flow), flow.step).toBe(false);
+  });
+
+  it('is told as soon as a command starts, and let go however that ends, the page going away included', () => {
+    // The clean-up is what React runs when the step changes and when the page unmounts, so the last thing heard is false either way.
+    const told: boolean[] = [];
+    const stop = reportBusy(true, (busy) => told.push(busy));
+    expect(told).toEqual([true]);
+    stop();
+    expect(told).toEqual([true, false]);
+  });
+
+  it('is not held by a page with nothing under way', () => {
+    const told: boolean[] = [];
+    reportBusy(false, (busy) => told.push(busy))();
+    expect(told).toEqual([false, false]);
   });
 });
 
@@ -297,6 +333,7 @@ describe('coming back to the window', () => {
     { step: 'preview', preview },
     { step: 'restore', preview, question: { kind: 'blocked-by-policy' } },
     { step: 'ask-restore-anyway', id: 'game-mode' },
+    { step: 'ask-protection-off' },
     { step: 'ask-revert' },
     { step: 'applied', outcomes: [], restart: false },
     { step: 'results', outcomes: [] },
@@ -311,8 +348,8 @@ describe('coming back to the window', () => {
     }
   });
 
-  it('leaves an open gate alone: there is nothing to clear', () => {
-    for (const flow of [...waiting, ...running]) expect(rereadsOnFocus(ready('open'), flow), flow.step).toBe(false);
+  it('reads it again with the gate open too: a plan picked in Power Options, or a setting changed in Windows, shows in its row', () => {
+    for (const flow of waiting) expect(rereadsOnFocus(ready('open'), flow), flow.step).toBe(true);
   });
 
   it('never reads it again while a command is under way, whatever the gate says', () => {
@@ -354,5 +391,16 @@ describe('a question that no longer applies', () => {
       { step: 'row-result', id: 'pointer-precision', outcome: outcome('pointer-precision', true) }, { step: 'failed', message: 'x', id: 'pointer-precision' },
     ];
     for (const flow of others) expect(currentFlow(flow, []), flow.step).toBe(flow);
+  });
+
+  it('stays, for turning System Protection off, for as long as its row is there, and is over once the row is gone', () => {
+    const asking: Flow = { step: 'ask-protection-off' };
+    expect(currentFlow(asking, [row('game-mode', 'applied'), row('system-protection', 'applied')])).toBe(asking);
+    // Something else turned it off and a re-read closed the record: there is no row left to answer in, and the page must not stay locked.
+    expect(currentFlow(asking, [row('game-mode', 'applied')])).toEqual({ step: 'idle' });
+    expect(currentFlow(asking, [])).toEqual({ step: 'idle' });
+    for (const state of ['available', 'already-set', 'not-needed', 'blocked-by-policy', 'changed-elsewhere', 'plan-inactive', 'couldnt-read'] as const) {
+      expect(currentFlow(asking, [row('system-protection', state)]), state).toEqual({ step: 'idle' });
+    }
   });
 });

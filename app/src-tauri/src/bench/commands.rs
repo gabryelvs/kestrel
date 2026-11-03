@@ -153,11 +153,10 @@ pub fn context_from(report: &Report) -> Context {
 }
 
 /// The context a benchmark starts with: the scan's, and the tweaks that are applied right now. The list is the engine's
-/// `applied_ids`, which is empty when it can't read its journal; a benchmark with no list at all (`None`) is only one
-/// saved before stage 5.
+/// `applied_ids`, which is None when it can't read its journal: unknown, as in a benchmark saved before stage 5.
 pub fn context_with_tweaks(report: &Report, engine: &Engine) -> Context {
     Context {
-        applied_tweaks: Some(engine.applied_ids()),
+        applied_tweaks: engine.applied_ids(),
         ..context_from(report)
     }
 }
@@ -382,6 +381,26 @@ mod tests {
             },
             context_from(&report)
         );
+    }
+
+    #[test]
+    fn a_benchmark_that_cant_read_the_journal_doesnt_know_which_tweaks_are_active() {
+        use kestrel_tweaks::fake::FakeSystem;
+        use kestrel_tweaks::journal::{JournalFile, PlainFolder};
+
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        let report = kestrel_core::build_report(kestrel_core::owner_pc_fixture(), date, "test");
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("Kestrel");
+        // A directory where the journal file should be: not "missing", and not readable.
+        std::fs::create_dir_all(folder.join("journal.jsonl")).unwrap();
+        let engine = Engine::new(
+            Arc::new(FakeSystem::new()),
+            JournalFile::new(folder, Box::new(PlainFolder)),
+        );
+
+        // Saved as "no tweaks", a later comparison would say every tweak on it was added since.
+        assert_eq!(context_with_tweaks(&report, &engine).applied_tweaks, None);
     }
 
     fn saved(store: &Store, created_at: &str, avg: f64) -> String {

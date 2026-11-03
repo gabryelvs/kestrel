@@ -8,6 +8,8 @@ const t = strings.tweaks;
 export type RowActions = {
   tick: (id: TweakId, ticked: boolean) => void;
   undo: (id: TweakId) => void;
+  /** System Protection's Undo was pressed: the row asks first. `undo` is the answer yes. */
+  askProtectionOff: () => void;
   applyAgain: (id: TweakId) => void;
   /** Restore anyway was pressed: the row asks first. */
   askRestoreAnyway: (id: TweakId) => void;
@@ -26,8 +28,8 @@ type Props = {
   /** The gate is closed, so nothing that changes the PC may be pressed. Ticking changes nothing, so the box stays. */
   closed: boolean;
   /**
-   * Restore anyway was pressed, and the row is waiting for the answer. It only asks while the row is still one something else
-   * changed: a re-read in between can show otherwise, and Yes would then be an answer to nothing.
+   * A button that asks first was pressed (Restore anyway, or System Protection's Undo), and the row is waiting for the answer. It only
+   * asks while the row is still what was asked about: a re-read in between can show otherwise, and Yes would then be an answer to nothing.
    */
   asking: boolean;
   /** What happened to this row's last button, said where the person pressed it. */
@@ -41,7 +43,12 @@ const BUTTON = 'btn btn-ghost btn-small cut-s';
 export function TweakRow({ row, ticked, locked, closed, asking, note, on }: Props) {
   const off = locked || closed;
   const boxId = `tick-${row.id}`;
-  const question = asking && row.state === 'changed-elsewhere';
+  const protection = row.id === 'system-protection';
+  const question =
+    !asking ? null
+    : row.state === 'changed-elsewhere' ? { ask: t.restoreAnywayAsk, yes: t.yesRestore, answer: () => on.restoreAnyway(row.id) }
+    : protection && row.state === 'applied' ? { ask: t.protectionWarning, yes: t.yesTurnOff, answer: () => on.undo(row.id) }
+    : null;
   return (
     <li className={`tweak-row tweak-${row.state}`} data-tweak={row.id}>
       <div className="tweak-box">
@@ -57,20 +64,20 @@ export function TweakRow({ row, ticked, locked, closed, asking, note, on }: Prop
         </div>
         <p className="tweak-why muted small wrap">{row.why}</p>
         {note && <p className={`tweak-note small wrap${note.ok ? '' : ' tone-warn'}`}>{note.text}</p>}
-        {question && <p className="tweak-ask small wrap">{t.restoreAnywayAsk}</p>}
+        {question && <p className="tweak-ask small wrap">{question.ask}</p>}
       </div>
       <div className="tweak-actions">
         {question ? (
           <>
-            <button className={BUTTON} disabled={closed} onClick={() => on.restoreAnyway(row.id)}>{t.yesRestore}</button>
+            <button className={BUTTON} disabled={closed} onClick={question.answer}>{question.yes}</button>
             <button className={BUTTON} onClick={on.stopAsking}>{t.cancel}</button>
           </>
         ) : (
           <>
             {row.state === 'applied' && (
               <>
-                {row.id === 'system-protection' && <span className="tweak-warning muted small wrap">{t.protectionWarning}</span>}
-                <button className={BUTTON} disabled={off} onClick={() => on.undo(row.id)}>{t.undo}</button>
+                {protection && <span className="tweak-warning muted small wrap">{t.protectionWarning}</span>}
+                <button className={BUTTON} disabled={off} onClick={() => (protection ? on.askProtectionOff() : on.undo(row.id))}>{t.undo}</button>
               </>
             )}
             {row.state === 'changed-elsewhere' && (

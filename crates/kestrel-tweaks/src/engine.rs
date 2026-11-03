@@ -29,8 +29,8 @@ use crate::journal::{CloseReason, Entry, JournalFile, OpenRecord, Replay, Restor
 use crate::plan::{self, PlanInput, PreviewItem, Row, RowState, ValueChange};
 use crate::power::{self, KESTREL_PLAN_GUID, KESTREL_PLAN_NAME};
 use crate::report;
-use crate::system::{Read, Readiness, System};
-use crate::targets;
+use crate::system::{Readiness, System};
+use crate::targets::{self, known};
 
 const APPLIED: &str = "Applied.";
 const UNDONE: &str = "Undone.";
@@ -467,24 +467,24 @@ impl Engine {
         })
     }
 
-    /// The ids of the rows that say Applied, for this account and the machine, after settling the journal. A journal
-    /// that can't be read has nothing known to hold.
-    pub fn applied_ids(&self) -> Vec<String> {
-        let Ok(replay) = self.reconcile() else {
-            return Vec::new();
-        };
+    /// The ids of the rows that say Applied, for this account and the machine, after settling the journal. None when
+    /// the journal can't be read: what holds isn't known then, and that is not the same as nothing holding.
+    pub fn applied_ids(&self) -> Option<Vec<String>> {
+        let replay = self.reconcile().ok()?;
         let signed_in = self.system.account().signed_in;
-        replay
-            .open
-            .iter()
-            .filter(|record| is_ours(record, signed_in.as_deref()))
-            .filter(|record| {
-                // System Protection's row says Applied for as long as its record is open.
-                record.tweak == TweakId::SystemProtection
-                    || matches!(self.standing(record), Standing::Holds)
-            })
-            .map(|record| record.tweak.as_str().to_string())
-            .collect()
+        Some(
+            replay
+                .open
+                .iter()
+                .filter(|record| is_ours(record, signed_in.as_deref()))
+                .filter(|record| {
+                    // System Protection's row says Applied for as long as its record is open.
+                    record.tweak == TweakId::SystemProtection
+                        || matches!(self.standing(record), Standing::Holds)
+                })
+                .map(|record| record.tweak.as_str().to_string())
+                .collect(),
+        )
     }
 
     /// Whether Kestrel runs as another account than the one at the screen. It only reads, for Copy diagnostics.
@@ -1081,17 +1081,6 @@ fn joined(first: &str, second: &str) -> String {
     format!("{}. {second}", first.trim_end_matches('.'))
 }
 
-/// A read of a whole setting: its state, or why there isn't one. A setting that isn't set is a state too (a `Dword`
-/// holding `None`, say), so `targets::current` and `power::prior` don't answer `Absent`; if one ever did, it wouldn't
-/// have said what is there, and that is no reason to write over it.
-fn known(read: Read<Saved>) -> Result<Saved, String> {
-    match read {
-        Read::Value(value) => Ok(value),
-        Read::Absent => Err("Windows didn't say.".to_string()),
-        Read::Failed(why) => Err(why),
-    }
-}
-
 fn kestrels_plan() -> Saved {
     Saved::Plan {
         guid: KESTREL_PLAN_GUID.to_string(),
@@ -1204,6 +1193,7 @@ mod tests {
         FakeSystem, ACTIVE_PLAN, BALANCED, HIGH_PERFORMANCE, MOUSE_LIVE, PROTECTION, SID,
     };
     use crate::journal::{Folder, PlainFolder};
+    use crate::system::Read;
     use crate::targets::{
         ALLOW_AUTO_GAME_MODE, ALLOW_GAME_DVR, APP_CAPTURE, AUTO_GAME_MODE, DIRECTX_KEY,
         DIRECTX_SETTINGS, GAME_BAR_KEY, GAME_DVR_KEY, GAME_DVR_POLICY_KEY, GPU_PREFERENCE_TOKEN,
@@ -1876,7 +1866,7 @@ mod tests {
 
         assert_eq!(rig.state(PointerPrecision), Applied);
         assert_eq!(rig.open().len(), 1, "closing it would lose the undo");
-        assert_eq!(rig.engine.applied_ids(), ["pointer-precision"]);
+        assert_eq!(rig.engine.applied_ids().unwrap(), ["pointer-precision"]);
         assert!(rig.undo(PointerPrecision).ok);
         assert_eq!(rig.pc.dump(), before);
     }
@@ -2501,7 +2491,7 @@ mod tests {
         assert_eq!(rig.state(PointerPrecision), ChangedElsewhere);
         assert_eq!(rig.story(), entries, "the record stays");
         assert!(rig.engine.has_open_records());
-        assert!(rig.engine.applied_ids().is_empty());
+        assert_eq!(rig.engine.applied_ids(), Some(Vec::new()));
         // Undo leaves it alone and nothing has been written, as with any third value.
         let item = rig.undo(PointerPrecision);
         assert!(!item.ok);
@@ -2634,7 +2624,7 @@ mod tests {
 
         let view = rig.view();
         rig.engine.preview(&input(), &TweakId::ESSENTIAL);
-        assert!(rig.engine.applied_ids().is_empty());
+        assert_eq!(rig.engine.applied_ids(), Some(Vec::new()));
         assert!(!rig.engine.has_open_records());
 
         assert!(!view.any_active);
@@ -2663,7 +2653,7 @@ mod tests {
         // The rows are judged all the same: both settings are back at what they were.
         assert_eq!(row_in(&view, GameMode).state, Available);
         assert_eq!(row_in(&view, BackgroundRecording).state, Available);
-        assert!(rig.engine.applied_ids().is_empty());
+        assert_eq!(rig.engine.applied_ids(), Some(Vec::new()));
         assert!(
             rig.engine.has_open_records(),
             "the file still holds them, and that's what this counts"
@@ -2753,15 +2743,45 @@ mod tests {
     }
 
     #[test]
+    fn a_hand_written_mouse_record_reaches_neither_the_registry_nor_the_mouse() {
+        // What Kestrel left is on the PC, and the journal says the old strings were something no setting can hold.
+        let rig = Rig::on(arranged());
+        assert!(rig.apply(PointerPrecision).ok);
+        let held = rig.pc.dump();
+        let writes = rig.pc.writes().len();
+        let path = rig.folder().join("journal.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""speed":"1""#), "{text}");
+        std::fs::write(&path, text.replace(r#""speed":"1""#, r#""speed":"1;x""#)).unwrap();
+
+        for item in [
+            rig.undo(PointerPrecision),
+            rig.engine.restore_anyway(PointerPrecision).unwrap(),
+        ] {
+            assert!(!item.ok, "{item:?}");
+            assert!(item.message.contains("can't hold that text"), "{item:?}");
+        }
+
+        assert_eq!(rig.pc.dump(), held);
+        assert_eq!(rig.pc.writes().len(), writes);
+        assert_eq!(
+            rig.open().len(),
+            1,
+            "the record stays, for a better journal"
+        );
+    }
+
+    #[test]
     fn a_journal_that_cant_be_read_is_the_views_error() {
         let rig = Rig::on(arranged());
         rig.left_by_an_earlier_run(&[]);
         std::fs::create_dir(rig.folder().join("journal.jsonl")).unwrap();
 
         assert!(rig.engine.view(&input(), Gate::Open).is_err());
-        assert!(
-            rig.engine.applied_ids().is_empty(),
-            "nothing is known to hold"
+        assert_eq!(
+            rig.engine.applied_ids(),
+            None,
+            "not knowing what holds is not holding nothing"
         );
         assert!(rig.engine.has_open_records(), "and something may be open");
         assert!(rig.engine.preview(&input(), &[GameMode]).items.is_empty());
@@ -3700,7 +3720,7 @@ mod tests {
         let view = rig.view();
         assert_eq!(row_in(&view, PowerPlan).state, PlanInactive);
         assert!(view.any_active, "Revert everything still has it to remove");
-        assert!(rig.engine.applied_ids().is_empty());
+        assert_eq!(rig.engine.applied_ids(), Some(Vec::new()));
         assert_eq!(rig.open().len(), 1, "open while the plan exists");
 
         let removed = rig.engine.remove_plan().unwrap();
@@ -3913,7 +3933,7 @@ mod tests {
         );
         assert!(!rig.engine.remove_plan().unwrap().ok);
         assert!(!rig.engine.use_plan_again().unwrap().ok);
-        assert!(rig.engine.applied_ids().is_empty());
+        assert_eq!(rig.engine.applied_ids(), Some(Vec::new()));
         assert_eq!(rig.pc.writes().len(), writes);
         assert_eq!(rig.open().len(), 1);
 
@@ -4052,7 +4072,7 @@ mod tests {
         assert_eq!(row.title, "System Protection");
         assert!(!row.ticked);
         assert!(!view.any_active, "it isn't part of Revert everything");
-        assert_eq!(rig.engine.applied_ids(), ["system-protection"]);
+        assert_eq!(rig.engine.applied_ids().unwrap(), ["system-protection"]);
 
         // With the rest of the tier, it still doesn't count, and they do.
         assert!(rig.apply(GameMode).ok);
@@ -4179,7 +4199,7 @@ mod tests {
             rig.pc.set_protection(readiness);
 
             assert_eq!(rig.state(SystemProtection), Applied, "{readiness:?}");
-            assert_eq!(rig.engine.applied_ids(), ["system-protection"]);
+            assert_eq!(rig.engine.applied_ids().unwrap(), ["system-protection"]);
             assert_eq!(rig.story().len(), 2, "{readiness:?}");
 
             let item = rig.undo(SystemProtection);
@@ -4217,7 +4237,7 @@ mod tests {
         assert_eq!(open[0].planned, Saved::Protection { on: true });
         assert!(open[0].settled);
         assert_eq!(rig.state(SystemProtection), Applied);
-        assert_eq!(rig.engine.applied_ids(), ["system-protection"]);
+        assert_eq!(rig.engine.applied_ids().unwrap(), ["system-protection"]);
 
         // Revert everything leaves it on.
         let items = rig.engine.revert_all().unwrap();
@@ -4370,7 +4390,7 @@ mod tests {
 
         let why = rig.engine.turn_protection_on().unwrap_err();
 
-        assert!(why.to_string().contains("another window"), "{why}");
+        assert!(why.to_string().contains("already changing"), "{why}");
         assert!(rig.pc.writes().is_empty());
         drop(held);
     }
@@ -4481,7 +4501,7 @@ mod tests {
             .engine
             .record_restore(&RestoreOutcome::Skipped)
             .unwrap_err();
-        assert!(why.to_string().contains("another window"), "{why}");
+        assert!(why.to_string().contains("already changing"), "{why}");
         drop(held);
         rig.engine.record_restore(&RestoreOutcome::Skipped).unwrap();
         assert_eq!(rig.story(), ["restore point"]);
@@ -4531,7 +4551,7 @@ mod tests {
         assert!(view.interrupted.is_empty());
         assert!(!view.any_active);
         assert!(!view.other_account, "this process is the signed-in account");
-        assert!(rig.engine.applied_ids().is_empty());
+        assert_eq!(rig.engine.applied_ids(), Some(Vec::new()));
         assert!(rig.engine.has_open_records());
         assert!(rig.engine.revert_all().unwrap().is_empty());
         assert!(!rig.undo(GameMode).ok, "this account has nothing to undo");
@@ -4616,7 +4636,7 @@ mod tests {
 
         assert!(rig.apply(PowerPlan).ok);
         assert_eq!(rig.state(PowerPlan), Applied);
-        assert_eq!(rig.engine.applied_ids(), ["power-plan"]);
+        assert_eq!(rig.engine.applied_ids().unwrap(), ["power-plan"]);
         assert!(rig.undo(PowerPlan).ok);
         assert_eq!(rig.pc.active_plan(), Read::Value(BALANCED.to_string()));
     }
@@ -4810,7 +4830,7 @@ mod tests {
         // The row is this account's setting, and that record says nothing about it.
         assert_eq!(row_in(&view, GameMode).state, Available);
         assert!(view.interrupted.is_empty());
-        assert!(rig.engine.applied_ids().is_empty());
+        assert_eq!(rig.engine.applied_ids(), Some(Vec::new()));
         let items = rig.engine.revert_all().unwrap();
         assert_eq!(items.len(), 2);
         assert!(items.iter().all(|item| !item.ok), "{items:?}");
@@ -4872,12 +4892,12 @@ mod tests {
     #[test]
     fn applied_ids_lists_only_applied_rows() {
         let rig = Rig::on(arranged());
-        assert!(rig.engine.applied_ids().is_empty());
+        assert_eq!(rig.engine.applied_ids(), Some(Vec::new()));
         for id in TweakId::ESSENTIAL {
             assert!(rig.apply(id).ok, "{id:?}");
         }
         assert_eq!(
-            rig.engine.applied_ids(),
+            rig.engine.applied_ids().unwrap(),
             [
                 "power-plan",
                 "game-mode",
@@ -4895,7 +4915,7 @@ mod tests {
         rig.pc.fail_read(MOUSE_SPEED);
 
         assert_eq!(
-            rig.engine.applied_ids(),
+            rig.engine.applied_ids().unwrap(),
             ["windowed-optimizations", "gpu-preference"]
         );
         // It settles the journal first, as the view does.
@@ -5753,7 +5773,7 @@ History
             .collect();
         assert_eq!(applied_rows, [GpuPreference, PointerPrecision]);
         assert_eq!(
-            rig.engine.applied_ids(),
+            rig.engine.applied_ids().unwrap(),
             ["gpu-preference", "pointer-precision"]
         );
     }

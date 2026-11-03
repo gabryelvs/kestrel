@@ -598,7 +598,8 @@ const PERFORMANCE_NAMES: [&str; 3] = ["high performance", "ultimate performance"
 /// Only the built-in Balanced and Power saver plans are problems. `powercfg -duplicatescheme` (the usual way to get
 /// Ultimate Performance on Home and Pro) gives the copy a new GUID, and OEM, AMD and Bitsum plans have their own, so
 /// a plan Kestrel doesn't know is reported but not counted. Names follow the user's language; GUIDs never change.
-/// On a dual-CCD X3D, Balanced passes: it is AMD's guidance there, and the Tweaks tab doesn't offer Kestrel's plan.
+/// On a dual-CCD X3D, Balanced passes: it is AMD's guidance there, and the Tweaks tab doesn't offer Kestrel's plan, so
+/// no finding there points at it.
 fn power_plan(s: &SystemSnapshot) -> Finding {
     let c = Check {
         id: "power-plan",
@@ -610,7 +611,8 @@ fn power_plan(s: &SystemSnapshot) -> Finding {
     };
     let guid = plan.guid.to_ascii_lowercase();
     let name = plan.name.to_ascii_lowercase();
-    let amds_choice = guid == BALANCED && cpu::is_dual_ccd_x3d(&s.cpu.name);
+    let not_offered = cpu::is_dual_ccd_x3d(&s.cpu.name);
+    let amds_choice = guid == BALANCED && not_offered;
     if guid == HIGH_PERFORMANCE
         || guid == ULTIMATE_PERFORMANCE
         || PERFORMANCE_NAMES.iter().any(|word| name.contains(word))
@@ -618,15 +620,29 @@ fn power_plan(s: &SystemSnapshot) -> Finding {
     {
         c.pass(format!("Power plan: {}", plan.name), "")
     } else if guid == BALANCED || guid == POWER_SAVER {
-        c.problem(
-            format!("Power plan is {}", plan.name),
-            "This plan lets the CPU slow down between frames, which can hurt 1% lows. Kestrel's plan is in the Tweaks tab.",
-            Fix::Tweak { tweak: TweakId::PowerPlan },
-        )
+        let title = format!("Power plan is {}", plan.name);
+        let slows = "This plan lets the CPU slow down between frames, which can hurt 1% lows.";
+        if not_offered {
+            c.problem(title, slows, Fix::Nothing)
+        } else {
+            c.problem(
+                title,
+                format!("{slows} Kestrel's plan is in the Tweaks tab."),
+                Fix::Tweak {
+                    tweak: TweakId::PowerPlan,
+                },
+            )
+        }
     } else {
+        let unknown =
+            "Kestrel can't tell how this plan is tuned, so it isn't counted as a problem.";
         c.info(
             format!("Custom power plan: {}", plan.name),
-            "Kestrel can't tell how this plan is tuned, so it isn't counted as a problem. You can try Kestrel's plan in the Tweaks tab and measure before and after.",
+            if not_offered {
+                unknown.to_string()
+            } else {
+                format!("{unknown} You can try Kestrel's plan in the Tweaks tab and measure before and after.")
+            },
         )
     }
 }
@@ -651,7 +667,7 @@ fn background_recording(s: &SystemSnapshot) -> Finding {
         severity: Severity::Medium,
     };
     match s.windows.background_recording {
-        Some(true) => c.problem("Background recording is on", "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS.", Fix::Tweak { tweak: TweakId::BackgroundRecording }),
+        Some(true) => c.problem("Background recording is on", "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which can cost FPS.", Fix::Tweak { tweak: TweakId::BackgroundRecording }),
         Some(false) => c.pass("Background recording is off", ""),
         None => c.unknown("Couldn't read the background recording setting", ""),
     }
@@ -2517,7 +2533,7 @@ mod tests {
             wording("background-recording"),
             (
                 "Background recording is on",
-                "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which costs FPS."
+                "Xbox Game Bar keeps recording gameplay in the background (\"Record what happened\"), which can cost FPS."
             )
         );
     }
@@ -2644,6 +2660,55 @@ mod tests {
         assert_eq!(plan.title, "Custom power plan: EXM Free Power Plan V8");
         assert_eq!(plan.detail, "Kestrel can't tell how this plan is tuned, so it isn't counted as a problem. You can try Kestrel's plan in the Tweaks tab and measure before and after.");
         assert_eq!(plan.fix, Fix::Nothing);
+    }
+
+    #[test]
+    fn a_dual_ccd_x3d_is_not_pointed_at_a_plan_the_tweaks_tab_does_not_offer_it() {
+        const CHIP: &str = "AMD Ryzen 9 9950X3D 16-Core Processor";
+        let saver = power_plan_on(CHIP, POWER_SAVER_GUID, "Power saver");
+        assert_eq!(
+            (saver.status, saver.detail.as_str(), &saver.fix),
+            (
+                Status::Problem,
+                "This plan lets the CPU slow down between frames, which can hurt 1% lows.",
+                &Fix::Nothing
+            )
+        );
+        let other = power_plan_on(
+            CHIP,
+            "5b1d3a84-6b3c-4a52-9a77-3f1c2d8e9b10",
+            "EXM Free Power Plan V8",
+        );
+        assert_eq!(
+            (other.status, other.detail.as_str(), &other.fix),
+            (
+                Status::Info,
+                "Kestrel can't tell how this plan is tuned, so it isn't counted as a problem.",
+                &Fix::Nothing
+            )
+        );
+        // Elsewhere it is offered, on an X3D with one CCD too.
+        const ONE_CCD: &str = "AMD Ryzen 7 7800X3D 8-Core Processor";
+        let saver = power_plan_on(ONE_CCD, POWER_SAVER_GUID, "Power saver");
+        assert_eq!(saver.detail, "This plan lets the CPU slow down between frames, which can hurt 1% lows. Kestrel's plan is in the Tweaks tab.");
+        assert_eq!(
+            saver.fix,
+            Fix::Tweak {
+                tweak: TweakId::PowerPlan
+            }
+        );
+        let other = power_plan_on(
+            ONE_CCD,
+            "5b1d3a84-6b3c-4a52-9a77-3f1c2d8e9b10",
+            "EXM Free Power Plan V8",
+        );
+        assert!(
+            other.detail.ends_with(
+                "You can try Kestrel's plan in the Tweaks tab and measure before and after."
+            ),
+            "{}",
+            other.detail
+        );
     }
 
     #[test]

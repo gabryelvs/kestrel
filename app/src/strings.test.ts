@@ -37,6 +37,10 @@ describe('stage numbers', () => {
   });
 });
 
+it('promises no gain on Lock In’s page, which says what it will do', () => {
+  expect(strings.comingSoon.lockIn.body).toBe('A tiny helper that applies its changes only while VALORANT runs, and undoes them when you quit.');
+});
+
 describe('the Tweaks tab’s words', () => {
   const t = strings.tweaks;
 
@@ -54,10 +58,12 @@ describe('the Tweaks tab’s words', () => {
     expect(t.protectionOff).toBe(
       'System Protection is off on your Windows drive. Turn it on and create a restore point? Windows will use some disk space for restore points.',
     );
-    expect(t.restartValorant).toBe('Restart VALORANT for these to take effect.');
+    // Said just after the gate proved VALORANT closed, so it can't say to restart it.
+    expect(t.takeEffectNextLaunch).toBe('These take effect the next time VALORANT opens.');
     expect(t.done).toBe('Measure it on your PC: run a benchmark and compare it with your starting point.');
     expect(t.revertConfirm).toBe('Undo every change on this list?');
     expect(t.protectionWarning).toBe('Turning System Protection off deletes this drive’s restore points.');
+    expect(t.yesTurnOff).toBe('Yes, turn it off');
     expect(t.laterTiers).toEqual(['Competitive', 'Extreme']);
   });
 

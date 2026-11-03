@@ -35,7 +35,10 @@ fn controller_of(app: &AppHandle) -> Controller {
 }
 
 /// What the rules need to know about this PC: the last scan, and the fullscreen mode VALORANT's own settings file says.
-fn input_for(snapshot: &SystemSnapshot, settings: Option<ValorantSettings>) -> PlanInput {
+pub(crate) fn input_for(
+    snapshot: &SystemSnapshot,
+    settings: Option<ValorantSettings>,
+) -> PlanInput {
     PlanInput::from_snapshot(snapshot, settings.and_then(|s| s.fullscreen_mode))
 }
 
@@ -446,7 +449,7 @@ mod tests {
         assert_eq!(rig.recorded(), [outcome]);
         assert_eq!(rig.pc.writes(), ["protection on"]);
         assert_eq!(
-            rig.engine.applied_ids(),
+            rig.engine.applied_ids().unwrap(),
             ["system-protection"],
             "it has a row of its own, and an undo"
         );
@@ -532,7 +535,7 @@ mod tests {
         })
         .unwrap();
         assert!(items[0].ok, "{items:?}");
-        assert_eq!(rig.engine.applied_ids(), ["game-mode"]);
+        assert_eq!(rig.engine.applied_ids().unwrap(), ["game-mode"]);
         // The engine's errors are the command's, in the engine's words.
         let held = journal_in(&rig.dir).lock().unwrap();
         let why = gated(Gate::Open, &rig.engine, |engine| {
@@ -541,7 +544,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             why,
-            "Kestrel is already changing settings in another window."
+            "Kestrel is already changing settings. Try again in a moment."
         );
         drop(held);
     }
@@ -578,7 +581,7 @@ mod tests {
         let rig = Rig::new();
         let items = rig.apply_game_mode(|| Some(false)).unwrap();
         assert!(items[0].ok, "{items:?}");
-        assert_eq!(rig.engine.applied_ids(), ["game-mode"]);
+        assert_eq!(rig.engine.applied_ids().unwrap(), ["game-mode"]);
     }
 
     #[test]
@@ -685,7 +688,7 @@ mod tests {
         ))
         .unwrap();
         assert!(items[0].ok, "{items:?}");
-        assert_eq!(rig.engine.applied_ids(), ["game-mode"]);
+        assert_eq!(rig.engine.applied_ids().unwrap(), ["game-mode"]);
     }
 
     #[cfg(not(windows))]

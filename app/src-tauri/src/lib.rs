@@ -114,7 +114,7 @@ fn get_cpu_clocks(state: State<'_, AppState>) -> Result<Vec<CoreClock>, String> 
 /// Pretty JSON for the "Copy diagnostics" button: the last scan (with the newest link under load, as the app shows it),
 /// the saved benchmarks, VALORANT's settings, the benchmark session as it is now (a failed one carries PresentMon's
 /// error), or null when there is none, and the Kestrel report with what the tweaks see of the accounts and System
-/// Protection.
+/// Protection, and each row of the tab with why it is as it is.
 #[tauri::command(async)]
 fn get_diagnostics(
     state: State<'_, AppState>,
@@ -128,13 +128,15 @@ fn get_diagnostics(
         .clone()
         .ok_or("Run a scan first.")?;
     let build = report.snapshot.os.build;
+    let settings = bench.game_settings();
+    let input = tweaks::commands::input_for(&report.snapshot, settings.clone());
     let diagnostics = serde_json::json!({
         "report": hardware::with_links(report, bench.store(), today()),
         "benchmarks": bench.store().list(),
-        "valorantSettings": bench.game_settings(),
+        "valorantSettings": settings,
         // An owned snapshot: no platform call, and the controller's lock is released before this is serialised.
         "benchSession": bench.state(),
-        "tweaks": tweaks::diagnostics(&engine, build),
+        "tweaks": tweaks::diagnostics(&engine, &input, build),
     });
     serde_json::to_string_pretty(&diagnostics).map_err(|e| e.to_string())
 }

@@ -75,6 +75,17 @@ pub(crate) fn found<T>(read: Read<T>) -> Result<Option<T>, String> {
     }
 }
 
+/// A read of a whole setting, or of something it can't do without: what it found, or why there is nothing. A setting that
+/// isn't set is a state too (a `Dword` holding `None`, say), so `current` and `power::prior` don't answer `Absent`; if one
+/// ever did, it wouldn't have said what is there, and that is no reason to write over it.
+pub(crate) fn known<T>(read: Read<T>) -> Result<T, String> {
+    match read {
+        Read::Value(value) => Ok(value),
+        Read::Absent => Err("Windows didn't say.".to_string()),
+        Read::Failed(why) => Err(why),
+    }
+}
+
 /// The name of the game's value, when there is one. An empty name would be the key's default value, which is nobody's.
 fn game_value(value_name: Option<&str>) -> Option<&str> {
     value_name.filter(|name| !name.is_empty())
@@ -232,6 +243,7 @@ pub fn write(
                 live,
             },
         ) => {
+            plain_strings(speed, threshold1, threshold2)?;
             if accounts_differ {
                 put_strings(
                     sys,
@@ -319,6 +331,8 @@ pub fn restore(
                 live,
             },
         ) => {
+            // Refused before the mouse in force is touched: "nothing was changed" has to be true.
+            plain_strings(speed, threshold1, threshold2)?;
             // The mouse in force goes back first, unless Kestrel never changed it because the accounts differ. Then the
             // strings are written exactly as they were, or deleted if they weren't there.
             if !accounts_differ {
@@ -402,6 +416,25 @@ fn is_plain(text: &str) -> bool {
     !text.contains(';') && !text.chars().any(char::is_control)
 }
 
+fn not_plain() -> io::Error {
+    invalid("A setting can't hold that text, so nothing was changed.")
+}
+
+/// The three mouse strings go to the registry as they are, and the journal is a file that can say anything, so they are
+/// held to what a token is.
+fn plain_strings(
+    speed: &Option<String>,
+    threshold1: &Option<String>,
+    threshold2: &Option<String>,
+) -> io::Result<()> {
+    let strings = [speed, threshold1, threshold2];
+    if strings.into_iter().flatten().all(|text| is_plain(text)) {
+        Ok(())
+    } else {
+        Err(not_plain())
+    }
+}
+
 /// Sets the token to `token`, or removes it when that is `None`, in the string value `value_name`, and leaves every
 /// other part of the string as it is. With `made`, this is an undo: a value that Kestrel made is deleted once nothing
 /// is left in it, and so is the key if Kestrel made that too and it is empty.
@@ -414,9 +447,7 @@ fn put_token(
     made: Option<Made>,
 ) -> io::Result<()> {
     if token.is_some_and(|text| !is_plain(text)) {
-        return Err(invalid(
-            "A setting can't hold that text, so nothing was changed.",
-        ));
+        return Err(not_plain());
     }
     // A string that can't be read is not one that isn't there: writing over it would lose what the person had.
     let current = found(sys.read_string(sid, DIRECTX_KEY, value_name)).map_err(io::Error::other)?;
@@ -1811,6 +1842,33 @@ mod tests {
     }
 
     // Writing what doesn't belong.
+
+    #[test]
+    fn mouse_strings_that_are_not_plain_text_are_refused_before_anything_changes() {
+        // The journal is a file anyone with the right to change it can edit. Whichever of the three is wrong, none is
+        // written, and the mouse in force isn't set either, which an undo does first.
+        for hostile in [
+            mouse(Some("1;AutoHDREnable=1"), Some("6"), Some("10"), [6, 10, 1]),
+            mouse(Some("1"), Some("6\n"), Some("10"), [6, 10, 1]),
+            mouse(Some("1"), Some("6"), Some("\u{0}"), [6, 10, 1]),
+        ] {
+            for (pc, differs) in [(FakeSystem::new(), false), (differing(), true)] {
+                let before = pc.dump();
+                assert_eq!(
+                    kind(restore(&pc, PointerPrecision, SID, None, &hostile, differs)),
+                    io::ErrorKind::InvalidData,
+                    "restore {hostile:?}"
+                );
+                assert_eq!(
+                    kind(write(&pc, PointerPrecision, SID, None, &hostile, differs)),
+                    io::ErrorKind::InvalidData,
+                    "write {hostile:?}"
+                );
+                assert_eq!(pc.dump(), before, "{hostile:?}");
+                assert!(pc.writes().is_empty(), "{:?}", pc.writes());
+            }
+        }
+    }
 
     #[test]
     fn a_saved_state_that_does_not_fit_its_tweak_is_refused_and_nothing_is_written() {

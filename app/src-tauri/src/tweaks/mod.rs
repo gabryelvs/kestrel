@@ -10,7 +10,7 @@ pub mod commands;
 use std::sync::Arc;
 
 use kestrel_tweaks::journal::JournalFile;
-use kestrel_tweaks::{Engine, Gate, System};
+use kestrel_tweaks::{Engine, Gate, PlanInput, System};
 
 /// Whether tweaks may change Windows now, and if not, what they wait for. A benchmark that is armed comes first: it
 /// wants the PC as it is, whether or not the game is open yet. `game_running` is `None` when the list of processes
@@ -68,14 +68,26 @@ pub(crate) fn report_text(engine: &Engine, build: u32) -> String {
 }
 
 /// What Copy diagnostics adds under `"tweaks"`: the report, whether Kestrel runs as another account than the one at
-/// the screen, and what System Protection reads (as `Readiness` is written: `"ready"`, `"protection-off"`,
-/// `"blocked-by-policy"` or `"unknown"`), so a test on a real PC shows the state without a `reg query`. The engine
-/// only reads for both.
-pub fn diagnostics(engine: &Engine, build: u32) -> serde_json::Value {
+/// the screen, what System Protection reads (as `Readiness` is written: `"ready"`, `"protection-off"`,
+/// `"blocked-by-policy"` or `"unknown"`), and each row with its state and why, so a test on a real PC shows the state
+/// and what stopped a read without a `reg query`. The rows are read as the tab reads them, so a look at the journal can
+/// add to the journal, and nothing here touches Windows. With a journal that can't be read there are no rows, and the
+/// report says why.
+pub fn diagnostics(engine: &Engine, input: &PlanInput, build: u32) -> serde_json::Value {
+    // The rows don't depend on the gate.
+    let rows = engine
+        .view(input, Gate::Open)
+        .map(|view| view.rows)
+        .unwrap_or_default();
+    let rows: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| serde_json::json!({ "id": row.id, "state": row.state, "why": row.why }))
+        .collect();
     serde_json::json!({
         "report": report_text(engine, build),
         "accountsDiffer": engine.accounts_differ(),
         "systemProtection": engine.protection(),
+        "rows": rows,
     })
 }
 
@@ -86,7 +98,8 @@ mod tests {
     use kestrel_probe::account::Account;
     use kestrel_tweaks::fake::{FakeSystem, SID};
     use kestrel_tweaks::journal::{Folder, JournalFile, PlainFolder};
-    use kestrel_tweaks::{PlanInput, Readiness};
+    use kestrel_tweaks::targets::AUTO_GAME_MODE;
+    use kestrel_tweaks::Readiness;
     use std::io;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -198,7 +211,7 @@ mod tests {
             JournalFile::new(tmp.path().join("Kestrel"), Box::new(PlainFolder)),
         );
 
-        let tweaks = diagnostics(&built, 26200);
+        let tweaks = diagnostics(&built, &input(), 26200);
 
         let header = format!(
             "Kestrel report · Kestrel {} · Windows build 26200 · ",
@@ -212,7 +225,10 @@ mod tests {
         assert_eq!(tweaks["systemProtection"], "ready");
         let mut keys: Vec<_> = tweaks.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys, ["accountsDiffer", "report", "systemProtection"]);
+        assert_eq!(
+            keys,
+            ["accountsDiffer", "report", "rows", "systemProtection"]
+        );
 
         for (readiness, name) in [
             (Readiness::ProtectionOff, "protection-off"),
@@ -221,17 +237,83 @@ mod tests {
             (Readiness::Ready, "ready"),
         ] {
             pc.set_protection(readiness);
-            assert_eq!(diagnostics(&built, 26200)["systemProtection"], name);
+            assert_eq!(
+                diagnostics(&built, &input(), 26200)["systemProtection"],
+                name
+            );
         }
         pc.set_account(Account {
             signed_in: Some(SID.to_string()),
             this_process: Some("S-1-5-21-1-2-3-1002".to_string()),
         });
-        assert_eq!(diagnostics(&built, 26200)["accountsDiffer"], true);
+        assert_eq!(diagnostics(&built, &input(), 26200)["accountsDiffer"], true);
         // Before a scan the build is 0, and the report still reads.
-        assert!(diagnostics(&built, 0)["report"]
+        assert!(diagnostics(&built, &input(), 0)["report"]
             .as_str()
             .unwrap()
             .contains("Windows build 0 · "));
+    }
+
+    #[test]
+    fn diagnostics_say_why_each_row_is_as_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pc = Arc::new(FakeSystem::new());
+        pc.fail_read(AUTO_GAME_MODE);
+        let built = engine(
+            pc.clone(),
+            JournalFile::new(tmp.path().join("Kestrel"), Box::new(PlainFolder)),
+        );
+
+        let tweaks = diagnostics(&built, &input(), 26200);
+
+        let rows = tweaks["rows"].as_array().unwrap();
+        let ids: Vec<_> = rows.iter().map(|row| row["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            ids,
+            [
+                "power-plan",
+                "game-mode",
+                "background-recording",
+                "windowed-optimizations",
+                "gpu-preference",
+                "pointer-precision"
+            ]
+        );
+        // A row that couldn't be read is what a first run on a real PC needs the reason for, and the id, state and why
+        // are all it takes. The fake's reason stands in for Windows'.
+        assert_eq!(
+            rows[1],
+            serde_json::json!({
+                "id": "game-mode",
+                "state": "couldnt-read",
+                "why": "Couldn't read this setting: the fake was told that reading AutoGameModeEnabled fails",
+            })
+        );
+        assert_eq!(rows[4]["state"], "not-needed");
+        assert_eq!(rows[4]["why"], "One graphics card: nothing to choose.");
+        assert!(pc.writes().is_empty(), "looking changes nothing");
+    }
+
+    #[test]
+    fn diagnostics_with_a_journal_that_cant_be_read_have_no_rows_and_the_report_says_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Kestrel");
+        // A directory where the journal file should be: not "missing", and not readable.
+        std::fs::create_dir_all(dir.join("journal.jsonl")).unwrap();
+        let built = engine(
+            Arc::new(FakeSystem::new()),
+            JournalFile::new(&dir, Box::new(PlainFolder)),
+        );
+
+        let tweaks = diagnostics(&built, &input(), 26200);
+
+        assert_eq!(tweaks["rows"], serde_json::json!([]));
+        assert!(
+            tweaks["report"]
+                .as_str()
+                .unwrap()
+                .contains("couldn't be read"),
+            "{tweaks}"
+        );
     }
 }

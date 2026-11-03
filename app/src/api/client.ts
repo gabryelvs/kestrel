@@ -94,6 +94,39 @@ export const tweaksUsePlanAgain = (): Promise<ItemOutcome> => (inTauri() ? call(
 export const tweaksRemovePlan = (): Promise<ItemOutcome> => (inTauri() ? call('tweaks_remove_plan') : answer(() => sampleTweaks.removePlan(), 400));
 export const tweaksReport = (): Promise<string> => (inTauri() ? call('tweaks_report') : answer(() => sampleTweaks.report()));
 
+/**
+ * Calls `back` whenever the window comes to the front, until the answer is called. The DOM's `focus` is all a plain browser has. Inside Kestrel,
+ * Tauri's own event is listened to as well, because WebView2 may not pass an alt-tab on to the DOM; if both fire, the page is only read twice.
+ *
+ * Tauri's listener exists once a promise answers, so a stop that comes first takes it down when it does. A listener Tauri won't start, or won't take
+ * down, leaves nothing unhandled, and the DOM's event still works.
+ */
+export function onWindowFocus(back: () => void): () => void {
+  let stopped = false;
+  let listener: (() => unknown) | undefined;
+  const takeDown = (stop: () => unknown) => void Promise.resolve(stop()).catch(() => undefined);
+  window.addEventListener('focus', back);
+  if (inTauri()) {
+    void import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+          if (focused && !stopped) back();
+        }),
+      )
+      .then((stop) => {
+        if (stopped) takeDown(stop);
+        else listener = stop;
+      })
+      .catch(() => undefined);
+  }
+  return () => {
+    stopped = true;
+    window.removeEventListener('focus', back);
+    if (listener) takeDown(listener);
+    listener = undefined;
+  };
+}
+
 /** Calls `handler` whenever the benchmark session changes; resolves to an unsubscribe function. */
 export async function onBenchState(handler: (state: BenchState | null) => void): Promise<() => void> {
   if (!inTauri()) return fakeSession.subscribe(handler);

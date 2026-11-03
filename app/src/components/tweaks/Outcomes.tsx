@@ -28,7 +28,7 @@ export function Outcomes({ outcomes, restart, measure, onBenchmark, onClose }: P
           </li>
         ))}
       </ul>
-      {restart && <p>{t.restartValorant}</p>}
+      {restart && <p>{t.takeEffectNextLaunch}</p>}
       {measure && <p className="muted">{t.done}</p>}
       <div className="actions">
         {measure && <button className="btn btn-primary cut-s" onClick={onBenchmark}>{t.runBenchmark}</button>}

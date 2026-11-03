@@ -204,12 +204,8 @@ fn failed(doing: &str, why: &io::Error) -> String {
 /// What a row says: its state, whether it is ticked, and why.
 type Verdict = (RowState, bool, String);
 
-fn couldnt_read() -> Verdict {
-    (
-        RowState::CouldntRead,
-        false,
-        "Couldn't read your power plan.".to_string(),
-    )
+fn couldnt_read(why: String) -> Verdict {
+    (RowState::CouldntRead, false, why)
 }
 
 /// The power plan's row. `open` is the change Kestrel has open for it, if any. Reading only.
@@ -240,7 +236,7 @@ fn verdict(sys: &dyn System, input: &PlanInput, open: Option<&OpenRecord>) -> Ve
         return (RowState::NotNeeded, false, AMD_GUIDANCE.to_string());
     }
     match targets::found(sys.read_policy_string(POLICY_KEY, POLICY_VALUE)) {
-        Err(_) => return couldnt_read(),
+        Err(why) => return couldnt_read(format!("Couldn't read your power plan: {why}")),
         Ok(Some(_)) => {
             return (
                 RowState::BlockedByPolicy,
@@ -250,8 +246,9 @@ fn verdict(sys: &dyn System, input: &PlanInput, open: Option<&OpenRecord>) -> Ve
         }
         Ok(None) => {}
     }
-    let Ok(active) = plan_in_use(sys) else {
-        return couldnt_read();
+    let active = match plan_in_use(sys) {
+        Ok(active) => active,
+        Err(why) => return couldnt_read(why),
     };
     if same_guid(&active, KESTREL_PLAN_GUID) {
         return (
@@ -287,8 +284,9 @@ fn verdict(sys: &dyn System, input: &PlanInput, open: Option<&OpenRecord>) -> Ve
 /// PC and another is in use. None when the plan isn't on the PC at all (something deleted it, and the engine is about
 /// to close the record), so the row is for the plan in use instead of for one there is nothing to undo.
 fn recorded(sys: &dyn System) -> Option<Verdict> {
-    let Ok(active) = plan_in_use(sys) else {
-        return Some(couldnt_read());
+    let active = match plan_in_use(sys) {
+        Ok(active) => active,
+        Err(why) => return Some(couldnt_read(why)),
     };
     if same_guid(&active, KESTREL_PLAN_GUID) {
         Some((
@@ -363,6 +361,18 @@ fn copy_base(sys: &dyn System, kind: Variant) -> Result<(), String> {
         "Couldn't make Kestrel's power plan: Windows wouldn't copy {}.",
         refused.join(" or ")
     ))
+}
+
+/// The name of the plan `copy_base` will copy: the first of the variant's base plans on this PC. Windows can still refuse a
+/// plan that is there, and Apply says so if it does. With none of them there it is the best of them, and Apply says it
+/// couldn't copy that.
+fn base_name(sys: &dyn System, kind: Variant) -> Option<&'static str> {
+    let bases = bases(kind);
+    bases
+        .iter()
+        .find(|(guid, _)| sys.plan_exists(guid))
+        .or(bases.first())
+        .map(|(_, name)| *name)
 }
 
 /// Everything after the copy, ending with the switch.
@@ -444,10 +454,9 @@ pub fn preview(sys: &dyn System, input: &PlanInput) -> PreviewItem {
             after: (setting.words)(planned(sys, setting)),
         })
         .collect();
-    // The name of the base is the first one tried, even if that stock plan has gone missing from this PC.
-    let note = match bases(kind).first() {
+    let note = match base_name(sys, kind) {
         None => AMD_GUIDANCE.to_string(),
-        Some((_, base)) => {
+        Some(base) => {
             let current = active
                 .as_deref()
                 .map_or_else(|| "your current plan".to_string(), |guid| label(sys, guid));
@@ -583,7 +592,8 @@ mod tests {
     const ALREADY_ACTIVE: &str = "Kestrel's plan is already active.";
     const FAST_PLAN: &str =
         "You're already on a fast plan. Kestrel's also turns off USB and PCIe power saving.";
-    const UNREADABLE: &str = "Couldn't read your power plan.";
+    const UNREADABLE: &str =
+        "Couldn't read your power plan: the fake was told that reading PowerGetActiveScheme fails";
     const GONE_SO_BALANCED: &str = "Your previous plan is gone, so Kestrel switched to Balanced.";
 
     /// A desktop with one kind of core: the PC that gets the full plan.
@@ -949,10 +959,24 @@ mod tests {
         // A policy that can't be read is not "no policy": a value of the wrong type and a refused read both fail.
         let pc = exm_pc();
         pc.set_policy_dword(POLICY_KEY_PATH, POLICY_VALUE_NAME, 1);
-        assert_eq!(said(&pc), says(CouldntRead, false, UNREADABLE));
+        assert_eq!(
+            said(&pc),
+            says(
+                CouldntRead,
+                false,
+                "Couldn't read your power plan: ActivePowerScheme is not a string value"
+            )
+        );
         let pc = exm_pc();
         pc.fail_read(POLICY_VALUE_NAME);
-        assert_eq!(said(&pc), says(CouldntRead, false, UNREADABLE));
+        assert_eq!(
+            said(&pc),
+            says(
+                CouldntRead,
+                false,
+                "Couldn't read your power plan: the fake was told that reading ActivePowerScheme fails"
+            )
+        );
     }
 
     #[test]
@@ -1822,7 +1846,33 @@ mod tests {
     }
 
     #[test]
+    fn the_preview_names_the_plan_apply_will_copy_when_high_performance_is_missing() {
+        // Stock plans can be missing: some optimisers delete them. Apply then copies Balanced, so that is what is said.
+        let pc = exm_pc();
+        pc.delete_plan(HIGH_PERFORMANCE).unwrap();
+        let note = preview(&pc, &desktop()).note.unwrap();
+        assert_eq!(
+            note,
+            "Switching plans also replaces everything else in EXM Free Power Plan V8 with the settings of Balanced. Undo returns to your plan as it was."
+        );
+        create_and_activate(&pc, &desktop()).unwrap();
+        assert!(
+            pc.writes()
+                .contains(&format!("duplicate-plan {BALANCED} -> {KESTREL}")),
+            "and that is the plan Apply copies"
+        );
+
+        // With both on the PC it is the better one, as Apply's first try is.
+        let note = preview(&exm_pc(), &desktop()).note.unwrap();
+        assert!(
+            note.contains("with the settings of High performance."),
+            "{note}"
+        );
+    }
+
+    #[test]
     fn the_preview_names_the_base_even_when_that_stock_plan_is_missing() {
+        // With none of them on the PC, Apply will fail and say why, and the note names the plan it would have wanted.
         let pc = exm_pc();
         pc.delete_plan(HIGH_PERFORMANCE).unwrap();
         pc.delete_plan(BALANCED).unwrap();

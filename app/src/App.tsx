@@ -3,7 +3,7 @@ import { getReport, inTauri, isElevated, rescan } from './api/client';
 import { quietRescan } from './api/rescan';
 import type { BiosTopic, Report, TweakId } from './api/types';
 import { Banner } from './components/Banner';
-import { TitleBar, type Tab } from './components/TitleBar';
+import { TitleBar, tabsHeld, type Tab } from './components/TitleBar';
 import { FirstRun, type FirstRunNext } from './first-run/FirstRun';
 import { firstRunDone, markFirstRunDone } from './first-run/flag';
 import { Benchmark } from './pages/Benchmark';
@@ -26,6 +26,8 @@ export function App() {
   const [tweakFocus, setTweakFocus] = useState<TweakId | null>(null);
   const [firstRun, setFirstRun] = useState(() => !firstRunDone());
   const skippedInitialScan = useRef(firstRun);
+  // A step on the Tweaks page waits on a command. The tabs wait with it: see `tabsHeld`.
+  const [tweaksBusy, setTweaksBusy] = useState(false);
 
   const run = useCallback(async (fresh: boolean) => {
     setScan({ state: 'loading' });
@@ -76,7 +78,7 @@ export function App() {
   };
 
   const chooseTab = (next: Tab) => {
-    if (firstRun) return;
+    if (tabsHeld(firstRun, tweaksBusy)) return;
     if (next !== 'toolbox') setGuideTopic(null);
     if (next !== 'tweaks') setTweakFocus(null);
     if (next !== tab) refresh();
@@ -95,7 +97,7 @@ export function App() {
 
   return (
     <div className="app">
-      <TitleBar tab={tab} onTab={chooseTab} admin={admin} />
+      <TitleBar tab={tab} onTab={chooseTab} admin={admin} busy={tweaksBusy} />
       {!inTauri() && <Banner>{strings.banners.sample}</Banner>}
       {build > 0 && build < 22000 && <Banner>{strings.banners.windows10}</Banner>}
       {firstRun ? (
@@ -114,7 +116,7 @@ export function App() {
           {report && tab === 'health' && <Health report={report} onGuide={openGuide} onTweak={openTweak} />}
           {report && tab === 'hardware' && <Hardware report={report} onGuide={openGuide} onRescan={() => void run(true)} />}
           {report && tab === 'toolbox' && <Toolbox guide={report.guide} focus={guideTopic} appVersion={report.appVersion} />}
-          {report && tab === 'tweaks' && <Tweaks focus={tweakFocus} onFocusUsed={() => setTweakFocus(null)} onRescan={rescanQuietly} onTab={chooseTab} />}
+          {report && tab === 'tweaks' && <Tweaks focus={tweakFocus} onFocusUsed={() => setTweakFocus(null)} onRescan={rescanQuietly} onTab={chooseTab} onBusy={setTweaksBusy} />}
           {report && tab === 'lockIn' && <ComingSoon {...strings.comingSoon.lockIn} />}
           {report && tab === 'benchmark' && <Benchmark onTab={chooseTab} />}
         </main>

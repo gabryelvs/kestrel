@@ -3,7 +3,7 @@
 // (pages/Tweaks.tsx) only wires these to the commands, so the decisions are tested here with plain data.
 import { strings } from '../strings';
 import { spreadText, variesTooMuch } from './bench';
-import type { BenchmarkSummary, Gate, ItemOutcome, PreviewItem, PreviewView, Readiness, RestoreOutcome, Row, TweakId, TweaksView } from './types';
+import type { BenchmarkSummary, Gate, ItemOutcome, PreviewItem, PreviewView, Readiness, RestoreOutcome, Row, RowState, TweakId, TweaksView } from './types';
 
 /**
  * What the tab reads from the commands: the view and the report text are read together, each can fail on its own. `failed` is
@@ -105,7 +105,7 @@ export function restoreRoute(restore: Readiness): RestoreRoute {
 /** The reason a restore point failed, or null when the changes may go ahead (created, reused or skipped). A reason may be empty. */
 export const restoreFailure = (outcome: RestoreOutcome): string | null => (outcome.result === 'failed' ? outcome.reason : null);
 
-/** Whether to say "Restart VALORANT": a change that took waits for the next launch, by the timing the Preview on screen showed. */
+/** Whether to say when the changes take effect: a change that took waits for the next launch, by the timing the Preview on screen showed. */
 export const needsRestart = (outcomes: ItemOutcome[], items: PreviewItem[]): boolean =>
   outcomes.some((outcome) => outcome.ok && items.some((item) => item.id === outcome.id && item.timing === 'next-launch'));
 
@@ -136,6 +136,8 @@ export type Flow =
   | { step: 'preview'; preview: PreviewView }
   | { step: 'restore'; preview: PreviewView; question: RestoreQuestion }
   | { step: 'ask-restore-anyway'; id: TweakId }
+  /** System Protection's Undo was pressed: turning it off deletes the drive's restore points, so its row asks first. */
+  | { step: 'ask-protection-off' }
   | { step: 'ask-revert' }
   | { step: 'applied'; outcomes: ItemOutcome[]; restart: boolean }
   | { step: 'results'; outcomes: ItemOutcome[] }
@@ -150,6 +152,7 @@ export function flowLocks(flow: Flow): boolean {
     case 'preview':
     case 'restore':
     case 'ask-restore-anyway':
+    case 'ask-protection-off':
     case 'ask-revert':
       return true;
     case 'idle':
@@ -162,28 +165,53 @@ export function flowLocks(flow: Flow): boolean {
 }
 
 /**
- * Whether coming back to the window reads the page again: while it shows something that is cleared from outside (VALORANT closed,
- * a folder deleted) and no command is under way. It starts no read while the first is still being read.
+ * True while a command runs: the page is waiting on what it comes back with, and a tab change would remount the page and lose that (a
+ * result, a question, a refusal's reason). A step that only waits for the person lets them leave. Every command is bounded: see the
+ * limits in kestrel-tweaks' `restore` and `win::restore`, and `SCAN_WAIT_MS`.
+ */
+export const flowIsBusy = (flow: Flow): boolean => flow.step === 'busy';
+
+/**
+ * Says whether a command runs, and takes it back when that changes or the page goes, however it goes, so that a lock on the tabs can't
+ * outlive the page that asked for it. The effect behind the Tweaks page's `onBusy`.
+ */
+export function reportBusy(busy: boolean, onBusy: (busy: boolean) => void): () => void {
+  onBusy(busy);
+  return () => onBusy(false);
+}
+
+/**
+ * Whether coming back to the window reads the page again: once it has been read, always, since anything on it can be changed from outside
+ * (a plan picked in Power Options, VALORANT closed, a folder deleted), unless a command is under way, which reads it when it is done. It
+ * starts no read while the first is still being read. A read replaces the view and the report and nothing else, so the person's ticks and the
+ * step the page is at stay as they are.
  */
 export function rereadsOnFocus(load: ViewLoad, flow: Flow): boolean {
-  if (flow.step === 'busy') return false;
+  if (flowIsBusy(flow)) return false;
   switch (load.state) {
     case 'loading':
       return false;
     case 'failed':
-      return true;
     case 'ready':
-      return load.view.gate !== 'open' || load.stale !== undefined;
+      return true;
   }
 }
 
 /**
- * The step as it stands against the rows now. A question about a row (Restore anyway) is over once a re-read shows that row no longer
- * changed by something else: it can no longer be answered, and a step that waits for an answer locks the page.
+ * The step as it stands against the rows now. A question about a row is over once a re-read shows that row is no longer what it asked
+ * about (Restore anyway: no longer changed by something else; turning System Protection off: gone): it can no longer be answered, and
+ * a step that waits for an answer locks the page.
  */
 export function currentFlow(flow: Flow, rows: Row[]): Flow {
-  if (flow.step !== 'ask-restore-anyway') return flow;
-  return rows.some((row) => row.id === flow.id && row.state === 'changed-elsewhere') ? flow : { step: 'idle' };
+  const asked = (id: TweakId, state: RowState) => rows.some((row) => row.id === id && row.state === state);
+  switch (flow.step) {
+    case 'ask-restore-anyway':
+      return asked(flow.id, 'changed-elsewhere') ? flow : { step: 'idle' };
+    case 'ask-protection-off':
+      return asked('system-protection', 'applied') ? flow : { step: 'idle' };
+    default:
+      return flow;
+  }
 }
 
 /** The row a step is about, if it is about one. */
@@ -195,6 +223,8 @@ export function boundRow(flow: Flow): TweakId | null {
     case 'row-result':
     case 'ask-restore-anyway':
       return flow.id;
+    case 'ask-protection-off':
+      return 'system-protection';
     default:
       return null;
   }

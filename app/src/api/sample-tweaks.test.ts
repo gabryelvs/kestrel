@@ -42,11 +42,11 @@ describe('the owner’s PC, as the Tweaks tab finds it', () => {
     expect(owner().pc.report()).toBe(`${HEADER}\nNo changes yet.`);
   });
 
-  it('reads the tags the catalog gives each tweak', () => {
+  it('reads the tags the catalog gives each tweak, and None in game for the GPU preference, since the owner has one graphics card', () => {
     const rows = Object.fromEntries(owner().pc.view().rows.map((row) => [row.id, [row.impact, row.timing]]));
     expect(rows).toEqual({
       'power-plan': ['low', 'now'], 'game-mode': ['medium', 'now'], 'background-recording': ['medium', 'now'],
-      'windowed-optimizations': ['situational', 'next-launch'], 'gpu-preference': ['high', 'next-launch'], 'pointer-precision': ['none-in-game', 'now'],
+      'windowed-optimizations': ['situational', 'next-launch'], 'gpu-preference': ['none-in-game', 'next-launch'], 'pointer-precision': ['none-in-game', 'now'],
     });
   });
 });

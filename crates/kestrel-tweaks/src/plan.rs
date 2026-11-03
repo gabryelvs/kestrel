@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{info, Impact, Timing};
 use crate::journal::{OpenRecord, Saved};
-use crate::system::{Read, System};
-use crate::targets;
+use crate::system::System;
+use crate::targets::{self, known};
 
 /// The first Windows build that has Optimizations for windowed games (Windows 11 22H2).
 const WINDOWED_BUILD: u32 = 22621;
@@ -116,10 +116,12 @@ pub struct PreviewItem {
     pub note: Option<String>,
 }
 
-/// What a row says: its state, whether it is ticked, and why.
+/// What a row says: its state, whether it is ticked, and why. A rule that can't read what it needs answers with what
+/// stopped it instead, and the row says Couldn't read with that reason: on a real PC it is all there is to go on.
 type Verdict = (RowState, bool, &'static str);
 
-const COULDNT_READ: Verdict = (RowState::CouldntRead, false, "Couldn't read this setting.");
+/// `targets::current` gives each setting its own kind of state, so this isn't expected.
+const NOT_ITS_KIND: &str = "It didn't read as the kind of value it should be.";
 const NO_ACCOUNT: Verdict = (
     RowState::CouldntRead,
     false,
@@ -140,8 +142,8 @@ const CHANGED_ELSEWHERE: Verdict = (
 /// An open record decides first, by comparing the setting now with what Kestrel wrote: the same is Applied, anything
 /// else is ChangedElsewhere. (The engine closes a record whose setting went back to the old value before it asks for
 /// a row; one that gets here anyway is not what Kestrel left, so it is ChangedElsewhere.) Without a record, a policy
-/// comes next and then the value itself. Any read that fails makes the row CouldntRead, and so does not knowing the
-/// account, since all five settings are per account.
+/// comes next and then the value itself. Any read that fails makes the row CouldntRead, with what stopped it, and so
+/// does not knowing the account, since all five settings are per account.
 pub fn setting_row(
     sys: &dyn System,
     input: &PlanInput,
@@ -152,15 +154,28 @@ pub fn setting_row(
     if id == TweakId::WindowedOptimizations && input.build < WINDOWED_BUILD && open.is_none() {
         return None;
     }
-    let (state, ticked, why) = verdict(sys, input, id, sid, open)?;
+    let (state, ticked, why) = match verdict(sys, input, id, sid, open)? {
+        Ok((state, ticked, why)) => (state, ticked, why.to_string()),
+        // The same words as the Apply it stops.
+        Err(why) => (
+            RowState::CouldntRead,
+            false,
+            format!("Couldn't read this setting: {why}"),
+        ),
+    };
     let tags = info(id);
     Some(Row {
         id,
         title: tags.title.to_string(),
         state,
         ticked,
-        why: why.to_string(),
-        impact: tags.impact,
+        why,
+        // The catalog's tag is for a PC with a choice to make: with one graphics card there is nothing to gain.
+        impact: if id == TweakId::GpuPreference && !input.gpu_choice {
+            Impact::NoneInGame
+        } else {
+            tags.impact
+        },
         timing: tags.timing,
     })
 }
@@ -171,12 +186,12 @@ fn verdict(
     id: TweakId,
     sid: Option<&str>,
     open: Option<&OpenRecord>,
-) -> Option<Verdict> {
+) -> Option<Result<Verdict, String>> {
     if matches!(id, TweakId::PowerPlan | TweakId::SystemProtection) {
         return None;
     }
     let Some(sid) = sid else {
-        return Some(NO_ACCOUNT);
+        return Some(Ok(NO_ACCOUNT));
     };
     if let Some(record) = open {
         return Some(recorded(sys, id, sid, record));
@@ -193,33 +208,37 @@ fn verdict(
 
 /// A setting Kestrel has changed: it is Applied while it still holds what Kestrel wrote. The record names the value a
 /// graphics preference lives in, so that is the one read, not one worked out again.
-fn recorded(sys: &dyn System, id: TweakId, sid: &str, record: &OpenRecord) -> Verdict {
-    match targets::current(sys, id, sid, record.value_name.as_deref()) {
-        Read::Value(now) if targets::same_meaning(id, &now, &record.planned) => APPLIED,
-        Read::Value(_) => CHANGED_ELSEWHERE,
-        Read::Absent | Read::Failed(_) => COULDNT_READ,
-    }
+fn recorded(
+    sys: &dyn System,
+    id: TweakId,
+    sid: &str,
+    record: &OpenRecord,
+) -> Result<Verdict, String> {
+    let now = known(targets::current(sys, id, sid, record.value_name.as_deref()))?;
+    Ok(if targets::same_meaning(id, &now, &record.planned) {
+        APPLIED
+    } else {
+        CHANGED_ELSEWHERE
+    })
 }
 
-fn game_mode(sys: &dyn System, sid: &str) -> Verdict {
+fn game_mode(sys: &dyn System, sid: &str) -> Result<Verdict, String> {
     // A policy that turns Game Mode off decides it, whatever the person's own value says.
-    let (Ok(policy), Read::Value(Saved::Dword { value })) = (
-        targets::found(
-            sys.read_policy_dword(targets::GAME_DVR_POLICY_KEY, targets::ALLOW_AUTO_GAME_MODE),
-        ),
-        targets::current(sys, TweakId::GameMode, sid, None),
-    ) else {
-        return COULDNT_READ;
+    let policy = targets::found(
+        sys.read_policy_dword(targets::GAME_DVR_POLICY_KEY, targets::ALLOW_AUTO_GAME_MODE),
+    )?;
+    let Saved::Dword { value } = known(targets::current(sys, TweakId::GameMode, sid, None))? else {
+        return Err(NOT_ITS_KIND.to_string());
     };
     if policy == Some(0) {
-        return (
+        return Ok((
             RowState::BlockedByPolicy,
             false,
             "An organisation policy turns Game Mode off.",
-        );
+        ));
     }
     // Only a 0 is off; absent is on, as is anything else.
-    if value == Some(0) {
+    Ok(if value == Some(0) {
         (
             RowState::Available,
             true,
@@ -227,43 +246,53 @@ fn game_mode(sys: &dyn System, sid: &str) -> Verdict {
         )
     } else {
         (RowState::AlreadySet, false, "Game Mode is already on.")
-    }
+    })
 }
 
-fn background_recording(sys: &dyn System, sid: &str) -> Verdict {
+fn background_recording(sys: &dyn System, sid: &str) -> Result<Verdict, String> {
     // Recording in the background is on only if capture as a whole is on and no policy forbids it. The two that say
     // otherwise are read here and never written.
-    let (Ok(policy), Ok(capture), Read::Value(Saved::Dword { value })) = (
-        targets::found(
-            sys.read_policy_dword(targets::GAME_DVR_POLICY_KEY, targets::ALLOW_GAME_DVR),
-        ),
-        targets::found(sys.read_dword(sid, targets::GAME_DVR_KEY, targets::APP_CAPTURE)),
-        targets::current(sys, TweakId::BackgroundRecording, sid, None),
-    ) else {
-        return COULDNT_READ;
+    let policy = targets::found(
+        sys.read_policy_dword(targets::GAME_DVR_POLICY_KEY, targets::ALLOW_GAME_DVR),
+    )?;
+    let capture = targets::found(sys.read_dword(sid, targets::GAME_DVR_KEY, targets::APP_CAPTURE))?;
+    let Saved::Dword { value } = known(targets::current(
+        sys,
+        TweakId::BackgroundRecording,
+        sid,
+        None,
+    ))?
+    else {
+        return Err(NOT_ITS_KIND.to_string());
     };
-    if value == Some(1) && policy != Some(0) && capture != Some(0) {
-        (
+    Ok(
+        if value == Some(1) && policy != Some(0) && capture != Some(0) {
+            (
             RowState::Available,
             true,
             "Keeps recording gameplay in the background, which keeps the video encoder busy. Manual recording and screenshots keep working.",
         )
-    } else {
-        (
-            RowState::AlreadySet,
-            false,
-            "Background recording is already off.",
-        )
-    }
+        } else {
+            (
+                RowState::AlreadySet,
+                false,
+                "Background recording is already off.",
+            )
+        },
+    )
 }
 
-fn windowed(sys: &dyn System, input: &PlanInput, sid: &str) -> Verdict {
-    let Read::Value(Saved::Token { token, .. }) =
-        targets::current(sys, TweakId::WindowedOptimizations, sid, None)
+fn windowed(sys: &dyn System, input: &PlanInput, sid: &str) -> Result<Verdict, String> {
+    let Saved::Token { token, .. } = known(targets::current(
+        sys,
+        TweakId::WindowedOptimizations,
+        sid,
+        None,
+    ))?
     else {
-        return COULDNT_READ;
+        return Err(NOT_ITS_KIND.to_string());
     };
-    if token.as_deref() == Some("1") {
+    Ok(if token.as_deref() == Some("1") {
         (RowState::AlreadySet, false, "Already on.")
     } else if matches!(input.fullscreen_mode, Some(1 | 2)) {
         (
@@ -277,30 +306,32 @@ fn windowed(sys: &dyn System, input: &PlanInput, sid: &str) -> Verdict {
             false,
             "Only matters in windowed modes.",
         )
-    }
+    })
 }
 
-fn gpu_preference(sys: &dyn System, input: &PlanInput, sid: &str) -> Verdict {
+fn gpu_preference(sys: &dyn System, input: &PlanInput, sid: &str) -> Result<Verdict, String> {
     if !input.gpu_choice {
-        return (
+        return Ok((
             RowState::NotNeeded,
             false,
             "One graphics card: nothing to choose.",
-        );
+        ));
     }
     let Some(exe) = input.valorant_exe.as_deref() else {
-        return (RowState::NotNeeded, false, "VALORANT not found.");
+        return Ok((RowState::NotNeeded, false, "VALORANT not found."));
     };
     // The value may already be there under another spelling of the path; that one is read, and later written.
-    let Read::Value(name) = targets::gpu_value_name(sys, sid, exe) else {
-        return COULDNT_READ;
-    };
-    let Read::Value(Saved::Token { token, .. }) =
-        targets::current(sys, TweakId::GpuPreference, sid, Some(&name))
+    let name = known(targets::gpu_value_name(sys, sid, exe))?;
+    let Saved::Token { token, .. } = known(targets::current(
+        sys,
+        TweakId::GpuPreference,
+        sid,
+        Some(&name),
+    ))?
     else {
-        return COULDNT_READ;
+        return Err(NOT_ITS_KIND.to_string());
     };
-    match token.as_deref() {
+    Ok(match token.as_deref() {
         Some("2") => (
             RowState::AlreadySet,
             false,
@@ -314,15 +345,19 @@ fn gpu_preference(sys: &dyn System, input: &PlanInput, sid: &str) -> Verdict {
             "This PC has two graphics chips, and Windows can pick the weaker one.",
         ),
         // Windows doesn't define any other value, so this isn't one Kestrel understands well enough to replace.
-        Some(_) => COULDNT_READ,
-    }
+        Some(other) => {
+            return Err(format!(
+                "VALORANT's graphics preference is {other}, which Windows doesn't define."
+            ))
+        }
+    })
 }
 
-fn pointer(sys: &dyn System, sid: &str) -> Verdict {
-    let Read::Value(Saved::Mouse { speed, live, .. }) =
-        targets::current(sys, TweakId::PointerPrecision, sid, None)
+fn pointer(sys: &dyn System, sid: &str) -> Result<Verdict, String> {
+    let Saved::Mouse { speed, live, .. } =
+        known(targets::current(sys, TweakId::PointerPrecision, sid, None))?
     else {
-        return COULDNT_READ;
+        return Err(NOT_ITS_KIND.to_string());
     };
     // The mouse in force is the person's own when Kestrel runs as them. Otherwise Kestrel only ever changes the
     // strings, so those are what say whether it has.
@@ -331,7 +366,7 @@ fn pointer(sys: &dyn System, sid: &str) -> Verdict {
     } else {
         live[2] != 0
     };
-    if on {
+    Ok(if on {
         (
             RowState::Available,
             false,
@@ -339,13 +374,14 @@ fn pointer(sys: &dyn System, sid: &str) -> Verdict {
         )
     } else {
         (RowState::AlreadySet, false, "Already off.")
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fake::{FakeSystem, MOUSE_LIVE, SID};
+    use crate::system::Read;
     use crate::targets::{
         ALLOW_AUTO_GAME_MODE, ALLOW_GAME_DVR, APP_CAPTURE, AUTO_GAME_MODE, DIRECTX_KEY,
         DIRECTX_SETTINGS, GAME_BAR_KEY, GAME_DVR_KEY, GAME_DVR_POLICY_KEY, HISTORICAL_CAPTURE,
@@ -393,7 +429,6 @@ mod tests {
     const GPU_WEAKER: &str = "This PC has two graphics chips, and Windows can pick the weaker one.";
     const POINTER_ON: &str = "Doesn't change aim or FPS in VALORANT, which reads the mouse directly. Only the cursor on the desktop changes.";
     const POINTER_OFF: &str = "Already off.";
-    const COULDNT_READ: &str = "Couldn't read this setting.";
     const NO_ACCOUNT: &str = "Couldn't tell which account is signed in.";
     const KESTREL_DID: &str = "Kestrel changed this.";
     const SOMETHING_ELSE: &str = "Something else changed this after Kestrel did.";
@@ -416,6 +451,15 @@ mod tests {
 
     fn says(state: RowState, ticked: bool, why: &str) -> Says {
         (state, ticked, why.to_string())
+    }
+
+    /// A row that couldn't be read, and what stopped it.
+    fn couldnt(reason: &str) -> Says {
+        says(
+            CouldntRead,
+            false,
+            &format!("Couldn't read this setting: {reason}"),
+        )
     }
 
     fn row_with(pc: &FakeSystem, input: &PlanInput, id: TweakId) -> Says {
@@ -743,7 +787,7 @@ mod tests {
         pc.set_string(SID, DIRECTX_KEY, EXE, "GpuPreference=3;");
         assert_eq!(
             row(&pc, GpuPreference),
-            says(CouldntRead, false, COULDNT_READ)
+            couldnt("VALORANT's graphics preference is 3, which Windows doesn't define.")
         );
     }
 
@@ -829,7 +873,10 @@ mod tests {
     fn a_wrong_type_is_couldnt_read() {
         let pc = FakeSystem::new();
         pc.fail_read("AutoGameModeEnabled");
-        assert_eq!(row(&pc, GameMode), says(CouldntRead, false, COULDNT_READ));
+        assert_eq!(
+            row(&pc, GameMode),
+            couldnt("the fake was told that reading AutoGameModeEnabled fails")
+        );
         assert!(matches!(
             targets::current(&pc, GameMode, SID, None),
             Read::Failed(_)
@@ -838,7 +885,10 @@ mod tests {
         // The value really is the wrong type: a string where a number goes.
         let pc = FakeSystem::new();
         pc.set_string(SID, GAME_BAR_KEY, AUTO_GAME_MODE, "0");
-        assert_eq!(row(&pc, GameMode), says(CouldntRead, false, COULDNT_READ));
+        assert_eq!(
+            row(&pc, GameMode),
+            couldnt("AutoGameModeEnabled is not a DWORD value")
+        );
         assert!(matches!(
             targets::current(&pc, GameMode, SID, None),
             Read::Failed(_)
@@ -852,8 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_read_is_couldnt_read_for_every_setting() {
-        let couldnt = says(CouldntRead, false, COULDNT_READ);
+    fn a_failed_read_is_couldnt_read_for_every_setting_and_says_which_read_it_was() {
         for (id, name) in [
             (GameMode, AUTO_GAME_MODE),
             // A policy that can't be read might be forbidding it.
@@ -878,13 +927,16 @@ mod tests {
             };
             assert_eq!(row_with(&pc, &input, id).0, Available, "{id:?}");
             pc.fail_read(name);
-            assert_eq!(row_with(&pc, &input, id), couldnt, "{id:?}: {name}");
+            assert_eq!(
+                row_with(&pc, &input, id),
+                couldnt(&format!("the fake was told that reading {name} fails")),
+                "{id:?}: {name}"
+            );
         }
     }
 
     #[test]
-    fn a_wrong_type_is_couldnt_read_for_every_setting() {
-        let couldnt = says(CouldntRead, false, COULDNT_READ);
+    fn a_wrong_type_is_couldnt_read_for_every_setting_and_says_which_value_it_was() {
         let input = PlanInput {
             fullscreen_mode: Some(1),
             ..input()
@@ -894,43 +946,57 @@ mod tests {
             build(&pc);
             pc
         };
-        for (id, pc) in [
+        let not_a_dword = |name: &str| format!("{name} is not a DWORD value");
+        let not_a_string = |name: &str| format!("{name} is not a string value");
+        for (id, pc, reason) in [
             (
                 GameMode,
                 wrong(&|pc| pc.set_string(SID, GAME_BAR_KEY, AUTO_GAME_MODE, "0")),
+                not_a_dword(AUTO_GAME_MODE),
             ),
             (
                 BackgroundRecording,
                 wrong(&|pc| pc.set_string(SID, GAME_DVR_KEY, HISTORICAL_CAPTURE, "1")),
+                not_a_dword(HISTORICAL_CAPTURE),
             ),
             (
                 BackgroundRecording,
                 wrong(&|pc| pc.set_string(SID, GAME_DVR_KEY, APP_CAPTURE, "1")),
+                not_a_dword(APP_CAPTURE),
             ),
             (
                 WindowedOptimizations,
                 wrong(&|pc| pc.set_dword(SID, DIRECTX_KEY, DIRECTX_SETTINGS, 1)),
+                not_a_string(DIRECTX_SETTINGS),
             ),
             (
                 GpuPreference,
                 wrong(&|pc| pc.set_dword(SID, DIRECTX_KEY, EXE, 2)),
+                not_a_string(EXE),
             ),
             (
                 PointerPrecision,
                 wrong(&|pc| pc.set_dword(SID, MOUSE_KEY, MOUSE_SPEED, 0)),
+                not_a_string(MOUSE_SPEED),
             ),
         ] {
             let before = pc.dump();
-            assert_eq!(row_with(&pc, &input, id), couldnt, "{id:?}");
+            assert_eq!(row_with(&pc, &input, id), couldnt(&reason), "{id:?}");
             assert_eq!(pc.dump(), before, "{id:?}");
         }
         // The same goes for a policy of the wrong type.
         let pc = arranged();
         pc.set_policy_string(GAME_DVR_POLICY_KEY, ALLOW_AUTO_GAME_MODE, "0");
-        assert_eq!(row_with(&pc, &input, GameMode), couldnt);
+        assert_eq!(
+            row_with(&pc, &input, GameMode),
+            couldnt(&not_a_dword(ALLOW_AUTO_GAME_MODE))
+        );
         let pc = arranged();
         pc.set_policy_string(GAME_DVR_POLICY_KEY, ALLOW_GAME_DVR, "0");
-        assert_eq!(row_with(&pc, &input, BackgroundRecording), couldnt);
+        assert_eq!(
+            row_with(&pc, &input, BackgroundRecording),
+            couldnt(&not_a_dword(ALLOW_GAME_DVR))
+        );
     }
 
     #[test]
@@ -1091,8 +1157,8 @@ mod tests {
         };
         let row = setting_row(&pc, &input(), GpuPreference, Some(SID), Some(&nameless)).unwrap();
         assert_eq!(
-            (row.state, row.ticked, row.why.as_str()),
-            (CouldntRead, false, COULDNT_READ)
+            (row.state, row.ticked, row.why),
+            couldnt("VALORANT's file isn't known, so its graphics preference was left alone.")
         );
     }
 
@@ -1112,8 +1178,8 @@ mod tests {
             pc.fail_read(name);
             let row = setting_row(&pc, &input(), id, Some(SID), Some(&record)).unwrap();
             assert_eq!(
-                (row.state, row.ticked, row.why.as_str()),
-                (CouldntRead, false, COULDNT_READ),
+                (row.state, row.ticked, row.why),
+                couldnt(&format!("the fake was told that reading {name} fails")),
                 "{id:?}"
             );
         }
@@ -1196,6 +1262,40 @@ mod tests {
             assert_eq!(row.title, info.title);
             assert_eq!(row.impact, info.impact);
             assert_eq!(row.timing, info.timing);
+        }
+    }
+
+    #[test]
+    fn the_gpu_preference_can_change_nothing_in_game_with_one_graphics_card() {
+        let pc = arranged();
+        let one_card = PlanInput {
+            gpu_choice: false,
+            ..input()
+        };
+        // The catalog's High is for a PC with a choice to make. With one card there is nothing to gain.
+        let row = setting_row(&pc, &one_card, GpuPreference, Some(SID), None).unwrap();
+        assert_eq!((row.state, row.impact), (NotNeeded, Impact::NoneInGame));
+        // Even a change Kestrel made before the second card came out.
+        let record = applied(&pc, GpuPreference);
+        let row = setting_row(&pc, &one_card, GpuPreference, Some(SID), Some(&record)).unwrap();
+        assert_eq!((row.state, row.impact), (Applied, Impact::NoneInGame));
+
+        // With a choice to make, it is the catalog's.
+        let pc = arranged();
+        let row = setting_row(&pc, &input(), GpuPreference, Some(SID), None).unwrap();
+        assert_eq!((row.state, row.impact), (Available, Impact::High));
+        // Which is about the PC, not about whether VALORANT was found.
+        let no_game = PlanInput {
+            valorant_exe: None,
+            ..input()
+        };
+        let row = setting_row(&pc, &no_game, GpuPreference, Some(SID), None).unwrap();
+        assert_eq!((row.state, row.impact), (NotNeeded, Impact::High));
+
+        // No other row goes by it.
+        for id in SETTINGS.into_iter().filter(|id| *id != GpuPreference) {
+            let row = setting_row(&pc, &one_card, id, Some(SID), None).unwrap();
+            assert_eq!(row.impact, info(id).impact, "{id:?}");
         }
     }
 

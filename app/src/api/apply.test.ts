@@ -215,7 +215,7 @@ describe('Apply, when something is refused', () => {
     const r = rig('ready', {
       restorePoint: async (choice) => {
         calls.push(`restore:${choice}`);
-        throw new Error('Kestrel is already changing settings in another window.');
+        throw new Error('Kestrel is already changing settings. Try again in a moment.');
       },
       apply: async (ids) => {
         calls.push(`apply:${ids.join(',')}`);
@@ -223,7 +223,7 @@ describe('Apply, when something is refused', () => {
       },
     });
     const next = await r.run('pressed');
-    expect(next).toEqual({ next: 'stopped', message: 'Kestrel is already changing settings in another window.', settings: 'unchanged' });
+    expect(next).toEqual({ next: 'stopped', message: 'Kestrel is already changing settings. Try again in a moment.', settings: 'unchanged' });
     expect(calls).toEqual(['restore:create']);
   });
 

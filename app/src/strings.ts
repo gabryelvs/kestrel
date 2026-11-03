@@ -7,7 +7,7 @@ export const STAGE = { competitive: 6, lockIn: 7, fixes: 8 } as const;
 export const strings = {
   app: { name: 'Kestrel' },
   tabs: { home: 'Home', health: 'Health', hardware: 'Hardware', tweaks: 'Tweaks', lockIn: 'Lock In', benchmark: 'Benchmark', toolbox: 'Toolbox' },
-  titleBar: { sections: 'Sections', admin: 'admin', notAdmin: 'not admin', minimize: 'Minimise', maximize: 'Maximise', close: 'Close' },
+  titleBar: { sections: 'Sections', admin: 'admin', notAdmin: 'not admin', minimize: 'Minimise', maximize: 'Maximise', close: 'Close', busy: 'Tabs return when this is done.' },
   banners: {
     sample: 'Sample data: Kestrel isn’t running on Windows, so this is the test PC from the fixture.',
     windows10: 'You’re on Windows 10. Kestrel runs here, but it’s only tested on Windows 11.',
@@ -140,7 +140,7 @@ export const strings = {
   },
   comingSoon: {
     arrives: (n: number) => `Arrives in stage ${n}`,
-    lockIn: { stage: STAGE.lockIn, title: 'Lock In', body: 'A tiny helper that boosts your PC while VALORANT runs and undoes everything when you quit.' },
+    lockIn: { stage: STAGE.lockIn, title: 'Lock In', body: 'A tiny helper that applies its changes only while VALORANT runs, and undoes them when you quit.' },
   },
   diagnostics: { copy: 'Copy diagnostics', copied: 'Copied. Paste it in chat.', failed: 'Couldn’t copy. Try again.' },
   tweaks: {
@@ -203,6 +203,7 @@ export const strings = {
     useAgain: 'Use it again',
     removePlan: 'Remove it',
     protectionWarning: 'Turning System Protection off deletes this drive’s restore points.',
+    yesTurnOff: 'Yes, turn it off',
     working: 'Working…',
     // Under the rows.
     preview: (n: number) => `Preview ${n} change${n === 1 ? '' : 's'}`,
@@ -238,7 +239,7 @@ export const strings = {
     noSettingsChanged: 'No settings were changed.',
     /** Said when a turn-on was asked for and what came after was refused: System Protection's row, if there is one, is in the list above. */
     protectionMayHaveChanged: 'System Protection may have been turned on: check its row above.',
-    restartValorant: 'Restart VALORANT for these to take effect.',
+    takeEffectNextLaunch: 'These take effect the next time VALORANT opens.',
     done: 'Measure it on your PC: run a benchmark and compare it with your starting point.',
     runBenchmark: 'Run a benchmark',
     close: 'Close',

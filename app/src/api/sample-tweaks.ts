@@ -16,13 +16,13 @@ const WINDOWS_BUILD = 26200;
 
 const ESSENTIAL: TweakId[] = ['power-plan', 'game-mode', 'background-recording', 'windowed-optimizations', 'gpu-preference', 'pointer-precision'];
 
-// The catalog's tags (kestrel-tweaks' catalog.rs).
+// The catalog's tags (kestrel-tweaks' catalog.rs), as the owner's PC shows them: with one graphics card the GPU preference is none in game (plan.rs).
 const TAGS: Record<TweakId, { impact: Impact; timing: Timing }> = {
   'power-plan': { impact: 'low', timing: 'now' },
   'game-mode': { impact: 'medium', timing: 'now' },
   'background-recording': { impact: 'medium', timing: 'now' },
   'windowed-optimizations': { impact: 'situational', timing: 'next-launch' },
-  'gpu-preference': { impact: 'high', timing: 'next-launch' },
+  'gpu-preference': { impact: 'none-in-game', timing: 'next-launch' },
   'pointer-precision': { impact: 'none-in-game', timing: 'now' },
   'system-protection': { impact: 'none-in-game', timing: 'now' },
 };

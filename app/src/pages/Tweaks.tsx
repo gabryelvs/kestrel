@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
-  benchList, tweaksApply, tweaksApplyAgain, tweaksPreview, tweaksRemovePlan, tweaksReport, tweaksRestoreAnyway, tweaksRestorePoint, tweaksRevertAll,
+  benchList, onWindowFocus, tweaksApply, tweaksApplyAgain, tweaksPreview, tweaksRemovePlan, tweaksReport, tweaksRestoreAnyway, tweaksRestorePoint, tweaksRevertAll,
   tweaksUndo, tweaksUsePlanAgain, tweaksView,
 } from '../api/client';
 import { continueAt, runApply, settle, type ApplyAt, type ApplyNext, type ApplyStep } from '../api/apply';
 import {
-  boundRow, canFocus, closedReason, currentFlow, errorText, flowLocks, forgetChoices, isTicked, measureNote, measureText, onlyTicked, rereadsOnFocus,
-  revertRows, rowNote, tickedIds, type Choices, type Flow, type MeasureNote, type ReportLoad, type Settings, type ViewLoad,
+  boundRow, canFocus, closedReason, currentFlow, errorText, flowIsBusy, flowLocks, forgetChoices, isTicked, measureNote, measureText, onlyTicked, reportBusy,
+  rereadsOnFocus, revertRows, rowNote, tickedIds, type Choices, type Flow, type MeasureNote, type ReportLoad, type Settings, type ViewLoad,
 } from '../api/tweaks';
 import type { ItemOutcome, PreviewView, TweakId, TweaksView } from '../api/types';
 import { Outcomes } from '../components/tweaks/Outcomes';
@@ -63,6 +63,7 @@ function flowPanel(flow: Flow, view: TweaksView, on: Handlers): ReactNode {
   switch (flow.step) {
     case 'idle':
     case 'ask-restore-anyway':
+    case 'ask-protection-off':
       return null;
     case 'busy':
       return inRow ? null : (
@@ -119,7 +120,7 @@ export function TweaksBody({ view, stale, report, measure, choices, flow: asked,
   const closed = why !== null;
   const locked = flowLocks(flow);
   const ticked = tickedIds(view.rows, choices);
-  const asking = flow.step === 'ask-restore-anyway' ? flow.id : null;
+  const asking = flow.step === 'ask-restore-anyway' || flow.step === 'ask-protection-off' ? boundRow(flow) : null;
   const panel = flowPanel(flow, view, on);
   return (
     <>
@@ -132,7 +133,8 @@ export function TweaksBody({ view, stale, report, measure, choices, flow: asked,
       {measure && (
         <div className="notice cut-s measure">
           <p>{measureText(measure)}</p>
-          <button className="btn btn-ghost btn-small cut-s" onClick={on.benchmark}>{t.openBenchmark}</button>
+          {/* It goes to another tab, which waits for a command under way. */}
+          <button className="btn btn-ghost btn-small cut-s" disabled={flowIsBusy(flow)} onClick={on.benchmark}>{t.openBenchmark}</button>
         </div>
       )}
       {view.otherAccount && <p className="notice cut-s">{t.otherAccount}</p>}
@@ -217,6 +219,8 @@ type Props = {
    */
   onRescan: () => Promise<void>;
   onTab: (tab: Tab) => void;
+  /** Whether a step waits on a command, which is when leaving the tab would lose what the command comes back with. */
+  onBusy: (busy: boolean) => void;
 };
 
 /**
@@ -224,7 +228,7 @@ type Props = {
  * Every command that changes something asks the gate again, so any of them can come back refused, and the page says so where it
  * was pressed and reads the view again. Whatever a step is waiting on, no step is left spinning.
  */
-export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
+export function Tweaks({ focus, onFocusUsed, onRescan, onTab, onBusy }: Props) {
   const [load, setLoad] = useState<ViewLoad>({ state: 'loading' });
   const [report, setReport] = useState<ReportLoad>({ state: 'loading' });
   const [measure, setMeasure] = useState<MeasureNote | null>(null);
@@ -233,6 +237,9 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
   // A new person's first run ends at this tab (first-run/flag.ts). Read when the tab opens; it goes when it is answered or the plan is applied.
   const [firstRunNote, setFirstRunNote] = useState(planNoteWanted);
   const newest = useRef(0);
+
+  const busy = flowIsBusy(flow);
+  useEffect(() => reportBusy(busy, onBusy), [busy, onBusy]);
 
   /**
    * Reads the view and the report again. The newest read wins, so a slow old one never shows over a newer one. A view that can't be
@@ -251,6 +258,8 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
           : { state: 'failed', message: errorText(view.reason) },
     );
     setReport(text.status === 'fulfilled' ? { state: 'ready', text: text.value } : { state: 'failed', message: errorText(text.reason) });
+    // A question this read has ended stays ended: it doesn't come back with its row.
+    if (view.status === 'fulfilled') setFlow((current) => currentFlow(current, view.value.rows));
   }, []);
 
   // The saved benchmarks are read once, for the note about the starting point. If they can't be, there is no note.
@@ -262,13 +271,11 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
     );
   }, [reload]);
 
-  // What a closed gate (VALORANT open) or an unreadable view waits for happens outside Kestrel, so coming back to the window reads it again.
+  // Anything on the page can change outside Kestrel, so coming back to the window reads it again.
   const rereads = rereadsOnFocus(load, flow);
   useEffect(() => {
     if (!rereads) return;
-    const back = () => void reload();
-    window.addEventListener('focus', back);
-    return () => window.removeEventListener('focus', back);
+    return onWindowFocus(() => void reload());
   }, [rereads, reload]);
 
   const rows = load.state === 'ready' ? load.view.rows : [];
@@ -374,6 +381,7 @@ export function Tweaks({ focus, onFocusUsed, onRescan, onTab }: Props) {
   const on: Handlers = {
     tick: (id, ticked) => setChoices((current) => ({ ...current, [id]: ticked })),
     undo: (id) => void act(id, () => tweaksUndo(id)),
+    askProtectionOff: () => setFlow({ step: 'ask-protection-off' }),
     applyAgain: (id) => void act(id, () => tweaksApplyAgain(id)),
     askRestoreAnyway: (id) => setFlow({ step: 'ask-restore-anyway', id }),
     restoreAnyway: (id) => void act(id, () => tweaksRestoreAnyway(id)),

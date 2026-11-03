@@ -31,7 +31,8 @@ const row = (id: TweakId, state: RowState, over: Partial<Row> = {}): Row => ({
 });
 
 const rowActions: RowActions = {
-  tick: nothing, undo: nothing, applyAgain: nothing, askRestoreAnyway: nothing, restoreAnyway: nothing, stopAsking: nothing, usePlanAgain: nothing, removePlan: nothing,
+  tick: nothing, undo: nothing, askProtectionOff: nothing, applyAgain: nothing, askRestoreAnyway: nothing, restoreAnyway: nothing, stopAsking: nothing, usePlanAgain: nothing,
+  removePlan: nothing,
 };
 const on: Handlers = {
   ...rowActions, preview: nothing, apply: nothing, turnOn: nothing, goOn: nothing, cancel: nothing, askRevert: nothing, revert: nothing, benchmark: nothing,
@@ -101,6 +102,58 @@ describe('TweakRow', () => {
     expect(texts(actions)).toEqual([t.undo]);
     expect(renderRow(row('game-mode', 'applied'))).not.toContain(t.protectionWarning);
     expect(renderRow(row('system-protection', 'applied'))).toContain(t.protectionWarning);
+  });
+
+  /** What pressing each of a row's buttons asked of the page. The row has no hooks, so it can be called and its buttons pressed. */
+  const pressed = (r: Row, over: Partial<Parameters<typeof TweakRow>[0]> = {}) => {
+    const calls: string[] = [];
+    const on_: RowActions = {
+      ...rowActions,
+      undo: (id) => void calls.push(`undo ${id}`),
+      askProtectionOff: () => void calls.push('ask protection off'),
+      stopAsking: () => void calls.push('stop asking'),
+    };
+    const tree = TweakRow({ row: r, ticked: false, locked: false, closed: false, asking: false, note: null, on: on_, ...over });
+    return { calls, press: (text: string) => elementsOf(tree, 'button').find((b) => b.props.children === text)?.props.onClick?.() };
+  };
+
+  it('asks first when System Protection’s Undo is pressed, and asks nothing of Windows yet', () => {
+    const { calls, press } = pressed(row('system-protection', 'applied'));
+    press(t.undo);
+    expect(calls).toEqual(['ask protection off']);
+  });
+
+  it('leaves every other row’s Undo at one click', () => {
+    for (const id of ['power-plan', 'game-mode', 'background-recording', 'windowed-optimizations', 'gpu-preference', 'pointer-precision'] as const) {
+      const { calls, press } = pressed(row(id, 'applied'));
+      press(t.undo);
+      expect(calls, id).toEqual([`undo ${id}`]);
+    }
+  });
+
+  it('asks with the warning itself, once, and its answers take the place of the Undo', () => {
+    const html = renderRow(row('system-protection', 'applied'), { asking: true });
+    expect(html).toMatch(/<p class="tweak-ask[^"]*">Turning System Protection off deletes this drive’s restore points\.<\/p>/);
+    expect(count(html, t.protectionWarning)).toBe(1);
+    expect(texts(html)).toEqual(['Yes, turn it off', t.cancel]);
+    // The question can be answered while the rest of the page waits on it.
+    expect(buttons(renderRow(row('system-protection', 'applied'), { asking: true, locked: true })).map((b) => b.disabled)).toEqual([false, false]);
+    // Under a closed gate Yes would be refused, and Cancel is always there.
+    expect(buttons(renderRow(row('system-protection', 'applied'), { asking: true, closed: true })).map((b) => b.disabled)).toEqual([true, false]);
+  });
+
+  it('turns System Protection off only on Yes, and Cancel asks for nothing but the end of the question', () => {
+    const yes = pressed(row('system-protection', 'applied'), { asking: true });
+    yes.press('Yes, turn it off');
+    expect(yes.calls).toEqual(['undo system-protection']);
+    const cancel = pressed(row('system-protection', 'applied'), { asking: true });
+    cancel.press(t.cancel);
+    expect(cancel.calls).toEqual(['stop asking']);
+  });
+
+  it('asks nothing on another row, whatever it is told', () => {
+    expect(texts(renderRow(row('game-mode', 'applied'), { asking: true }))).toEqual([t.undo]);
+    expect(renderRow(row('game-mode', 'applied'), { asking: true })).not.toContain(t.protectionWarning);
   });
 
   it('keeps a long plan name whole and lets it wrap', () => {
@@ -277,9 +330,9 @@ describe('Outcomes', () => {
     expect(count(html, 'class="outcome failed"')).toBe(1);
   });
 
-  it('says to restart VALORANT only when a change waits for the next launch', () => {
-    expect(render({ restart: true })).toContain(t.restartValorant);
-    expect(render({ restart: false })).not.toContain(t.restartValorant);
+  it('says when the changes take effect only when one waits for the next launch', () => {
+    expect(render({ restart: true })).toContain(t.takeEffectNextLaunch);
+    expect(render({ restart: false })).not.toContain(t.takeEffectNextLaunch);
   });
 
   it('suggests measuring, with a button to the Benchmark tab, in the words “Measure it on your PC”', () => {
@@ -502,6 +555,13 @@ describe('the page’s body', () => {
     expect(button(quiet, t.openBenchmark)).toBeUndefined();
   });
 
+  it('turns Open Benchmark off while a command is under way, since the tabs wait for it, and only then', () => {
+    const measure = { kind: 'none' } as const;
+    expect(button(body({ measure, flow: { step: 'busy', text: t.applying } }), t.openBenchmark)?.disabled).toBe(true);
+    expect(button(body({ measure, flow: { step: 'preview', preview: { items: [], restore: 'ready' } } }), t.openBenchmark)?.disabled).toBe(false);
+    expect(button(body({ measure, flow: { step: 'failed', message: 'x' } }), t.openBenchmark)?.disabled).toBe(false);
+  });
+
   it('says when Kestrel runs as another account, and how many changes wait for an account that isn’t signed in', () => {
     const view = { ...ownerView(), otherAccount: true, pendingOtherAccounts: 2 };
     const html = body({ view });
@@ -579,7 +639,7 @@ describe('the page’s body, mid-flow', () => {
     const outcomes: ItemOutcome[] = [{ id: 'windowed-optimizations', title: 'Optimizations for windowed games', ok: true, message: 'Applied.' }];
     const html = body({ flow: { step: 'applied', outcomes, restart: true } });
     expect(html).toContain('Optimizations for windowed games');
-    expect(html).toContain(t.restartValorant);
+    expect(html).toContain(t.takeEffectNextLaunch);
     expect(html).toContain(t.done);
     expect(texts(html)).toContain(t.runBenchmark);
     // The rows are free again to carry on.
@@ -675,7 +735,7 @@ describe('the page’s body, mid-flow', () => {
   });
 
   it('does not claim nothing was changed for a failure that did not say so', () => {
-    const html = body({ flow: { step: 'failed', message: 'Kestrel is already changing settings in another window.' } });
+    const html = body({ flow: { step: 'failed', message: 'Kestrel is already changing settings. Try again in a moment.' } });
     expect(html).not.toContain(t.noSettingsChanged);
     expect(html).not.toContain(t.protectionMayHaveChanged);
   });
@@ -708,6 +768,92 @@ describe('the page’s body, mid-flow', () => {
     expect(count(plain(html), 'deletes this drive')).toBe(1);
     expect(plain(html)).toContain('System Protection is on because Kestrel turned it on.');
   });
+
+  it('asks in System Protection’s row before turning it off, and locks the rest of the page meanwhile', () => {
+    const pc = createSampleTweaks();
+    pc.setRestore('protection-off');
+    pc.restorePoint('turn-on-and-create');
+    pc.apply(['pointer-precision']);
+    const html = body({ view: pc.view(), flow: { step: 'ask-protection-off' }, choices: { 'power-plan': true } });
+    const inRow = html.match(/<li class="tweak-row[^"]*"[^>]*data-tweak="system-protection">[\s\S]*?<\/li>/)?.[0] ?? '';
+    expect(inRow).toContain('class="tweak-ask');
+    expect(texts(inRow)).toEqual(['Yes, turn it off', t.cancel]);
+    expect(count(plain(html), t.protectionWarning)).toBe(1);
+    expect(button(html, 'Preview 1 change')?.disabled).toBe(true);
+    expect(button(html, t.undo)?.disabled, 'the pointer row’s Undo').toBe(true);
+    expect(button(html, t.revertEverything)?.disabled).toBe(true);
+    // Nothing is said below the rows: the question is in its row.
+    expect(html).not.toContain('tweak-slot');
+  });
+
+  it('keeps the page free when a re-read shows System Protection’s row is gone', () => {
+    const html = body({ flow: { step: 'ask-protection-off' }, choices: { 'power-plan': true } });
+    expect(html).not.toContain(t.protectionWarning);
+    expect(texts(html)).not.toContain('Yes, turn it off');
+    expect(button(html, 'Preview 1 change')?.disabled).toBe(false);
+    for (const box of boxes(html)) expect(box).not.toContain('disabled');
+  });
+});
+
+describe('the page’s body after coming back to the window', () => {
+  // A re-read replaces the view and the report and nothing else: the person's ticks and the step the page is at are its own state. So the
+  // body is drawn again with the view that came back, and whatever the person had going.
+  const preview: PreviewView = { items: [windowedItem], restore: 'ready' };
+  const rowOf = (html: string, id: TweakId) => html.match(new RegExp(`<li class="tweak-row[^"]*"[^>]*data-tweak="${id}">[\\s\\S]*?</li>`))?.[0] ?? '';
+
+  it('shows a plan picked in Power Options in its row, and offers what that row offers', () => {
+    const pc = createSampleTweaks();
+    pc.apply(['power-plan']);
+    expect(plain(rowOf(body({ view: pc.view() }), 'power-plan'))).toContain(t.states.applied);
+    pc.pickPlan('Balanced');
+    const row = rowOf(body({ view: pc.view() }), 'power-plan');
+    expect(plain(row)).toContain(t.states['plan-inactive']);
+    expect(plain(row)).toContain('Another plan is active: Balanced.');
+    expect(texts(row)).toEqual([t.useAgain, t.removePlan]);
+  });
+
+  it('keeps what the person ticked and unticked', () => {
+    const pc = createSampleTweaks();
+    const choices = { 'windowed-optimizations': true, 'pointer-precision': false };
+    const before = body({ view: pc.view(), choices });
+    pc.pickPlan('Balanced');
+    const after = body({ view: pc.view(), choices });
+    // Balanced ticks the plan by its own flag, and the person's two choices stand.
+    expect(boxes(before).map((box) => box.includes('checked=""'))).toEqual([false, true, false]);
+    expect(boxes(after).map((box) => box.includes('checked=""'))).toEqual([true, true, false]);
+    expect(button(after, 'Preview 2 changes')?.disabled).toBe(false);
+  });
+
+  it('keeps an open Preview, with its Apply', () => {
+    const pc = createSampleTweaks();
+    pc.pickPlan('Balanced');
+    const html = body({ view: pc.view(), flow: { step: 'preview', preview }, choices: { 'windowed-optimizations': true } });
+    expect(html).toContain(t.previewIntro);
+    expect(html).toContain(windowedItem.title);
+    expect(button(html, t.apply)?.disabled).toBe(false);
+  });
+
+  it('keeps an open question for as long as its row is what it asked about', () => {
+    const pc = createSampleTweaks();
+    pc.setRestore('protection-off');
+    pc.restorePoint('turn-on-and-create');
+    pc.apply(['pointer-precision', 'windowed-optimizations']);
+    pc.changeBehindItsBack('pointer-precision');
+    pc.pickPlan('Balanced');
+    const view = pc.view();
+    expect(body({ view, flow: { step: 'ask-restore-anyway', id: 'pointer-precision' } })).toContain(t.restoreAnywayAsk);
+    expect(texts(rowOf(body({ view, flow: { step: 'ask-protection-off' } }), 'system-protection'))).toEqual([t.yesTurnOff, t.cancel]);
+    expect(body({ view, flow: { step: 'ask-revert' } })).toContain(t.revertConfirm);
+    expect(body({ view, flow: { step: 'restore', preview, question: { kind: 'protection-off' } } })).toContain(t.protectionOff);
+    expect(body({ view, flow: { step: 'restore', preview, question: { kind: 'failed', reason: 'x', turnOnAsked: false } } })).toContain('Couldn’t create a restore point: x.');
+  });
+
+  it('keeps a result on screen', () => {
+    const outcomes: ItemOutcome[] = [{ id: 'windowed-optimizations', title: 'Optimizations for windowed games', ok: true, message: 'Applied.' }];
+    const html = body({ flow: { step: 'applied', outcomes, restart: true } });
+    expect(html).toContain('class="outcome ok"');
+    expect(html).toContain(t.takeEffectNextLaunch);
+  });
 });
 
 describe('the page’s body when the view couldn’t be read again', () => {
@@ -721,7 +867,7 @@ describe('the page’s body when the view couldn’t be read again', () => {
   it('keeps the rows and the result on screen, with the reason beside the buttons and a way to try again', () => {
     const html = page();
     expect(html).toContain('Optimizations for windowed games');
-    expect(html).toContain(t.restartValorant);
+    expect(html).toContain(t.takeEffectNextLaunch);
     expect(texts(html)).toContain(t.runBenchmark);
     expect(html).toContain('class="tweak-row');
     expect(html).toContain(`${t.rereadFailed} ${REASON}`);
@@ -746,7 +892,7 @@ describe('the page’s body when the view couldn’t be read again', () => {
     const html = page({ load: { state: 'failed', message: REASON } });
     expect(html).toContain(t.loadFailed);
     expect(html).not.toContain('tweak-row');
-    expect(html).not.toContain(t.restartValorant);
+    expect(html).not.toContain(t.takeEffectNextLaunch);
   });
 
   it('says nothing of it for a view that was read', () => {
@@ -856,7 +1002,7 @@ describe('the first-run note', () => {
     }
   });
 
-  it('is shown whatever step the page is at, and its Not now is never turned off, since all it does is leave', () => {
+  it('is shown whatever step the page is at, and its Not now is never turned off: it ends the note, and leaves unless a command holds the tabs', () => {
     const preview: PreviewView = { items: [planItem], restore: 'ready' };
     const flows: Flow[] = [
       idle,

@@ -27,7 +27,7 @@ const VERSION: u32 = 1;
 const JOURNAL: &str = "journal.jsonl";
 const LOCK: &str = "journal.lock";
 const GAME_EXE: &str = "VALORANT-Win64-Shipping.exe";
-const ALREADY_CHANGING: &str = "Kestrel is already changing settings in another window.";
+const ALREADY_CHANGING: &str = "Kestrel is already changing settings. Try again in a moment.";
 
 /// A setting's state as the journal keeps it: enough to put the setting back, and to tell whether it still is what
 /// Kestrel left.
@@ -1464,7 +1464,7 @@ mod tests {
             assert_eq!(refused.kind(), io::ErrorKind::WouldBlock);
             assert_eq!(
                 refused.to_string(),
-                "Kestrel is already changing settings in another window."
+                "Kestrel is already changing settings. Try again in a moment."
             );
         }
         drop(held);

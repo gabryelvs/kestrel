@@ -8,12 +8,14 @@
 //!   prints one line of JSON and exits with the helper's code, which is 0 (the line is the answer).
 //! - `--tweaks-has-changes`: does Kestrel have a change open, for the uninstaller to ask whether to undo it. Exit 0 for
 //!   yes, 1 for none, 2 when the journal can't be read.
-//! - `--tweaks-revert-all`: undoes what can be undone, for the uninstaller. Exit 0 when nothing is left open, 3 when
-//!   something is, 2 when the journal can't be read or is being written by another process.
+//! - `--tweaks-revert-all`: undoes what can be undone, for the uninstaller. Exit 0 when nothing is left open, 4 when
+//!   only System Protection is, which stays on on purpose, 3 when anything else is, 2 when the journal can't be read
+//!   or is being written by another process.
 //!
 //! Neither of the last two changes anything on a PC that never applied a tweak, or makes the journal's folder.
 use std::sync::Arc;
 
+use kestrel_core::tweak_id::TweakId;
 use kestrel_tweaks::journal::JournalFile;
 use kestrel_tweaks::restore::HELPER_FLAG;
 use kestrel_tweaks::{helper_main, this_pc, Engine, System};
@@ -33,6 +35,9 @@ const FAILED: i32 = 2;
 const ALL_UNDONE: i32 = 0;
 /// `--tweaks-revert-all`: something is.
 const SOMETHING_LEFT: i32 = 3;
+/// `--tweaks-revert-all`: only System Protection is, which stays on on purpose: turning it off deletes the drive's
+/// restore points. Nothing failed.
+const ONLY_PROTECTION_LEFT: i32 = 4;
 
 /// What to do for `args` (the arguments after the program's name): the exit code if the first one is a flag handled
 /// here, or None, which means the app starts as usual. `journal` makes this PC's journal; it touches nothing until
@@ -87,24 +92,33 @@ fn revert_all(journal: &dyn Fn() -> JournalFile, pc: Arc<dyn System>) -> i32 {
     }
     // What is left is whatever the journal still holds open, which is more than the items that failed: another
     // account's changes wait for that account, and System Protection stays on because turning it off deletes the
-    // drive's restore points.
-    if engine.has_open_records() {
-        SOMETHING_LEFT
+    // drive's restore points. The look settles first: a System Protection someone has turned off closes its record.
+    if !engine.has_open_records() {
+        return ALL_UNDONE;
+    }
+    let only_protection = journal().read().is_ok_and(|replay| {
+        !replay.open.is_empty()
+            && replay
+                .open
+                .iter()
+                .all(|record| record.tweak == TweakId::SystemProtection)
+    });
+    if only_protection {
+        ONLY_PROTECTION_LEFT
     } else {
-        ALL_UNDONE
+        SOMETHING_LEFT
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kestrel_core::tweak_id::TweakId;
     use kestrel_core::FormFactor;
     use kestrel_probe::account::Account;
     use kestrel_tweaks::fake::{FakeSystem, SID};
     use kestrel_tweaks::journal::PlainFolder;
     use kestrel_tweaks::targets::{AUTO_GAME_MODE, GAME_BAR_KEY};
-    use kestrel_tweaks::{PlanInput, Readiness};
+    use kestrel_tweaks::{PlanInput, Read, Readiness};
     use std::path::PathBuf;
 
     fn flag(text: &str) -> Vec<String> {
@@ -240,10 +254,71 @@ mod tests {
             .turn_protection_on()
             .unwrap();
 
-        assert_eq!(rig.run(REVERT_ALL), Some(3));
+        assert_eq!(rig.run(REVERT_ALL), Some(4));
 
         assert_eq!(rig.pc.protection(), Readiness::Ready);
         assert_eq!(rig.pc.writes(), ["protection on"]);
+    }
+
+    /// What pressing "Turn on and create" leaves: an open record for System Protection.
+    fn turn_protection_on(rig: &Rig) {
+        rig.pc.set_protection(Readiness::ProtectionOff);
+        Engine::new(rig.pc.clone(), rig.journal())
+            .turn_protection_on()
+            .unwrap();
+    }
+
+    #[test]
+    fn revert_all_that_leaves_only_system_protection_is_not_a_failure() {
+        // The usual uninstall after "Turn on and create": everything that can be undone is, and only that is left.
+        let rig = Rig::new();
+        let before = rig.pc.dump();
+        turn_protection_on(&rig);
+        rig.apply_game_mode();
+        assert_ne!(rig.pc.dump(), before);
+
+        assert_eq!(rig.run(REVERT_ALL), Some(4));
+
+        assert_eq!(
+            rig.pc.read_dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE),
+            Read::Value(0),
+            "Game Mode is back as it was"
+        );
+        assert_eq!(rig.pc.protection(), Readiness::Ready);
+        assert_eq!(rig.run(HAS_CHANGES), Some(0), "its record is still open");
+    }
+
+    #[test]
+    fn revert_all_says_something_is_left_when_system_protection_is_not_alone() {
+        // A value something else changed.
+        let rig = Rig::new();
+        turn_protection_on(&rig);
+        rig.apply_game_mode();
+        rig.pc.set_dword(SID, GAME_BAR_KEY, AUTO_GAME_MODE, 5);
+        assert_eq!(rig.run(REVERT_ALL), Some(3));
+
+        // Another account's change, which waits for that account.
+        let rig = Rig::new();
+        rig.apply_game_mode();
+        turn_protection_on(&rig);
+        let other = "S-1-5-21-1-2-3-1002".to_string();
+        rig.pc.set_account(Account {
+            signed_in: Some(other.clone()),
+            this_process: Some(other),
+        });
+        assert_eq!(rig.run(REVERT_ALL), Some(3));
+    }
+
+    #[test]
+    fn revert_all_says_nothing_is_left_when_system_protection_was_turned_off_by_hand() {
+        // Its record closes on the look that follows the undo, so "System Protection stays on" would be untrue.
+        let rig = Rig::new();
+        turn_protection_on(&rig);
+        rig.pc.set_protection(Readiness::ProtectionOff);
+
+        assert_eq!(rig.run(REVERT_ALL), Some(0));
+
+        assert_eq!(rig.run(HAS_CHANGES), Some(1));
     }
 
     #[test]
@@ -351,13 +426,48 @@ mod tests {
                 lines[starts[0] + 1]
             );
         }
-        // The words the owner chose (decision 88).
-        for words in [
-            "Undo Kestrel's changes before removing it?",
-            "Kestrel couldn't undo everything. Check those settings in Windows.",
+        // The words the owner chose (decision 88). The second is said for a start that failed and for exit 3.
+        for (words, times) in [
+            ("Undo Kestrel's changes before removing it?", 1),
+            (
+                "Kestrel couldn't undo everything. Check those settings in Windows.",
+                2,
+            ),
         ] {
-            assert_eq!(HOOKS.matches(words).count(), 1, "hooks.nsh says: {words}");
+            assert_eq!(
+                HOOKS.matches(words).count(),
+                times,
+                "hooks.nsh says: {words}"
+            );
         }
+    }
+
+    #[test]
+    fn the_uninstaller_says_what_is_left_by_the_exit_code() {
+        let lines = hook("NSIS_HOOK_PREUNINSTALL");
+        let start = lines
+            .iter()
+            .position(|line| line.contains(REVERT_ALL))
+            .expect("hooks.nsh starts the undo");
+        const COULDNT: &str = r#"MessageBox MB_OK|MB_ICONEXCLAMATION "Kestrel couldn't undo everything. Check those settings in Windows.""#;
+        const STAYS_ON: &str = r#"MessageBox MB_OK|MB_ICONINFORMATION "Kestrel undid its changes. System Protection stays on, because turning it off deletes this drive's restore points. You can turn it off in Windows.""#;
+        let only_protection = format!("${{ElseIf}} $0 = {ONLY_PROTECTION_LEFT}");
+        // `${Errors}` clears the flag as it looks, so it is looked at once, first: a start that failed leaves `$0` at
+        // the 0 of the question before.
+        assert_eq!(
+            lines[start + 1..start + 8],
+            [
+                "${If} ${Errors}",
+                COULDNT,
+                only_protection.as_str(),
+                STAYS_ON,
+                "${ElseIf} $0 <> 0",
+                COULDNT,
+                "${EndIf}",
+            ]
+        );
+        assert_eq!(ONLY_PROTECTION_LEFT, 4);
+        assert_eq!(SOMETHING_LEFT, 3);
     }
 
     #[test]
@@ -411,6 +521,41 @@ mod tests {
                 .iter()
                 .all(|line| !line.contains("/r") && !line.contains('%')),
             "{after:?}"
+        );
+        // All of it inside the guard: not during an update, and not when the uninstaller runs in place (setup's
+        // maintenance page, or a newer setup run by hand), where nobody was asked whether to undo the changes and
+        // deleting the journal would leave them with no undo. That is the same `$EXEDIR` test as the question's.
+        let mut whole = vec![
+            "${If} $DeleteAppDataCheckboxState = 1".to_string(),
+            "${AndIf} $UpdateMode <> 1".to_string(),
+            "${AndIf} $EXEDIR != $INSTDIR".to_string(),
+        ];
+        whole.extend(wanted);
+        whole.push("${EndIf}".to_string());
+        assert_eq!(after, whole);
+    }
+
+    #[test]
+    fn the_uninstaller_has_kestrel_closed_before_it_asks() {
+        // Tauri's own check for a running Kestrel comes right after this hook, and Cancel there stops the uninstall: asked
+        // only there, a Yes to the question would leave the changes undone and Kestrel installed. So it is asked first,
+        // in the form Tauri's template uses, inside the guard: a silent uninstall and an update go on to Tauri's check.
+        let lines = hook("NSIS_HOOK_PREUNINSTALL");
+        assert_eq!(
+            lines[..4],
+            [
+                "${If} $UpdateMode <> 1",
+                "${AndIf} $EXEDIR != $INSTDIR",
+                "${AndIfNot} ${Silent}",
+                r#"!insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}""#,
+            ]
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("CheckIfAppIsRunning"))
+                .count(),
+            1
         );
     }
 

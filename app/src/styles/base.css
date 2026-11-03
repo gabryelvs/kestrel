@@ -36,10 +36,13 @@ h1, h2, h3, p { margin: 0; }
 
 .titlebar { display: flex; align-items: center; gap: 10px; height: 44px; padding-left: 14px; border-bottom: 1px solid var(--line); flex: none; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: 0.08em; }
-.tabs { display: flex; gap: 2px; margin-left: 8px; }
+.tabs { display: flex; flex: none; gap: 2px; margin-left: 8px; }
 .tab { padding: 5px 10px; font-size: 12.5px; letter-spacing: 0.04em; color: var(--muted); }
-.tab:not(.tab-active):hover { color: var(--text); }
+.tab:not(.tab-active):not(:disabled):hover { color: var(--text); }
+.tab:disabled { cursor: default; }
+.tab:disabled:not(.tab-active) { opacity: 0.45; }
 .tab-active { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.tabs-busy { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted); }
 .admin { margin-left: auto; display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
 .window-buttons { display: flex; align-self: stretch; }
 .window-buttons button { width: 44px; display: grid; place-items: center; color: var(--muted); }

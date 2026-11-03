@@ -118,7 +118,8 @@ pub struct Context {
     pub game_settings: Option<ValorantSettings>,
     /// The tweaks that were active when the benchmark ran, as ids (`TweakId::as_str`: "power-plan", "game-mode"). Plain
     /// strings, not an enum, so a build that doesn't know an id still loads the file and keeps it. None means unknown,
-    /// as in a benchmark saved before stage 5; that is not the same as Some(empty), which means no tweaks.
+    /// as in a benchmark saved before stage 5 or one that couldn't read the tweaks' journal; that is not the same as
+    /// Some(empty), which means no tweaks.
     pub applied_tweaks: Option<Vec<String>>,
 }
 
