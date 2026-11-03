@@ -1,0 +1,64 @@
+/* The Tweaks tab: a scrolling page of panels, built from the Hardware tab's classes. Long names (a power plan's, a registry path) wrap. */
+.tweaks { max-width: 880px; }
+.wrap { overflow-wrap: anywhere; }
+.btn-small { padding: 4px 10px; font-size: 12px; }
+.tweaks .btn:disabled { opacity: 0.4; cursor: default; }
+.tweaks .btn-primary:disabled:hover { filter: none; }
+.tweaks .btn-ghost:disabled:hover { border-color: var(--line-strong); }
+
+.measure { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
+.measure p { flex: 1 1 280px; min-width: 0; }
+.interrupted { list-style: none; margin: 0; display: grid; gap: 4px; }
+
+/* The rows: a box, the title with its tags and why, and the buttons its state has. */
+.tweak-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; }
+.tweak-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 4px 10px; padding: 11px 0; border-top: 1px solid var(--line); }
+.tweak-list > .tweak-row:first-child { border-top: 0; }
+.tweak-box input { width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; }
+.tweak-box input:disabled { cursor: default; }
+.tweak-main { min-width: 0; display: grid; gap: 3px; align-content: start; }
+.tweak-title { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 13.5px; }
+.tweak-title > :first-child { overflow-wrap: anywhere; }
+.tweak-title label { cursor: pointer; }
+.tweak-why, .tweak-note, .tweak-ask { margin: 0; }
+.tweak-note { color: var(--accent); }
+.tweak-note.tone-warn { color: var(--warn); }
+.tweak-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: flex-start; gap: 6px 8px; max-width: 300px; }
+.tweak-warning { flex: 1 0 100%; text-align: right; }
+
+/* Tags: the state says whether Kestrel changed it and whether it still holds; the amber ones need a look. */
+.tag-state { background: var(--panel-2); color: var(--text); }
+.state-already-set, .state-not-needed, .state-blocked-by-policy { color: var(--muted); }
+.state-applied { background: var(--accent); color: var(--accent-ink); }
+.state-changed-elsewhere, .state-plan-inactive, .state-couldnt-read { background: var(--warn); color: var(--warn-ink); }
+
+.tiers { display: grid; gap: 4px; }
+.tier { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 0; }
+
+.tweak-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+.tweak-gate { color: var(--warn); font-size: 12.5px; }
+.tweak-slot { scroll-margin-bottom: 14px; }
+
+/* The steps below the buttons. */
+.preview, .restore, .outcomes, .revert, .busy, .failed-panel, .report-panel, .load-failed { display: grid; gap: 10px; align-content: start; }
+.preview-item { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.preview-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.preview-head h3 { flex: 1 1 220px; min-width: 0; font-size: 14.5px; font-weight: 600; overflow-wrap: anywhere; }
+.preview-when { display: inline-flex; align-items: baseline; gap: 6px; }
+.preview-where, .preview-note { margin: 0; }
+.changes { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12.5px; }
+.changes th { text-align: left; font-weight: 400; font-size: 11px; letter-spacing: 0.08em; color: var(--muted); padding: 0 10px 4px 0; }
+.changes td { padding: 6px 10px 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.changes th:first-child, .changes td:first-child { width: 48%; }
+.restore p, .outcomes p, .revert p, .busy p, .failed-panel p { margin: 0; }
+.outcome-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.outcome { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.outcome-list > .outcome:first-child { border-top: 0; }
+.outcome svg { flex: none; align-self: center; }
+.outcome-title { font-weight: 500; }
+.outcome-message { flex: 1 1 220px; min-width: 0; }
+.outcome.failed .outcome-message { color: var(--warn); }
+.revert-list { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13px; }
+.load-failed p { margin: 0; }
+
+.report { margin: 0; padding: 10px 12px; background: var(--panel-2); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 340px; overflow-y: auto; user-select: text; }

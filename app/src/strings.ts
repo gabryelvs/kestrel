@@ -1,7 +1,7 @@
-import type { TweakId } from './api/types';
+import type { Gate, Impact, RowState, Timing, TweakId } from './api/types';
 
 /** The stage each later feature arrives in (decision 66). kestrel-core's health.rs keeps COMPETITIVE_STAGE. */
-export const STAGE = { tweaks: 5, competitive: 6, lockIn: 7, fixes: 8 } as const;
+export const STAGE = { competitive: 6, lockIn: 7, fixes: 8 } as const;
 
 /** Every user-facing string lives here (spec decision 17). Sentence case, no exclamation marks. */
 export const strings = {
@@ -140,7 +140,6 @@ export const strings = {
   },
   comingSoon: {
     arrives: (n: number) => `Arrives in stage ${n}`,
-    tweaks: { stage: STAGE.tweaks, title: 'Tweaks', body: 'Reversible tweaks picked for your hardware, with Preview and one-click undo.' },
     lockIn: { stage: STAGE.lockIn, title: 'Lock In', body: 'A tiny helper that boosts your PC while VALORANT runs and undoes everything when you quit.' },
   },
   diagnostics: { copy: 'Copy diagnostics', copied: 'Copied. Paste it in chat.', failed: 'Couldn’t copy. Try again.' },
@@ -155,6 +154,92 @@ export const strings = {
       'pointer-precision': 'Enhance pointer precision off',
       'system-protection': 'System Protection',
     } satisfies Record<TweakId, string>,
+    // The page. Per-tweak text (each row's reason, the Preview's values, the report) comes from Rust; these are the page's own words.
+    title: 'Tweaks',
+    intro: 'Kestrel picked these for your PC. Nothing changes until you press Apply.',
+    loading: 'Reading your PC’s settings…',
+    loadFailed: 'Kestrel couldn’t read the tweaks.',
+    tryAgain: 'Try again',
+    essential: 'Essential',
+    /** The tiers that come later. The page puts `comingSoon.arrives(STAGE.competitive)` beside each name. */
+    laterTiers: ['Competitive', 'Extreme'],
+    measureNone: 'Run a benchmark first, so you can compare afterwards.',
+    measureSpread: (pct: string) => `Your starting point’s runs vary by ${pct}, so small changes won’t show. Run a clean one before applying.`,
+    openBenchmark: 'Open Benchmark',
+    otherAccount: 'Kestrel is running as another account. Changes go to the account signed in now.',
+    otherPending: (n: number) => `Another account has ${n} change(s) from Kestrel. Those wait until that account is signed in.`,
+    states: {
+      available: 'Available',
+      'already-set': 'Already set',
+      'not-needed': 'Not needed',
+      'blocked-by-policy': 'Blocked by policy',
+      applied: 'Applied',
+      'changed-elsewhere': 'Changed by something else',
+      'plan-inactive': 'Kestrel’s plan isn’t active',
+      'couldnt-read': 'Couldn’t read',
+    } satisfies Record<RowState, string>,
+    impact: { high: 'High', medium: 'Medium', low: 'Low', situational: 'Situational', 'none-in-game': 'None in game' } satisfies Record<Impact, string>,
+    impactTag: (label: string) => `Impact: ${label}`,
+    timing: { now: 'Now', 'next-launch': 'Next time VALORANT opens', 'next-sign-in': 'Next sign-in' } satisfies Record<Timing, string>,
+    takesEffect: 'Takes effect',
+    /** Why Apply and Undo are off. Every gate but `open` is closed, and these are also what a command refuses with. */
+    gate: {
+      'game-running': 'Close VALORANT first.',
+      'benchmark-active': 'Finish the benchmark first.',
+      'cant-tell': 'Kestrel couldn’t check whether VALORANT is open. Try again.',
+    } satisfies Record<Exclude<Gate, 'open'>, string>,
+    // A row's buttons.
+    undo: 'Undo',
+    applyAgain: 'Apply again',
+    restoreAnyway: 'Restore anyway',
+    restoreAnywayAsk: 'Write the old value back over what’s there now?',
+    yesRestore: 'Yes, restore',
+    useAgain: 'Use it again',
+    removePlan: 'Remove it',
+    protectionWarning: 'Turning System Protection off deletes this drive’s restore points.',
+    working: 'Working…',
+    // Under the rows.
+    preview: (n: number) => `Preview ${n} change${n === 1 ? '' : 's'}`,
+    revertEverything: 'Revert everything',
+    revertConfirm: 'Undo every change on this list?',
+    yesRevert: 'Yes, undo them',
+    // The Preview.
+    previewLabel: 'Preview',
+    previewIntro: 'Nothing has changed yet. This is what Apply will change.',
+    previewEmpty: 'There is nothing to apply right now.',
+    previewing: 'Reading what would change…',
+    columns: { setting: 'Setting', now: 'Now', after: 'After' },
+    apply: 'Apply',
+    cancel: 'Cancel',
+    // The restore point.
+    restoring: 'Creating a restore point… this can take a minute.',
+    protectionOff: 'System Protection is off on your Windows drive. Turn it on and create a restore point? Windows will use some disk space for restore points.',
+    restoreBlocked: 'An organisation policy turns System Protection off, so Kestrel can’t create a restore point. Continue with Kestrel’s undo only?',
+    /** A reason may end in a full stop ("System Protection is off.") or not ("… (os error 5)"); the sentence adds its own, once. */
+    restoreFailed: (reason: string) => {
+      const why = reason.trim().replace(/\.$/, '');
+      return why === '' ? 'Couldn’t create a restore point. Continue with Kestrel’s undo only?' : `Couldn’t create a restore point: ${why}. Continue with Kestrel’s undo only?`;
+    },
+    turnOnAndCreate: 'Turn on and create',
+    continueWithout: 'Continue without',
+    continue: 'Continue',
+    // After a button.
+    applying: 'Applying…',
+    undoing: 'Undoing…',
+    result: 'Result',
+    nothingChanged: 'Nothing was changed.',
+    restartValorant: 'Restart VALORANT for these to take effect.',
+    done: 'Measure it on your PC: run a benchmark and compare it with your starting point.',
+    runBenchmark: 'Run a benchmark',
+    close: 'Close',
+    // The report.
+    report: 'Kestrel report',
+    copyReport: 'Copy report',
+    copied: 'Copied. Paste it in chat.',
+    copyFailed: 'Couldn’t copy. Try again.',
+    reportLoading: 'Reading the report…',
+    reportFailed: 'Kestrel couldn’t read the report.',
+    unreadable: 'Part of Kestrel’s history couldn’t be read, so the report may be missing changes.',
   },
   bench: {
     title: 'Benchmark',

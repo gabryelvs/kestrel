@@ -1,6 +1,10 @@
 import mock from './mock-report.json';
 import { fakeSession, sampleDelete, sampleDetail, sampleList, sampleProfile, sampleRename, sampleSetBaseline } from './sample-bench';
-import type { BenchDetail, BenchState, BenchmarkSummary, CoreClock, GameProfile, LoadSample, Report } from './types';
+import { sampleTweaks } from './sample-tweaks';
+import type {
+  BenchDetail, BenchState, BenchmarkSummary, CoreClock, GameProfile, ItemOutcome, LoadSample, PreviewView, Report, RestoreChoice, RestoreOutcome, TweakId,
+  TweaksView,
+} from './types';
 
 const sample = mock as unknown as Report;
 
@@ -61,6 +65,34 @@ export const benchDelete = (id: string): Promise<void> => (inTauri() ? call('ben
 export const benchSetBaseline = (id: string): Promise<void> => (inTauri() ? call('bench_set_baseline', { id }) : Promise.resolve(sampleSetBaseline(id)));
 export const benchCopyResults = (id: string): Promise<string> =>
   inTauri() ? call('bench_copy_results', { id }) : Promise.resolve().then(() => `Kestrel benchmark (sample): ${sampleDetail(id).benchmark.name}`);
+
+// The tweaks. In the browser preview these talk to a pretend PC (the owner's) that remembers what was changed. The fake works as
+// the command is called and answers a moment later: with its value, or, like a refused command, with the text it threw.
+function answer<T>(work: () => T, ms = 250): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let outcome: { value: T } | { error: unknown };
+    try {
+      outcome = { value: work() };
+    } catch (error) {
+      outcome = { error };
+    }
+    setTimeout(() => ('value' in outcome ? resolve(outcome.value) : reject(outcome.error)), ms);
+  });
+}
+
+export const tweaksView = (): Promise<TweaksView> => (inTauri() ? call('tweaks_view') : answer(() => sampleTweaks.view()));
+export const tweaksPreview = (ids: TweakId[]): Promise<PreviewView> => (inTauri() ? call('tweaks_preview', { ids }) : answer(() => sampleTweaks.preview(ids)));
+export const tweaksRestorePoint = (choice: RestoreChoice): Promise<RestoreOutcome> =>
+  inTauri() ? call('tweaks_restore_point', { choice }) : answer(() => sampleTweaks.restorePoint(choice), choice === 'skip' ? 100 : 1500);
+export const tweaksApply = (ids: TweakId[]): Promise<ItemOutcome[]> => (inTauri() ? call('tweaks_apply', { ids }) : answer(() => sampleTweaks.apply(ids), 700));
+export const tweaksUndo = (id: TweakId): Promise<ItemOutcome> => (inTauri() ? call('tweaks_undo', { id }) : answer(() => sampleTweaks.undo(id), 400));
+export const tweaksApplyAgain = (id: TweakId): Promise<ItemOutcome> => (inTauri() ? call('tweaks_apply_again', { id }) : answer(() => sampleTweaks.applyAgain(id), 400));
+export const tweaksRestoreAnyway = (id: TweakId): Promise<ItemOutcome> =>
+  inTauri() ? call('tweaks_restore_anyway', { id }) : answer(() => sampleTweaks.restoreAnyway(id), 400);
+export const tweaksRevertAll = (): Promise<ItemOutcome[]> => (inTauri() ? call('tweaks_revert_all') : answer(() => sampleTweaks.revertAll(), 700));
+export const tweaksUsePlanAgain = (): Promise<ItemOutcome> => (inTauri() ? call('tweaks_use_plan_again') : answer(() => sampleTweaks.usePlanAgain(), 400));
+export const tweaksRemovePlan = (): Promise<ItemOutcome> => (inTauri() ? call('tweaks_remove_plan') : answer(() => sampleTweaks.removePlan(), 400));
+export const tweaksReport = (): Promise<string> => (inTauri() ? call('tweaks_report') : answer(() => sampleTweaks.report()));
 
 /** Calls `handler` whenever the benchmark session changes; resolves to an unsubscribe function. */
 export async function onBenchState(handler: (state: BenchState | null) => void): Promise<() => void> {

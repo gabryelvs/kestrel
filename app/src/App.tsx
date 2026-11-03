@@ -11,6 +11,7 @@ import { Hardware } from './pages/Hardware';
 import { Health } from './pages/Health';
 import { Home } from './pages/Home';
 import { Toolbox } from './pages/Toolbox';
+import { Tweaks } from './pages/Tweaks';
 import { strings } from './strings';
 
 type Scan = { state: 'loading' } | { state: 'ready'; report: Report } | { state: 'failed'; message: string };
@@ -20,8 +21,8 @@ export function App() {
   const [scan, setScan] = useState<Scan>({ state: 'loading' });
   const [admin, setAdmin] = useState<boolean | null>(null);
   const [guideTopic, setGuideTopic] = useState<BiosTopic | null>(null);
-  // The tweak a Fix button asked for. The Tweaks page will open its Preview and clear this; the placeholder tab reads nothing.
-  const [, setTweakFocus] = useState<TweakId | null>(null);
+  // The tweak a Fix button asked for. The Tweaks page opens its Preview for it, if it can be applied, and clears this.
+  const [tweakFocus, setTweakFocus] = useState<TweakId | null>(null);
   const [firstRun, setFirstRun] = useState(() => !firstRunDone());
   const skippedInitialScan = useRef(firstRun);
 
@@ -50,6 +51,15 @@ export function App() {
     );
   };
 
+  // After an Apply or an undo, the scan is stale: Health, Home and the next benchmark's "PC at the time" must see what changed. The
+  // Tweaks page keeps its result on screen, and the loading screen of Scan again would take the page away, so this scans quietly.
+  const rescanQuietly = () => {
+    void rescan().then(
+      (report) => setScan((current) => (current.state === 'ready' ? { state: 'ready', report } : current)),
+      () => undefined,
+    );
+  };
+
   const openGuide = (topic: BiosTopic) => {
     refresh();
     setGuideTopic(topic);
@@ -65,6 +75,7 @@ export function App() {
   const chooseTab = (next: Tab) => {
     if (firstRun) return;
     if (next !== 'toolbox') setGuideTopic(null);
+    if (next !== 'tweaks') setTweakFocus(null);
     if (next !== tab) refresh();
     setTab(next);
   };
@@ -100,7 +111,7 @@ export function App() {
           {report && tab === 'health' && <Health report={report} onGuide={openGuide} onTweak={openTweak} />}
           {report && tab === 'hardware' && <Hardware report={report} onGuide={openGuide} onRescan={() => void run(true)} />}
           {report && tab === 'toolbox' && <Toolbox guide={report.guide} focus={guideTopic} appVersion={report.appVersion} />}
-          {report && tab === 'tweaks' && <ComingSoon {...strings.comingSoon.tweaks} />}
+          {report && tab === 'tweaks' && <Tweaks focus={tweakFocus} onFocusUsed={() => setTweakFocus(null)} onRescan={rescanQuietly} onTab={chooseTab} />}
           {report && tab === 'lockIn' && <ComingSoon {...strings.comingSoon.lockIn} />}
           {report && tab === 'benchmark' && <Benchmark />}
         </main>

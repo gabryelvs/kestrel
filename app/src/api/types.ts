@@ -241,3 +241,57 @@ export type BenchState = SessionPhase & {
   secondsLeft: number | null;
   countdown: number | null;
 };
+
+// The tweaks (Rust: crates/kestrel-tweaks, and the commands in app/src-tauri/src/tweaks). Serde spells the enums in kebab-case
+// and the structs in camelCase, as everywhere above.
+/** How much a tweak can matter in game. It is a tag on a row, never a promised number. */
+export type Impact = 'high' | 'medium' | 'low' | 'situational' | 'none-in-game';
+/** When a change takes effect. */
+export type Timing = 'now' | 'next-launch' | 'next-sign-in';
+export type RowState =
+  | 'available'
+  | 'already-set'
+  | 'not-needed'
+  | 'blocked-by-policy'
+  | 'applied'
+  | 'changed-elsewhere'
+  | 'plan-inactive'
+  | 'couldnt-read';
+/** One row of the Tweaks tab. `ticked` is whether its box starts ticked; only an `available` row has a box. */
+export interface Row { id: TweakId; title: string; state: RowState; ticked: boolean; why: string; impact: Impact; timing: Timing }
+/**
+ * Whether Apply and Undo may run when the view was made: a snapshot, because nothing streams it. Anything but `open` is closed,
+ * and every command that changes something asks again and can refuse with the gate's message.
+ */
+export type Gate = 'open' | 'game-running' | 'benchmark-active' | 'cant-tell';
+export interface TweaksView {
+  /** The Essential rows in display order, and System Protection's while Kestrel's record of it is open. */
+  rows: Row[];
+  gate: Gate;
+  /** Kestrel runs as another account than the one at the screen. */
+  otherAccount: boolean;
+  /** Changes Kestrel made for accounts that aren't at the screen. They wait. */
+  pendingOtherAccounts: number;
+  /** One sentence for each change a crash cut short, as this run of the app has found out. */
+  interrupted: string[];
+  /** Lines of the journal that couldn't be believed. */
+  unreadableLines: number;
+  /** Revert everything has something to do. */
+  anyActive: boolean;
+}
+export interface ValueChange { label: string; now: string; after: string }
+/** What Apply would do for one tweak. `timing` here is the one that counts: a row's own stays `now` for the pointer when the accounts differ. */
+export interface PreviewItem { id: TweakId; title: string; location: string; changes: ValueChange[]; timing: Timing; note: string | null }
+/** Whether Kestrel can ask Windows for a restore point first, and if not, why. */
+export type Readiness = 'ready' | 'protection-off' | 'blocked-by-policy' | 'unknown';
+export interface PreviewView { items: PreviewItem[]; restore: Readiness }
+/** How one change went. `message` is what to tell the person; on a failure, the reason. */
+export interface ItemOutcome { id: TweakId; title: string; ok: boolean; message: string }
+/** What the person chose when Apply came to the restore point. */
+export type RestoreChoice = 'create' | 'turn-on-and-create' | 'skip';
+/** How the request for a restore point went. A turn-on that failed is `failed`, not an error. */
+export type RestoreOutcome =
+  | { result: 'created'; sequence: number }
+  | { result: 'reused'; sequence: number; time: string }
+  | { result: 'skipped' }
+  | { result: 'failed'; reason: string };
