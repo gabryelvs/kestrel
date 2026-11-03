@@ -363,6 +363,7 @@ The journal is the real undo. The restore point is a bonus that Windows may late
 | Situation | What happens |
 | --- | --- |
 | VALORANT running, or a benchmark armed | Apply and Undo are off and say why |
+| The process list can't be read | Apply and Undo are off too: "Kestrel couldn't check whether VALORANT is open. Try again." |
 | A read fails | The row says Couldn't read; nothing is written for it |
 | A write fails, or the read-back differs | That item fails with the reason; if the value changed, Kestrel puts the prior back and records it; the others go on |
 | The journal can't be written | Apply refuses before any change |
