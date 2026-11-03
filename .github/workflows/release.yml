@@ -24,6 +24,9 @@ jobs:
         working-directory: app
       - run: npm run fetch:presentmon
         working-directory: app
+      # Before the build, so a failure here stops the release.
+      - name: Apply, check and undo every tweak on this machine
+        run: cargo run --locked -q -p kestrel-tweaks --bin kestrel-tweak-roundtrip -- --yes-change-this-machine
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

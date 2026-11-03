@@ -289,7 +289,7 @@ fn is_sid(text: &str) -> bool {
 }
 
 /// The text form of a GUID, `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, with no braces.
-fn is_guid(text: &str) -> bool {
+pub(crate) fn is_guid(text: &str) -> bool {
     text.len() == 36
         && text.bytes().enumerate().all(|(at, byte)| match at {
             8 | 13 | 18 | 23 => byte == b'-',
