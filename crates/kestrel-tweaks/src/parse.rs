@@ -16,8 +16,10 @@ pub const REG_SZ: u32 = 1;
 /// The registry's number for a DWORD value.
 pub const REG_DWORD: u32 = 4;
 
-/// Values Kestrel only ever reads. Writing the first three would stop manual recording and screenshots or fight a
-/// policy, and the last would change how often Windows makes restore points for everyone.
+/// Values Kestrel only ever reads. `AppCaptureEnabled` would also stop manual recording and screenshots, and
+/// `GameDVR_Enabled`, which other tools write beside it, does something the research couldn't pin down. `AllowGameDVR`
+/// and `AllowAutoGameMode` are an organisation's policy, which Kestrel doesn't fight.
+/// `SystemRestorePointCreationFrequency` would change how often Windows makes restore points for everyone.
 const NEVER_WRITTEN: [&str; 5] = [
     APP_CAPTURE,
     "GameDVR_Enabled",
@@ -117,6 +119,21 @@ pub fn plan_is_listed<E>(listing: &Result<Vec<String>, E>, guid: &str) -> bool {
         Ok(plans) => plans.iter().any(|plan| plan.eq_ignore_ascii_case(guid)),
         Err(_) => true,
     }
+}
+
+/// Whether the mouse in force reads exactly what Windows was just given. Windows can say yes to `SPI_SETMOUSE` and
+/// change nothing, and the error says so in words, because it reaches the person as the reason their change didn't
+/// take.
+pub fn mouse_reads_as_given(given: [i32; 3], reads: [i32; 3]) -> io::Result<()> {
+    if reads == given {
+        return Ok(());
+    }
+    let spelled = |values: [i32; 3]| values.map(|value| value.to_string()).join(", ");
+    Err(io::Error::other(format!(
+        "Windows said it set the mouse to {}, and it reads {}.",
+        spelled(given),
+        spelled(reads)
+    )))
 }
 
 /// The three strings `SPIF_UPDATEINIFILE` saves for the mouse setting [threshold 1, threshold 2, acceleration].
@@ -409,6 +426,25 @@ mod tests {
         // "Gone" closes a record for good, and a failed read must not be able to do that.
         let failed: Result<Vec<String>, io::Error> = Err(io::Error::from_raw_os_error(5));
         assert!(plan_is_listed(&failed, KESTREL_PLAN_GUID));
+    }
+
+    #[test]
+    fn the_mouse_in_force_has_to_read_exactly_what_windows_was_given() {
+        assert!(mouse_reads_as_given([0, 0, 0], [0, 0, 0]).is_ok());
+        assert!(mouse_reads_as_given([6, 10, 1], [6, 10, 1]).is_ok());
+    }
+
+    #[test]
+    fn a_mouse_that_said_yes_and_did_not_change_is_an_error_that_says_so() {
+        let said = mouse_reads_as_given([0, 0, 0], [6, 10, 1]).unwrap_err();
+        assert_eq!(
+            said.to_string(),
+            "Windows said it set the mouse to 0, 0, 0, and it reads 6, 10, 1."
+        );
+        // Any one of the three is enough.
+        for reads in [[1, 0, 0], [0, 1, 0], [0, 0, 1]] {
+            assert!(mouse_reads_as_given([0, 0, 0], reads).is_err(), "{reads:?}");
+        }
     }
 
     #[test]

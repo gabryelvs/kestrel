@@ -44,6 +44,12 @@ impl WinSystem {
     pub fn plans(&self) -> io::Result<Vec<String>> {
         power::plans()
     }
+
+    /// The mouse in force with Windows' own error, where `mouse_live` has it in a sentence. The round trip tells by the
+    /// error's number whether it is the session that refuses; the rules use `mouse_live`.
+    pub fn mouse_in_force(&self) -> io::Result<[i32; 3]> {
+        mouse::read()
+    }
 }
 
 impl System for WinSystem {
@@ -100,9 +106,14 @@ impl System for WinSystem {
     /// strings are also written here, under the account the call ran as, which makes that read-back true by
     /// construction. It costs nothing if Windows already wrote them, and the same text is what a late write from
     /// Windows would leave.
+    ///
+    /// That read-back then only reads Kestrel's own write, so it can't see an `SPI_SETMOUSE` that said yes and changed
+    /// nothing. The mouse in force has to read what it was given first, or this is an error and the engine takes the
+    /// change back, as research section 5's two reads ask.
     fn set_mouse_live(&self, values: [i32; 3], persist: bool) -> io::Result<()> {
         mouse::set_live(values, persist)?;
         if persist {
+            parse::mouse_reads_as_given(values, mouse::read()?)?;
             if let Some(sid) = self.account().this_process {
                 for (name, text) in parse::mouse_strings(values) {
                     registry::write_string(&sid, MOUSE_KEY, name, &text)?;

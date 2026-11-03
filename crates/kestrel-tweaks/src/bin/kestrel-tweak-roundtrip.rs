@@ -4,9 +4,11 @@
 //! machine it runs on, so it does nothing without its flag.
 //!
 //! Each step says what it did, plainly enough to tell what went wrong from a CI log alone. Every mismatch is noted and
-//! the steps go on where they can, so one log says as much as possible. What a machine can't exercise is left out with
-//! a warning, and only a tweak that is offered and doesn't work fails the run. Putting everything back happens whatever
-//! the steps came to, a panic included, and the exit code is non-zero if anything differed.
+//! the steps go on where they can, so one log says as much as possible. A tweak is left out, with a warning, only for a
+//! reason the machine itself owns: a policy, its chip, its Windows build, or a session that won't let the mouse be read
+//! or set (see `verdict`). With everything arranged, a row that says anything else is a bug, and it fails the run just
+//! as a tweak that is offered and doesn't work does. Putting everything back happens whatever the steps came to, a
+//! panic included, and the exit code is non-zero if anything differed.
 //!
 //! The values are read and restored with `winreg` directly, as their raw type and bytes, not through `System`: that is
 //! what is being checked, and a REG_DWORD has to stay a REG_DWORD. Only the hive under `HKEY_USERS` is ever touched.
@@ -21,6 +23,81 @@ fn main() -> std::process::ExitCode {
     roundtrip::main()
 }
 
+/// What the round trip makes of a tweak's row. A green run has to mean the tweak ran, so a row that isn't on offer only
+/// passes for a reason the machine itself owns, and each such reason is named here. This is the one part of the round
+/// trip that can be tested off Windows.
+#[cfg(any(windows, test))]
+mod verdict {
+    use kestrel_core::tweak_id::TweakId;
+    use kestrel_tweaks::RowState;
+
+    /// The first build that has Optimizations for windowed games, as the spec gives it.
+    const WINDOWED_BUILD: u32 = 22621;
+
+    /// What this machine decides for itself, whatever Kestrel does.
+    #[derive(Debug)]
+    pub struct Machine {
+        /// The build the probe read; 0 when it couldn't, which is no reason for anything.
+        pub build: u32,
+        pub dual_ccd_x3d: bool,
+        /// `AppCaptureEnabled` or the `AllowGameDVR` policy reads 0, so background recording is off whatever its own
+        /// value says. Kestrel never writes either of them, so this can't be arranged away.
+        pub capture_off: bool,
+        /// Why this session won't let the mouse be read or set, if it won't.
+        pub mouse_refused: Option<String>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum Verdict {
+        Offered,
+        /// The machine's own reason. The run goes on, with a warning.
+        LeftOut(String),
+        /// A bug, with everything arranged: a read that failed, a write that didn't land, a build the probe couldn't
+        /// read.
+        Wrong(String),
+    }
+
+    /// `row` is the tweak's row, as its state and the sentence it gives, or None when it has none.
+    pub fn of_row(id: TweakId, row: Option<(RowState, &str)>, machine: &Machine) -> Verdict {
+        let name = id.as_str();
+        if id == TweakId::PointerPrecision {
+            if let Some(why) = &machine.mouse_refused {
+                return Verdict::LeftOut(format!("{name}: {why}"));
+            }
+        }
+        let Some((state, why)) = row else {
+            return if id == TweakId::WindowedOptimizations
+                && (1..WINDOWED_BUILD).contains(&machine.build)
+            {
+                Verdict::LeftOut(format!(
+                    "{name}: Windows build {} doesn't have it",
+                    machine.build
+                ))
+            } else {
+                Verdict::Wrong(format!(
+                    "{name} has no row on Windows build {}",
+                    machine.build
+                ))
+            };
+        };
+        match state {
+            RowState::Available => Verdict::Offered,
+            RowState::BlockedByPolicy => Verdict::LeftOut(format!("{name}: {why}")),
+            RowState::NotNeeded if id == TweakId::PowerPlan && machine.dual_ccd_x3d => {
+                Verdict::LeftOut(format!("{name}: {why}"))
+            }
+            RowState::AlreadySet if id == TweakId::BackgroundRecording && machine.capture_off => {
+                Verdict::LeftOut(format!(
+                    "{name}: capture is off on this machine, so background recording can't be arranged on"
+                ))
+            }
+            _ => Verdict::Wrong(format!(
+                "{name}'s row says {state:?}, and Kestrel should offer it here: {why}"
+            )),
+        }
+    }
+}
+
 #[cfg(windows)]
 mod roundtrip {
     use std::fmt;
@@ -30,9 +107,11 @@ mod roundtrip {
     use std::process::{Command, ExitCode};
     use std::sync::Arc;
 
+    use kestrel_core::cpu::is_dual_ccd_x3d;
     use kestrel_core::health::Status;
     use kestrel_core::snapshot::FormFactor;
     use kestrel_core::tweak_id::TweakId;
+    use kestrel_core::{Report, SystemSnapshot};
     use kestrel_probe::account::account;
     use kestrel_probe::parse::user_key_path;
     use kestrel_tweaks::folder::journal_dir;
@@ -40,9 +119,9 @@ mod roundtrip {
     use kestrel_tweaks::parse;
     use kestrel_tweaks::power::{variant, Variant, KESTREL_PLAN_GUID, KESTREL_PLAN_NAME};
     use kestrel_tweaks::targets::{
-        ALLOW_AUTO_GAME_MODE, APP_CAPTURE, AUTO_GAME_MODE, DIRECTX_KEY, DIRECTX_SETTINGS,
-        GAME_BAR_KEY, GAME_DVR_KEY, HISTORICAL_CAPTURE, MOUSE_KEY, MOUSE_SPEED, MOUSE_THRESHOLD_1,
-        MOUSE_THRESHOLD_2,
+        ALLOW_AUTO_GAME_MODE, ALLOW_GAME_DVR, APP_CAPTURE, AUTO_GAME_MODE, DIRECTX_KEY,
+        DIRECTX_SETTINGS, GAME_BAR_KEY, GAME_DVR_KEY, GAME_DVR_POLICY_KEY, HISTORICAL_CAPTURE,
+        MOUSE_KEY, MOUSE_SPEED, MOUSE_THRESHOLD_1, MOUSE_THRESHOLD_2,
     };
     use kestrel_tweaks::win::{AdminFolder, WinSystem};
     use kestrel_tweaks::{journal_file, Engine, Gate, PlanInput, Read, RowState, System};
@@ -51,6 +130,8 @@ mod roundtrip {
     };
     use winreg::enums::{HKEY_USERS, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_DWORD, REG_SZ};
     use winreg::{RegKey, RegValue};
+
+    use super::verdict::{of_row, Machine, Verdict};
 
     const FLAG: &str = "--yes-change-this-machine";
 
@@ -78,7 +159,7 @@ It is meant for a build machine that gets thrown away.
     /// Windows' default mouse, acceleration on, as [threshold 1, threshold 2, acceleration].
     const MOUSE_ON: [i32; 3] = [6, 10, 1];
     const MOUSE_OFF: [i32; 3] = [0, 0, 0];
-    /// What `SPI_SETMOUSE` answers when this session isn't allowed to change the mouse, which says nothing about
+    /// What Windows answers when this session isn't allowed to read or change the mouse, which says nothing about
     /// Kestrel.
     const SESSION_REFUSED: [i32; 2] = [
         ERROR_ACCESS_DENIED as i32,
@@ -164,6 +245,8 @@ It is meant for a build machine that gets thrown away.
     struct Checks {
         wrong: Vec<String>,
         left_out: Vec<String>,
+        /// How many of the Essential tweaks Apply changed here.
+        ran: usize,
     }
 
     impl Checks {
@@ -238,11 +321,14 @@ It is meant for a build machine that gets thrown away.
 
     /// Steps 2 to 7, which change the machine. An error means there is no point going on; step 8 still runs.
     fn steps(run: &Run, checks: &mut Checks) -> Result<(), String> {
-        let (arranged, mouse_left_out) = step_2(run, checks)?;
-        heading("Step 3: what Kestrel offers on this machine");
-        let input = plan_input();
+        let (arranged, mouse_refused) = step_2(run, checks)?;
+        heading("Step 3: what the Health Check sees, and what Kestrel offers on this machine");
+        let before = kestrel_probe::collect_report(env!("CARGO_PKG_VERSION"));
+        let input = plan_input(&before.snapshot);
+        let machine = what_the_machine_decides(run, &input, mouse_refused);
+        health_sees_what_was_arranged(&before, &machine, checks);
         let engine = Engine::new(run.system.clone(), journal_file());
-        let offered = what_is_offered(&engine, &input, mouse_left_out, checks)?;
+        let offered = what_is_offered(&engine, &input, &machine, checks)?;
         step_4(run, &engine, &input, &arranged, &offered, checks)?;
         step_5(&offered, checks);
         step_6(run, &engine, &input, &arranged, checks)?;
@@ -484,7 +570,7 @@ It is meant for a build machine that gets thrown away.
         })
     }
 
-    /// Returns the state to come back to, and why the mouse has to be left out, if it does.
+    /// Returns the state to come back to, and why this session won't let the mouse be read or set, if it won't.
     fn step_2(run: &Run, checks: &mut Checks) -> Result<(Arranged, Option<String>), String> {
         heading("Step 2: arrange a known state");
         let (sys, sid) = (&run.system, run.sid.as_str());
@@ -497,49 +583,71 @@ It is meant for a build machine that gets thrown away.
             .map_err(|why| refused("the DirectX settings", why))?;
         remove_raw(sid, GAME_VALUE)
             .map_err(|why| refused("the game's graphics preference", why))?;
-        let mouse_left_out = if run.differs {
-            // Kestrel only writes the strings when the accounts differ, and the mouse in force is this session's.
-            for (name, value) in parse::mouse_strings(MOUSE_ON) {
-                sys.write_string(sid, MOUSE_KEY, name, &value)
-                    .map_err(|why| refused("the mouse strings", why))?;
-            }
-            expect_mouse_strings(run, ["1", "6", "10"], checks);
-            None
-        } else {
-            match sys.set_mouse_live(MOUSE_ON, true) {
-                Ok(()) => {
-                    expect_mouse(run, MOUSE_ON, checks);
-                    expect_mouse_strings(run, ["1", "6", "10"], checks);
-                    None
-                }
-                Err(why)
-                    if why
-                        .raw_os_error()
-                        .is_some_and(|code| SESSION_REFUSED.contains(&code)) =>
-                {
-                    Some(format!(
-                        "this session isn't allowed to change the mouse: {why}"
-                    ))
-                }
-                Err(why) => return Err(refused("the mouse", why)),
-            }
-        };
+        expect_raw(run, GAME_MODE, &dword(0), checks);
+        expect_raw(run, RECORDING, &dword(1), checks);
+        expect_raw(run, DIRECTX, &text(OTHER_TOKEN), checks);
+        expect_raw(run, GAME_VALUE, &None, checks);
+        let mouse_refused = arrange_mouse(run, checks)?;
         let values = read_all(sid, &CHANGED)?;
-        for (at, value) in &values {
-            println!("  {at} is {}", shown(value));
-        }
         let mouse = match sys.mouse_live() {
             Read::Value(mouse) => Some(mouse),
             _ => None,
         };
         println!("  the mouse in force is {mouse:?}");
-        Ok((Arranged { values, mouse }, mouse_left_out))
+        Ok((Arranged { values, mouse }, mouse_refused))
+    }
+
+    /// Whether this is the session saying no, rather than something going wrong.
+    fn session_refused(why: &io::Error) -> bool {
+        why.raw_os_error()
+            .is_some_and(|code| SESSION_REFUSED.contains(&code))
+    }
+
+    /// Puts the mouse at Windows' default, acceleration on, with its strings. Returns why this session won't let it be
+    /// read or set, if it won't. Both are asked of the session alone, without touching the registry, so an error 5 from
+    /// a registry write can't pass for the session's: once the session has said yes, any failure is a failure.
+    fn arrange_mouse(run: &Run, checks: &mut Checks) -> Result<Option<String>, String> {
+        let (sys, sid) = (&run.system, run.sid.as_str());
+        let current = match sys.mouse_in_force() {
+            Ok(current) => current,
+            Err(why) if session_refused(&why) => {
+                return Ok(Some(format!(
+                    "this session isn't allowed to read the mouse: {why}"
+                )))
+            }
+            Err(why) => return Err(format!("Couldn't read the mouse: {why}")),
+        };
+        if run.differs {
+            // Kestrel only writes the strings when the accounts differ, and the mouse in force is this session's.
+            for (name, value) in parse::mouse_strings(MOUSE_ON) {
+                sys.write_string(sid, MOUSE_KEY, name, &value)
+                    .map_err(|why| format!("Couldn't arrange the mouse strings: {why}"))?;
+            }
+        } else {
+            match sys.set_mouse_live(current, false) {
+                Ok(()) => {}
+                Err(why) if session_refused(&why) => {
+                    return Ok(Some(format!(
+                        "this session isn't allowed to change the mouse: {why}"
+                    )))
+                }
+                Err(why) => {
+                    return Err(format!(
+                        "Couldn't set the mouse to what it already is: {why}"
+                    ))
+                }
+            }
+            sys.set_mouse_live(MOUSE_ON, true)
+                .map_err(|why| format!("Couldn't arrange the mouse: {why}"))?;
+            expect_mouse(run, MOUSE_ON, checks);
+        }
+        expect_mouse_strings(run, ["1", "6", "10"], checks);
+        Ok(None)
     }
 
     /// A desktop with one kind of core, two graphics chips and VALORANT in windowed fullscreen, on this machine's own
     /// build and CPU, so that everything that can be offered is.
-    fn plan_input() -> PlanInput {
-        let snapshot = kestrel_probe::collect_snapshot();
+    fn plan_input(snapshot: &SystemSnapshot) -> PlanInput {
         println!(
             "This machine: Windows build {}, {}",
             snapshot.os.build, snapshot.cpu.name
@@ -555,19 +663,61 @@ It is meant for a build machine that gets thrown away.
             build: snapshot.os.build,
             form_factor: FormFactor::Desktop,
             hybrid_cpu: false,
-            cpu_name: snapshot.cpu.name,
+            cpu_name: snapshot.cpu.name.clone(),
             gpu_choice: true,
             valorant_exe: Some(GAME_EXE.to_string()),
             fullscreen_mode: Some(1),
         }
     }
 
-    /// The tweaks Kestrel offers here. Anything it doesn't is left out and said so, and the rest are what gets
-    /// asserted.
+    /// What can excuse a row that isn't on offer. A read that fails is no reason for anything, so capture only counts
+    /// as off when a 0 is really there.
+    fn what_the_machine_decides(
+        run: &Run,
+        input: &PlanInput,
+        mouse_refused: Option<String>,
+    ) -> Machine {
+        let sys = &run.system;
+        Machine {
+            build: input.build,
+            dual_ccd_x3d: is_dual_ccd_x3d(&input.cpu_name),
+            capture_off: sys.read_dword(&run.sid, GAME_DVR_KEY, APP_CAPTURE) == Read::Value(0)
+                || sys.read_policy_dword(GAME_DVR_POLICY_KEY, ALLOW_GAME_DVR) == Read::Value(0),
+            mouse_refused,
+        }
+    }
+
+    /// Game Mode and background recording also pass on a value that is absent, so their passing after Apply says little
+    /// unless they don't pass now. It's also what shows the probe reads the hive the values went to: on another hive,
+    /// where they are absent, both would pass here. Capture being off is the one reason recording may pass.
+    fn health_sees_what_was_arranged(report: &Report, machine: &Machine, checks: &mut Checks) {
+        for (tweak, may_pass) in [
+            (TweakId::GameMode, false),
+            (TweakId::BackgroundRecording, machine.capture_off),
+        ] {
+            let name = tweak.as_str();
+            match report.findings.iter().find(|finding| finding.id == name) {
+                Some(finding) if finding.status == Status::Pass && may_pass => {
+                    println!("  {name} passes, because capture is off on this machine.");
+                }
+                Some(finding) => checks.check(
+                    finding.status != Status::Pass,
+                    format!(
+                        "{name} before Apply, and it mustn't pass here: {:?}: {}",
+                        finding.status, finding.title
+                    ),
+                ),
+                None => checks.wrong(format!("{name}: the Health Check has no such finding")),
+            }
+        }
+    }
+
+    /// The tweaks Kestrel offers here, which are the ones that get asserted. See `verdict` for what happens to the
+    /// rest.
     fn what_is_offered(
         engine: &Engine,
         input: &PlanInput,
-        mouse_left_out: Option<String>,
+        machine: &Machine,
         checks: &mut Checks,
     ) -> Result<Vec<TweakId>, String> {
         let view = engine
@@ -575,20 +725,16 @@ It is meant for a build machine that gets thrown away.
             .map_err(|why| format!("Kestrel couldn't show its rows: {why}"))?;
         let mut offered = Vec::new();
         for id in TweakId::ESSENTIAL {
-            let name = id.as_str();
-            match view.rows.iter().find(|row| row.id == id) {
-                None => checks.leave_out(format!("{name}: it has no row on build {}", input.build)),
-                Some(_) if id == TweakId::PointerPrecision && mouse_left_out.is_some() => {
-                    let why = mouse_left_out.as_deref().unwrap_or_default();
-                    checks.leave_out(format!("{name}: {why}"));
-                }
-                Some(row) if row.state != RowState::Available => {
-                    checks.leave_out(format!("{name}: its row says {:?}: {}", row.state, row.why));
-                }
-                Some(row) => {
-                    println!("  offered: {name}: {}", row.why);
+            let row = view.rows.iter().find(|row| row.id == id);
+            let said = row.map(|row| (row.state, row.why.as_str()));
+            match of_row(id, said, machine) {
+                Verdict::Offered => {
+                    let why = said.map_or("", |(_, why)| why);
+                    println!("  offered: {}: {why}", id.as_str());
                     offered.push(id);
                 }
+                Verdict::LeftOut(why) => checks.leave_out(why),
+                Verdict::Wrong(why) => checks.wrong(why),
             }
         }
         if offered.is_empty() {
@@ -613,6 +759,7 @@ It is meant for a build machine that gets thrown away.
         for item in &items {
             checks.check(item.ok, format!("{}: {}", item.id.as_str(), item.message));
         }
+        checks.ran = items.iter().filter(|item| item.ok).count();
         for id in offered {
             match id {
                 TweakId::GameMode => expect_raw(run, GAME_MODE, &dword(1), checks),
@@ -690,6 +837,10 @@ It is meant for a build machine that gets thrown away.
             // Windows may accept less than the spec's value, and then the plan holds the nearest it accepts.
             let range = sys.plan_value_range(subgroup, setting);
             let wanted = range.map_or(value, |(min, max)| value.max(min).min(max));
+            // The range is also what Apply goes by, so a wrong one would pass the check below. Say so where it matters.
+            if wanted != value {
+                println!("::warning::Windows' range {range:?} holds {label} to {wanted} instead of the spec's {value}.");
+            }
             let found = sys.read_plan_value(KESTREL_PLAN_GUID, subgroup, setting);
             checks.check(
                 found == Read::Value(wanted),
@@ -702,9 +853,6 @@ It is meant for a build machine that gets thrown away.
 
     fn step_5(offered: &[TweakId], checks: &mut Checks) {
         heading("Step 5: what the Health Check says");
-        // With nobody signed in, the probe reads HKEY_CURRENT_USER. For this process that is the same hive as the
-        // HKEY_USERS\<this process's SID> everything above went to, so what it sees is what was written.
-        println!("  The probe reads the signed-in account's hive, or with nobody signed in this process's own: the hive used above.");
         let report = kestrel_probe::collect_report(env!("CARGO_PKG_VERSION"));
         for tweak in [
             TweakId::GameMode,
@@ -713,7 +861,7 @@ It is meant for a build machine that gets thrown away.
         ] {
             let name = tweak.as_str();
             if !offered.contains(&tweak) {
-                println!("  {name} was left out above, so its finding isn't judged.");
+                println!("  {name} wasn't offered above, so its finding isn't judged.");
                 continue;
             }
             match report.findings.iter().find(|finding| finding.id == name) {
@@ -779,9 +927,10 @@ It is meant for a build machine that gets thrown away.
         let (sys, sid) = (&run.system, run.sid.as_str());
         sys.write_string(sid, GAME_MODE.key, GAME_MODE.name, "not a number")
             .map_err(|why| format!("Couldn't write the wrong type: {why}"))?;
+        // By its words: any other failure, a refused read say, wouldn't show that the type is what was refused.
         let read = sys.read_dword(sid, GAME_MODE.key, GAME_MODE.name);
         checks.check(
-            matches!(read, Read::Failed(_)),
+            read == Read::Failed(format!("{} is not a DWORD value", GAME_MODE.name)),
             format!("{GAME_MODE} as a DWORD reads {read:?}"),
         );
         wrong_type_is_left_alone(run, engine, input, TweakId::GameMode, GAME_MODE, checks)?;
@@ -794,7 +943,7 @@ It is meant for a build machine that gets thrown away.
             .map_err(|why| format!("Couldn't write the wrong type: {why}"))?;
         let read = sys.read_string(sid, DIRECTX.key, DIRECTX.name);
         checks.check(
-            matches!(read, Read::Failed(_)),
+            read == Read::Failed(format!("{} is not a string value", DIRECTX.name)),
             format!("{DIRECTX} as a string reads {read:?}"),
         );
         wrong_type_is_left_alone(
@@ -856,7 +1005,8 @@ It is meant for a build machine that gets thrown away.
             checks.wrong(format!("Couldn't make {}: {why}", dir.display()));
             return;
         }
-        // LOCAL SERVICE. Giving a folder away takes elevation, which `icacls` turns on for itself.
+        // LOCAL SERVICE. Giving a folder away takes elevation, which everything here already needs, so a refusal is
+        // wrong.
         let given = Command::new("icacls")
             .arg(&dir)
             .args(["/setowner", "*S-1-5-19"])
@@ -875,8 +1025,8 @@ It is meant for a build machine that gets thrown away.
                     other => checks.wrong(format!("Apply should have refused, and says: {other:?}")),
                 }
             }
-            other => checks.leave_out(format!(
-                "a folder that belongs to another account: this machine wouldn't give one away: {other:?}"
+            other => checks.wrong(format!(
+                "Couldn't give a folder to another account, so this refusal wasn't tested: {other:?}"
             )),
         }
         if let Err(why) = fs::remove_dir_all(&dir) {
@@ -954,8 +1104,13 @@ It is meant for a build machine that gets thrown away.
             println!("Left out on this machine: {what}");
         }
         heading("The result");
+        let six = TweakId::ESSENTIAL.len();
+        println!("{} of the {six} Essential tweaks ran here.", checks.ran);
         if checks.wrong.is_empty() {
-            println!("Everything Kestrel offered here applied, read back, undid and read back as it was.");
+            println!("Those applied, read back, undid and read back as they were.");
+            if checks.ran < six {
+                println!("::warning::The rest have now run nowhere: their first run is on the owner's PC.");
+            }
             return ExitCode::SUCCESS;
         }
         println!("What differed:");
@@ -963,5 +1118,185 @@ It is meant for a build machine that gets thrown away.
             println!("  {what}");
         }
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verdict::{of_row, Machine, Verdict};
+    use kestrel_core::tweak_id::TweakId;
+    use kestrel_tweaks::RowState;
+    use RowState::{
+        AlreadySet, Applied, Available, BlockedByPolicy, ChangedElsewhere, CouldntRead, NotNeeded,
+        PlanInactive,
+    };
+
+    const ALL_STATES: [RowState; 8] = [
+        Available,
+        AlreadySet,
+        NotNeeded,
+        BlockedByPolicy,
+        Applied,
+        ChangedElsewhere,
+        PlanInactive,
+        CouldntRead,
+    ];
+
+    /// A machine with nothing to say for itself: a known build, an ordinary chip, capture on and a session that lets
+    /// the mouse be read and set.
+    fn ordinary() -> Machine {
+        Machine {
+            build: 26100,
+            dual_ccd_x3d: false,
+            capture_off: false,
+            mouse_refused: None,
+        }
+    }
+
+    fn row(state: RowState) -> Option<(RowState, &'static str)> {
+        Some((state, "the row's reason"))
+    }
+
+    fn is_left_out(verdict: &Verdict) -> bool {
+        matches!(verdict, Verdict::LeftOut(_))
+    }
+
+    fn is_wrong(verdict: &Verdict) -> bool {
+        matches!(verdict, Verdict::Wrong(_))
+    }
+
+    #[test]
+    fn an_available_row_is_offered_whatever_the_machine_says() {
+        for id in TweakId::ESSENTIAL {
+            assert_eq!(
+                of_row(id, row(Available), &ordinary()),
+                Verdict::Offered,
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_an_ordinary_machine_only_a_policy_leaves_a_tweak_out_and_the_rest_is_wrong() {
+        for id in TweakId::ESSENTIAL {
+            for state in ALL_STATES {
+                let verdict = of_row(id, row(state), &ordinary());
+                match state {
+                    Available => assert_eq!(verdict, Verdict::Offered),
+                    BlockedByPolicy => assert!(is_left_out(&verdict), "{id:?}: {verdict:?}"),
+                    _ => assert!(is_wrong(&verdict), "{id:?}, {state:?}: {verdict:?}"),
+                }
+            }
+            assert!(
+                is_wrong(&of_row(id, None, &ordinary())),
+                "{id:?} with no row"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verdict_says_which_tweak_and_why() {
+        let Verdict::Wrong(said) = of_row(TweakId::GameMode, row(CouldntRead), &ordinary()) else {
+            panic!("a failed read on a real key should be wrong");
+        };
+        assert!(said.contains("game-mode"), "{said}");
+        assert!(said.contains("CouldntRead"), "{said}");
+        assert!(said.contains("the row's reason"), "{said}");
+        let Verdict::LeftOut(said) = of_row(TweakId::GameMode, row(BlockedByPolicy), &ordinary())
+        else {
+            panic!("a policy should leave it out");
+        };
+        assert!(said.contains("game-mode"), "{said}");
+        assert!(said.contains("the row's reason"), "{said}");
+    }
+
+    #[test]
+    fn not_needed_is_the_machines_own_only_for_the_plan_on_a_dual_ccd_x3d() {
+        let x3d = Machine {
+            dual_ccd_x3d: true,
+            ..ordinary()
+        };
+        assert!(is_left_out(&of_row(
+            TweakId::PowerPlan,
+            row(NotNeeded),
+            &x3d
+        )));
+        assert!(is_wrong(&of_row(
+            TweakId::PowerPlan,
+            row(NotNeeded),
+            &ordinary()
+        )));
+        // That chip says nothing about the graphics preference, which only says this if the arranging went wrong.
+        assert!(is_wrong(&of_row(
+            TweakId::GpuPreference,
+            row(NotNeeded),
+            &x3d
+        )));
+        // And it's no excuse for the plan's other states.
+        assert!(is_wrong(&of_row(
+            TweakId::PowerPlan,
+            row(CouldntRead),
+            &x3d
+        )));
+    }
+
+    #[test]
+    fn already_set_is_the_machines_own_only_for_recording_with_capture_off() {
+        let capture_off = Machine {
+            capture_off: true,
+            ..ordinary()
+        };
+        let recording = TweakId::BackgroundRecording;
+        assert!(is_left_out(&of_row(
+            recording,
+            row(AlreadySet),
+            &capture_off
+        )));
+        // With capture on, a value that reads as off is a write that didn't land.
+        assert!(is_wrong(&of_row(recording, row(AlreadySet), &ordinary())));
+        // Capture says nothing about Game Mode, and a read that failed isn't capture being off.
+        assert!(is_wrong(&of_row(
+            TweakId::GameMode,
+            row(AlreadySet),
+            &capture_off
+        )));
+        assert!(is_wrong(&of_row(recording, row(CouldntRead), &capture_off)));
+    }
+
+    #[test]
+    fn a_session_that_refuses_the_mouse_leaves_out_the_pointer_and_nothing_else() {
+        let refused = Machine {
+            mouse_refused: Some("this session isn't allowed to read the mouse".to_string()),
+            ..ordinary()
+        };
+        let pointer = TweakId::PointerPrecision;
+        // SPI_GETMOUSE refused makes the row CouldntRead; SPI_SETMOUSE refused leaves it as the mouse happens to be.
+        for state in [CouldntRead, Available, AlreadySet] {
+            let verdict = of_row(pointer, row(state), &refused);
+            assert!(is_left_out(&verdict), "{state:?}: {verdict:?}");
+        }
+        assert!(is_wrong(&of_row(pointer, row(CouldntRead), &ordinary())));
+        assert!(is_wrong(&of_row(
+            TweakId::GameMode,
+            row(CouldntRead),
+            &refused
+        )));
+    }
+
+    #[test]
+    fn no_row_is_the_machines_own_only_for_windowed_optimizations_on_a_known_old_build() {
+        let on = |build| Machine {
+            build,
+            ..ordinary()
+        };
+        let windowed = TweakId::WindowedOptimizations;
+        assert!(is_left_out(&of_row(windowed, None, &on(19045))));
+        assert!(is_left_out(&of_row(windowed, None, &on(22620))));
+        // From the build that has it, and when the probe couldn't read the build, no row is a bug.
+        assert!(is_wrong(&of_row(windowed, None, &on(22621))));
+        assert!(is_wrong(&of_row(windowed, None, &on(26100))));
+        assert!(is_wrong(&of_row(windowed, None, &on(0))));
+        // The build only ever hides that one.
+        assert!(is_wrong(&of_row(TweakId::GameMode, None, &on(19045))));
     }
 }

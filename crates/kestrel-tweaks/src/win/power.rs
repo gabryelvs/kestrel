@@ -291,9 +291,10 @@ mod tests {
 
     #[test]
     fn a_range_for_core_parking_is_one_of_percentages() {
-        // Windows may not say, and then Kestrel writes its value as it is.
+        // Windows may not say, and then Kestrel writes its value as it is. If it does say, it has to leave some room: a
+        // range of 0 to 0 would hold parking at 0, the opposite of what Kestrel's plan is for.
         if let Some((min, max)) = value_range(PROCESSOR, PARKING) {
-            assert!(min <= max && max <= 100, "{min} to {max}");
+            assert!(min < max && max <= 100, "{min} to {max}");
         }
     }
 

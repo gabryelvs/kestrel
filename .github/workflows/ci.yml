@@ -79,6 +79,7 @@ jobs:
       - name: Probe this runner (smoke test)
         run: cargo run --locked -q -p kestrel-probe --bin kestrel-probe -- --pretty | Tee-Object -FilePath probe-report.json
       - name: Apply, check and undo every tweak on this machine
+        timeout-minutes: 15
         run: cargo run --locked -q -p kestrel-tweaks --bin kestrel-tweak-roundtrip -- --yes-change-this-machine
       - run: npm ci
         working-directory: app
