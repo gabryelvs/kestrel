@@ -118,12 +118,13 @@ mod roundtrip {
     use kestrel_tweaks::journal::JournalFile;
     use kestrel_tweaks::parse;
     use kestrel_tweaks::power::{variant, Variant, KESTREL_PLAN_GUID, KESTREL_PLAN_NAME};
+    use kestrel_tweaks::restore::{first_line_of, HELPER_TIMEOUT};
     use kestrel_tweaks::targets::{
         ALLOW_AUTO_GAME_MODE, ALLOW_GAME_DVR, APP_CAPTURE, AUTO_GAME_MODE, DIRECTX_KEY,
         DIRECTX_SETTINGS, GAME_BAR_KEY, GAME_DVR_KEY, GAME_DVR_POLICY_KEY, HISTORICAL_CAPTURE,
         MOUSE_KEY, MOUSE_SPEED, MOUSE_THRESHOLD_1, MOUSE_THRESHOLD_2,
     };
-    use kestrel_tweaks::win::{AdminFolder, WinSystem};
+    use kestrel_tweaks::win::{helper_reads, AdminFolder, WinSystem};
     use kestrel_tweaks::{journal_file, Engine, Gate, PlanInput, Read, RowState, System};
     use windows_sys::Win32::Foundation::{
         ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION,
@@ -134,6 +135,9 @@ mod roundtrip {
     use super::verdict::{of_row, Machine, Verdict};
 
     const FLAG: &str = "--yes-change-this-machine";
+    /// What this program starts a copy of itself with, to read what the restore point helper reads. See
+    /// `what_the_restore_code_reads`.
+    const READ_FLAG: &str = "--read-as-the-restore-point-helper";
 
     const WOULD_DO: &str = "\
 This program tests Kestrel's Windows code by changing this PC's settings, so it only runs when told to.
@@ -148,6 +152,8 @@ Nothing has been changed. With --yes-change-this-machine it would:
   6. Undo them all, and read back that everything is as it was in step 2.
   7. Check that a value of the wrong type is refused and left alone, and so is a journal folder someone else owns.
   8. Put everything back as step 1 found it, whatever happened before, and delete Kestrel's folder in ProgramData.
+
+Last, it reads what Kestrel's restore point code finds here, which changes nothing.
 
 It is meant for a build machine that gets thrown away.
 ";
@@ -294,6 +300,10 @@ It is meant for a build machine that gets thrown away.
 
     pub fn main() -> ExitCode {
         let args: Vec<String> = std::env::args().skip(1).collect();
+        if args == [READ_FLAG] {
+            println!("{}", helper_reads());
+            return ExitCode::SUCCESS;
+        }
         if args != [FLAG] {
             print!("{WOULD_DO}");
             return ExitCode::from(2);
@@ -1096,9 +1106,38 @@ It is meant for a build machine that gets thrown away.
         expect_plans_as_found(run, checks);
     }
 
+    /// What the restore point code reads on this machine: the only run it gets before the owner's PC. These are reads,
+    /// and they judge nothing, because a build machine may have no System Restore at all, and then each says why.
+    ///
+    /// The helper's reads go by the helper's COM security, which can only be set once in a process and goes for all of
+    /// it, so they run in a copy of this program, as they will in the helper's own process. Setting it here would be a
+    /// different test: this process's WMI has already gone through the probe, which sets COM's defaults.
+    fn what_the_restore_code_reads() {
+        println!(
+            "System Protection on the Windows drive reads: {:?}",
+            WinSystem::new().protection()
+        );
+        let read = std::env::current_exe().and_then(|exe| {
+            let mut copy = Command::new(exe);
+            copy.arg(READ_FLAG);
+            first_line_of(copy, HELPER_TIMEOUT)
+        });
+        let found = match read {
+            Ok(Some(line)) if !line.trim().is_empty() => line.trim().to_string(),
+            Ok(Some(_)) => "nothing: it ended with nothing to say.".to_string(),
+            Ok(None) => format!(
+                "nothing: it didn't answer in {} seconds.",
+                HELPER_TIMEOUT.as_secs()
+            ),
+            Err(why) => format!("nothing: it couldn't start: {why}"),
+        };
+        println!("What the restore point helper would find: {found}");
+    }
+
     fn finish(checks: &Checks) -> ExitCode {
         heading("What this run doesn't cover");
         println!("The restore point and the uninstaller aren't exercised here, and System Protection isn't touched. They are checked on the owner's PC.");
+        what_the_restore_code_reads();
         println!("VALORANT's graphics preference is checked as a registry value, not by what it does: this machine has no VALORANT and no second graphics chip.");
         for what in &checks.left_out {
             println!("Left out on this machine: {what}");

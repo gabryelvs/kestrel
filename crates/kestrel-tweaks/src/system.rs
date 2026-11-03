@@ -104,7 +104,11 @@ pub trait System: Send + Sync {
     // System Protection on the system drive.
 
     fn protection(&self) -> Readiness;
+    /// Turns it on, and only comes back once `protection` reads `Ready`: the engine trusts that read at once, and one
+    /// that still said off would close the record as turned off outside Kestrel.
     fn turn_protection_on(&self) -> io::Result<()>;
+    /// Turns it off, which deletes the drive's restore points, and only comes back once `protection` reads
+    /// `ProtectionOff`.
     fn turn_protection_off(&self) -> io::Result<()>;
 }
 

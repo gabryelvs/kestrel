@@ -25,7 +25,7 @@ use kestrel_core::tweak_id::TweakId;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{info, Timing};
-use crate::journal::{CloseReason, Entry, JournalFile, OpenRecord, Replay, Saved};
+use crate::journal::{CloseReason, Entry, JournalFile, OpenRecord, Replay, RestoreOutcome, Saved};
 use crate::plan::{self, PlanInput, PreviewItem, Row, RowState, ValueChange};
 use crate::power::{self, KESTREL_PLAN_GUID, KESTREL_PLAN_NAME};
 use crate::report;
@@ -59,6 +59,8 @@ const PROTECTION_STILL_ON: &str =
     "Windows said it turned System Protection off, and it's still on.";
 const PROTECTION_NOT_CONFIRMED: &str =
     "Kestrel asked Windows to turn System Protection off, and couldn't tell whether it did.";
+const PROTECTION_BLOCKED: &str =
+    "An organisation policy decides System Protection, so Kestrel left it alone.";
 
 /// Whether Apply and Undo may run now, and if not, what they wait for. The app decides; the view only carries it to the
 /// page.
@@ -408,6 +410,54 @@ impl Engine {
         Ok(match self.standing(record) {
             Standing::Holds => self.remove_recorded_plan(record),
             _ => self.undo_record(record),
+        })
+    }
+
+    /// Turns System Protection on, for a person who chose that when Apply came to the restore point, and keeps a record
+    /// so that its row can turn it off again. It goes as every change does: the lock, a look at what holds now, the
+    /// intent, and only then Windows. If the journal won't have the intent, nothing is changed.
+    ///
+    /// A record says protection was off before Kestrel, and its undo deletes the drive's restore points, so one is only
+    /// written for protection that reads off now, which is what the dialog offered this for. Protection that reads on
+    /// has nothing to turn on and gets no record. Protection a policy blocks, or that can't be read, is left alone.
+    ///
+    /// `System::turn_protection_on` comes back once protection reads on, so the next look at the record finds it
+    /// holding. If it fails, its reason is both the outcome's detail and the error.
+    pub fn turn_protection_on(&self) -> io::Result<()> {
+        let _lock = self.journal.lock()?;
+        match self.system.protection() {
+            Readiness::ProtectionOff => {}
+            Readiness::Ready => return Ok(()),
+            Readiness::BlockedByPolicy => return Err(io::Error::other(PROTECTION_BLOCKED)),
+            Readiness::Unknown => return Err(io::Error::other(PROTECTION_UNKNOWN)),
+        }
+        let change = Change {
+            id: TweakId::SystemProtection,
+            sid: None,
+            value_name: None,
+            prior: Saved::Protection { on: false },
+            planned: Saved::Protection { on: true },
+            again: false,
+        };
+        self.journal.append(&change.intent(&now()))?;
+        match self.system.turn_protection_on() {
+            Ok(()) => {
+                self.note(&change.outcome(true, None));
+                Ok(())
+            }
+            Err(why) => {
+                self.note(&change.outcome(false, Some(why.to_string())));
+                Err(why)
+            }
+        }
+    }
+
+    /// Writes down what came of asking Windows for a restore point. It belongs to no record, and the report shows it.
+    pub fn record_restore(&self, outcome: &RestoreOutcome) -> io::Result<()> {
+        let _lock = self.journal.lock()?;
+        self.journal.append(&Entry::RestorePoint {
+            at: now(),
+            outcome: outcome.clone(),
         })
     }
 
@@ -1137,7 +1187,7 @@ mod tests {
     use crate::fake::{
         FakeSystem, ACTIVE_PLAN, BALANCED, HIGH_PERFORMANCE, MOUSE_LIVE, PROTECTION, SID,
     };
-    use crate::journal::{Folder, PlainFolder, RestoreOutcome};
+    use crate::journal::{Folder, PlainFolder};
     use crate::targets::{
         ALLOW_AUTO_GAME_MODE, ALLOW_GAME_DVR, APP_CAPTURE, AUTO_GAME_MODE, DIRECTX_KEY,
         DIRECTX_SETTINGS, GAME_BAR_KEY, GAME_DVR_KEY, GAME_DVR_POLICY_KEY, GPU_PREFERENCE_TOKEN,
@@ -4121,6 +4171,241 @@ mod tests {
             assert!(rig.pc.writes().is_empty(), "{readiness:?}");
             assert_eq!(rig.open().len(), 1, "{readiness:?}");
         }
+    }
+
+    /// `arranged`, with System Protection off, which is when the dialog offers to turn it on.
+    fn protection_is_off() -> Rig {
+        let rig = Rig::on(arranged());
+        rig.pc.set_protection(Readiness::ProtectionOff);
+        rig
+    }
+
+    #[test]
+    fn turning_protection_on_is_recorded_and_undoable() {
+        let rig = protection_is_off();
+
+        rig.engine.turn_protection_on().unwrap();
+
+        assert_eq!(rig.pc.writes(), ["protection on"]);
+        assert_eq!(rig.pc.protection(), Readiness::Ready);
+        assert_eq!(
+            rig.story(),
+            says(&[("intent", SystemProtection), ("applied", SystemProtection)])
+        );
+        let open = rig.open();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].tweak, SystemProtection);
+        assert_eq!(open[0].sid, None);
+        assert_eq!(open[0].value_name, None);
+        assert_eq!(open[0].prior, Saved::Protection { on: false });
+        assert_eq!(open[0].planned, Saved::Protection { on: true });
+        assert!(open[0].settled);
+        assert_eq!(rig.state(SystemProtection), Applied);
+        assert_eq!(rig.engine.applied_ids(), ["system-protection"]);
+
+        // Revert everything leaves it on.
+        let items = rig.engine.revert_all().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, SystemProtection);
+        assert!(!items[0].ok);
+        assert_eq!(rig.pc.writes(), ["protection on"]);
+        assert_eq!(rig.pc.protection(), Readiness::Ready);
+        assert_eq!(rig.open().len(), 1);
+
+        // Its own Undo turns it off.
+        let undone = rig.undo(SystemProtection);
+        assert!(undone.ok, "{}", undone.message);
+        assert_eq!(rig.pc.writes(), ["protection on", "protection off"]);
+        assert_eq!(rig.pc.protection(), Readiness::ProtectionOff);
+        assert!(rig.open().is_empty());
+        assert!(!rig.view().rows.iter().any(|row| row.id == SystemProtection));
+    }
+
+    #[test]
+    fn turning_protection_on_says_when_in_the_journals_own_way() {
+        let rig = protection_is_off();
+        rig.engine.turn_protection_on().unwrap();
+        let history = rig.journal().read().unwrap().history;
+        let [Entry::Intent { at, batch, .. }, Entry::Outcome { at: finished, .. }] = &history[..]
+        else {
+            panic!("an intent and an outcome, not {history:?}");
+        };
+        for time in [at, batch, finished] {
+            assert!(chrono::DateTime::parse_from_rfc3339(time).is_ok(), "{time}");
+        }
+    }
+
+    #[test]
+    fn a_turn_on_windows_refuses_leaves_no_record_and_says_why() {
+        let rig = protection_is_off();
+        rig.pc.fail_write(PROTECTION);
+
+        let why = rig.engine.turn_protection_on().unwrap_err();
+
+        assert!(why.to_string().contains("told that writing"), "{why}");
+        assert!(rig.pc.writes().is_empty());
+        assert_eq!(rig.pc.protection(), Readiness::ProtectionOff);
+        assert!(rig.open().is_empty());
+        assert_eq!(
+            rig.story(),
+            says(&[("intent", SystemProtection), ("failed", SystemProtection)])
+        );
+        let history = rig.journal().read().unwrap().history;
+        let Entry::Outcome {
+            applied: false,
+            detail: Some(detail),
+            ..
+        } = &history[1]
+        else {
+            panic!("the outcome should say why, not {:?}", history[1]);
+        };
+        assert_eq!(*detail, why.to_string());
+        assert!(!rig.view().rows.iter().any(|row| row.id == SystemProtection));
+
+        // It can be tried again.
+        rig.pc.clear_failures();
+        rig.engine.turn_protection_on().unwrap();
+        assert_eq!(rig.state(SystemProtection), Applied);
+    }
+
+    #[test]
+    fn a_journal_that_wont_take_the_intent_turns_nothing_on() {
+        // Refusing the lock, then taking the lock and refusing the entry.
+        for checks_left in 0..2 {
+            let rig = protection_is_off();
+            let dying = Engine::new(rig.pc.clone(), failing_journal(&rig.folder(), checks_left));
+
+            let why = dying.turn_protection_on().unwrap_err();
+
+            assert!(why.to_string().contains("stopped working"), "{why}");
+            assert!(rig.pc.writes().is_empty(), "with {checks_left} looks left");
+            assert_eq!(rig.pc.protection(), Readiness::ProtectionOff);
+        }
+    }
+
+    #[test]
+    fn turning_protection_on_while_another_window_changes_settings_turns_nothing_on() {
+        let rig = protection_is_off();
+        let other = rig.journal();
+        let held = other.lock().unwrap();
+
+        let why = rig.engine.turn_protection_on().unwrap_err();
+
+        assert!(why.to_string().contains("another window"), "{why}");
+        assert!(rig.pc.writes().is_empty());
+        drop(held);
+    }
+
+    #[test]
+    fn protection_that_is_already_on_gets_no_record_saying_it_was_off() {
+        // The record's undo deletes the drive's restore points, so it must not say "off" about protection that was on.
+        let rig = Rig::on(arranged());
+        assert_eq!(rig.pc.protection(), Readiness::Ready);
+
+        rig.engine.turn_protection_on().unwrap();
+
+        assert!(rig.pc.writes().is_empty());
+        assert!(rig.open().is_empty());
+        assert!(rig.story().is_empty());
+        assert!(!rig.view().rows.iter().any(|row| row.id == SystemProtection));
+    }
+
+    #[test]
+    fn protection_that_is_blocked_or_cant_be_read_is_left_alone() {
+        for readiness in [Readiness::BlockedByPolicy, Readiness::Unknown] {
+            let rig = Rig::on(arranged());
+            rig.pc.set_protection(readiness);
+
+            let why = rig.engine.turn_protection_on().unwrap_err();
+
+            assert!(why.to_string().contains("left it alone"), "{why}");
+            assert!(rig.pc.writes().is_empty(), "{readiness:?}");
+            assert!(rig.story().is_empty(), "{readiness:?}");
+            assert_eq!(rig.pc.protection(), readiness);
+        }
+    }
+
+    #[test]
+    fn a_crash_after_turning_protection_on_keeps_the_undo() {
+        let rig = protection_is_off();
+        rig.engine.turn_protection_on().unwrap();
+        // The outcome never reached the file.
+        rig.cut_journal(1);
+        let again = rig.restarted();
+
+        let view = again.view(&input(), Gate::Open).unwrap();
+
+        assert_eq!(
+            view.interrupted,
+            [interrupted(SystemProtection, "It finished.")]
+        );
+        assert_eq!(row_in(&view, SystemProtection).state, Applied);
+        assert!(again.undo(SystemProtection).unwrap().ok);
+        assert_eq!(rig.pc.protection(), Readiness::ProtectionOff);
+    }
+
+    // What came of the restore point.
+
+    #[test]
+    fn the_restore_outcome_is_in_the_report() {
+        for (outcome, line) in [
+            (
+                RestoreOutcome::Created { sequence: 57 },
+                "Restore point created (#57)",
+            ),
+            (
+                RestoreOutcome::Reused {
+                    sequence: 56,
+                    time: "2026-11-02T09:00:00+01:00".to_string(),
+                },
+                "Restore point reused from 2026-11-02 09:00 (#56)",
+            ),
+            (RestoreOutcome::Skipped, "Restore point skipped"),
+            (
+                RestoreOutcome::Failed {
+                    reason: "System Protection is off.".to_string(),
+                },
+                "Restore point failed: System Protection is off.",
+            ),
+        ] {
+            let rig = Rig::on(arranged());
+
+            rig.engine.record_restore(&outcome).unwrap();
+
+            assert_eq!(rig.story(), ["restore point"]);
+            assert!(rig.open().is_empty(), "it belongs to no record");
+            let report = rig.engine.report("0.5.0", 26200, WHEN);
+            assert!(report.contains(line), "{line} isn't in {report}");
+            let history = rig.journal().read().unwrap().history;
+            let Entry::RestorePoint { at, outcome: kept } = &history[0] else {
+                panic!("a restore point, not {:?}", history[0]);
+            };
+            assert_eq!(*kept, outcome);
+            assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok(), "{at}");
+        }
+    }
+
+    #[test]
+    fn a_restore_outcome_the_journal_wont_take_is_an_error() {
+        let rig = Rig::on(arranged());
+        let dying = Engine::new(rig.pc.clone(), failing_journal(&rig.folder(), 0));
+        assert!(dying.record_restore(&RestoreOutcome::Skipped).is_err());
+        assert!(!rig.folder().join("journal.jsonl").exists());
+    }
+
+    #[test]
+    fn recording_a_restore_outcome_takes_the_journals_lock() {
+        let rig = Rig::on(arranged());
+        let other = rig.journal();
+        let held = other.lock().unwrap();
+        let why = rig
+            .engine
+            .record_restore(&RestoreOutcome::Skipped)
+            .unwrap_err();
+        assert!(why.to_string().contains("another window"), "{why}");
+        drop(held);
+        rig.engine.record_restore(&RestoreOutcome::Skipped).unwrap();
+        assert_eq!(rig.story(), ["restore point"]);
     }
 
     #[test]

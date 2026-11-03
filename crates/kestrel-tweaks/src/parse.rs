@@ -3,9 +3,11 @@
 //! `kestrel_probe::parse` is for the probe.
 use std::io;
 
+use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
+
 use crate::journal::is_guid;
 use crate::power::KESTREL_PLAN_GUID;
-use crate::system::Read;
+use crate::system::{Read, Readiness};
 use crate::targets::{
     ALLOW_AUTO_GAME_MODE, ALLOW_GAME_DVR, APP_CAPTURE, MOUSE_SPEED, MOUSE_THRESHOLD_1,
     MOUSE_THRESHOLD_2,
@@ -15,6 +17,8 @@ use crate::targets::{
 pub const REG_SZ: u32 = 1;
 /// The registry's number for a DWORD value.
 pub const REG_DWORD: u32 = 4;
+/// The registry's number for a list of strings.
+pub const REG_MULTI_SZ: u32 = 7;
 
 /// Values Kestrel only ever reads. `AppCaptureEnabled` would also stop manual recording and screenshots, and
 /// `GameDVR_Enabled`, which other tools write beside it, does something the research couldn't pin down. `AllowGameDVR`
@@ -146,6 +150,142 @@ pub fn mouse_strings(values: [i32; 3]) -> [(&'static str, String); 3] {
     ]
 }
 
+/// Whether System Protection is on for the Windows drive, from what can be read about it. `disable_sr` and
+/// `disable_config` are the policy values, `clients` is the type and bytes of the `SPP\Clients` value that lists the
+/// protected volumes, and `volume` is the Windows drive's volume name, if Windows gave it.
+///
+/// Only a policy that is set blocks, whatever became of the other reads. A policy that couldn't be read isn't no
+/// policy, and a list or a volume that couldn't be read says nothing, so those are `Unknown`. So is a value that isn't
+/// there: only a list that can be read and doesn't name the drive is `ProtectionOff`.
+pub fn readiness(
+    disable_sr: &Read<u32>,
+    disable_config: &Read<u32>,
+    clients: &Read<(u32, Vec<u8>)>,
+    volume: Option<&str>,
+) -> Readiness {
+    let policies = [disable_sr, disable_config];
+    if policies
+        .iter()
+        .any(|read| matches!(read, Read::Value(value) if *value != 0))
+    {
+        return Readiness::BlockedByPolicy;
+    }
+    if policies.iter().any(|read| matches!(read, Read::Failed(_))) {
+        return Readiness::Unknown;
+    }
+    let (Some(guid), Read::Value((kind, bytes))) = (volume.and_then(volume_guid), clients) else {
+        return Readiness::Unknown;
+    };
+    let Some(list) = protected_volumes(*kind, bytes) else {
+        return Readiness::Unknown;
+    };
+    let guid = guid.to_ascii_lowercase();
+    if list.to_ascii_lowercase().contains(&guid) {
+        Readiness::Ready
+    } else {
+        Readiness::ProtectionOff
+    }
+}
+
+/// The text of the value that lists the protected volumes, or None if it isn't text. On a real PC it is a list of
+/// strings, each like `\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416}\:(C%3A)`, which comes out here with terminators
+/// between them. Only whether a volume's GUID is in it matters, so a plain string reads the same, however it's
+/// separated.
+fn protected_volumes(kind: u32, bytes: &[u8]) -> Option<String> {
+    matches!(kind, REG_SZ | REG_MULTI_SZ)
+        .then(|| text_from_wide_bytes(bytes))
+        .flatten()
+}
+
+/// The GUID in a volume name like `\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416}\`, without its braces.
+pub fn volume_guid(volume_name: &str) -> Option<&str> {
+    let (_, rest) = volume_name.split_once('{')?;
+    let (guid, _) = rest.split_once('}')?;
+    is_guid(guid).then_some(guid)
+}
+
+/// The drive the Windows folder is on, as `C:\`, which is how `SystemRestore` and `GetVolumeNameForVolumeMountPoint`
+/// want a drive. Microsoft says the folder has no trailing backslash and may be just `C:`.
+pub fn system_drive(windows_folder: &str) -> Option<String> {
+    let mut chars = windows_folder.chars();
+    let (letter, colon) = (chars.next()?, chars.next()?);
+    (letter.is_ascii_alphabetic() && colon == ':').then(|| format!("{letter}:\\"))
+}
+
+/// A restore point's description as `RESTOREPOINTINFOW` holds it: wide text and its terminator in 256 units. A longer
+/// one is cut, and never through the middle of a character.
+pub fn restore_description(text: &str) -> [u16; 256] {
+    let mut units = [0u16; 256];
+    for (slot, unit) in units[..255].iter_mut().zip(text.encode_utf16()) {
+        *slot = unit;
+    }
+    if (0xD800..0xDC00).contains(&units[254]) {
+        units[254] = 0;
+    }
+    units
+}
+
+/// A time as WMI spells it, like `20261102090000.000000-000` (date and time, microseconds, minutes from UTC), as the
+/// journal spells times: RFC 3339 in this PC's own time, which is what the report shows the first 16 characters of.
+/// Text that isn't such a time comes back as it is.
+pub fn local_time(wmi_time: &str) -> String {
+    match instant_of_wmi_time(wmi_time) {
+        Some(instant) => instant.with_timezone(&chrono::Local).to_rfc3339(),
+        None => wmi_time.to_string(),
+    }
+}
+
+fn instant_of_wmi_time(text: &str) -> Option<DateTime<Utc>> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 25 || bytes[14] != b'.' {
+        return None;
+    }
+    let sign = match bytes[21] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let number = |digits: &[u8]| {
+        digits.iter().all(u8::is_ascii_digit).then(|| {
+            digits
+                .iter()
+                .fold(0u32, |number, digit| number * 10 + u32::from(digit - b'0'))
+        })
+    };
+    let date = NaiveDate::from_ymd_opt(
+        i32::try_from(number(&bytes[0..4])?).ok()?,
+        number(&bytes[4..6])?,
+        number(&bytes[6..8])?,
+    )?;
+    let as_written = date.and_hms_micro_opt(
+        number(&bytes[8..10])?,
+        number(&bytes[10..12])?,
+        number(&bytes[12..14])?,
+        number(&bytes[15..21])?,
+    )?;
+    // The offset is how far the written time is ahead of UTC.
+    let ahead = TimeDelta::try_minutes(sign * i64::from(number(&bytes[22..25])?))?;
+    Some(as_written.checked_sub_signed(ahead)?.and_utc())
+}
+
+/// What `SystemRestore.Enable` or `Disable` answered. Microsoft says zero is success and anything else is an error
+/// code, whose number the person gets.
+pub fn method_answer(method: &str, answer: u32) -> Result<(), String> {
+    if answer == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Windows refused: SystemRestore.{method} answered {}.",
+            hex(answer)
+        ))
+    }
+}
+
+/// An error code in the form Microsoft's lists use.
+pub fn hex(code: u32) -> String {
+    format!("0x{code:08X}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,7 +296,6 @@ mod tests {
     const REG_EXPAND_SZ: u32 = 2;
     const REG_BINARY: u32 = 3;
     const REG_DWORD_BIG_ENDIAN: u32 = 5;
-    const REG_MULTI_SZ: u32 = 7;
     const REG_QWORD: u32 = 11;
     const BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
 
@@ -457,6 +596,407 @@ mod tests {
                 ("MouseThreshold1", "6".to_string()),
                 ("MouseThreshold2", "10".to_string()),
             ]
+        );
+    }
+
+    // System Protection.
+
+    const VOLUME: &str = r"\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416}\";
+    const OTHER_VOLUME: &str = r"\\?\Volume{7e5b5ffd-0000-0000-0000-100000000000}\:(D%3A)";
+
+    /// The value as a real PC holds it, from the REG file published for turning System Protection on: a list of strings
+    /// with one entry, `\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416}\:(C%3A)`.
+    const CLIENTS_FROM_A_PC: &[u8] = &[
+        0x5c, 0x00, 0x5c, 0x00, 0x3f, 0x00, 0x5c, 0x00, 0x56, 0x00, 0x6f, 0x00, 0x6c, 0x00, 0x75,
+        0x00, 0x6d, 0x00, 0x65, 0x00, 0x7b, 0x00, 0x61, 0x00, 0x30, 0x00, 0x31, 0x00, 0x36, 0x00,
+        0x30, 0x00, 0x31, 0x00, 0x32, 0x00, 0x65, 0x00, 0x2d, 0x00, 0x39, 0x00, 0x62, 0x00, 0x63,
+        0x00, 0x33, 0x00, 0x2d, 0x00, 0x34, 0x00, 0x64, 0x00, 0x37, 0x00, 0x31, 0x00, 0x2d, 0x00,
+        0x38, 0x00, 0x39, 0x00, 0x66, 0x00, 0x31, 0x00, 0x2d, 0x00, 0x31, 0x00, 0x37, 0x00, 0x36,
+        0x00, 0x35, 0x00, 0x63, 0x00, 0x66, 0x00, 0x62, 0x00, 0x31, 0x00, 0x61, 0x00, 0x34, 0x00,
+        0x31, 0x00, 0x36, 0x00, 0x7d, 0x00, 0x5c, 0x00, 0x3a, 0x00, 0x28, 0x00, 0x43, 0x00, 0x25,
+        0x00, 0x33, 0x00, 0x41, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// A list of strings as the registry holds it: each one terminated, and one terminator more.
+    fn multi_string(entries: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for entry in entries {
+            bytes.extend(wide_bytes(entry));
+        }
+        bytes.extend([0, 0]);
+        bytes
+    }
+
+    fn clients_with(entries: &[&str]) -> Read<(u32, Vec<u8>)> {
+        Read::Value((REG_MULTI_SZ, multi_string(entries)))
+    }
+
+    /// What the System Protection reads say with no policy set and the Windows drive's volume known.
+    fn with_no_policy(clients: &Read<(u32, Vec<u8>)>) -> Readiness {
+        readiness(&Read::Absent, &Read::Absent, clients, Some(VOLUME))
+    }
+
+    #[test]
+    fn the_value_from_a_real_pc_says_its_drive_is_protected() {
+        let clients = Read::Value((REG_MULTI_SZ, CLIENTS_FROM_A_PC.to_vec()));
+        assert_eq!(with_no_policy(&clients), Readiness::Ready);
+        // That is a list of strings, which the policy reads refuse as "not a string value".
+        assert!(matches!(
+            string_value("value", REG_MULTI_SZ, CLIENTS_FROM_A_PC),
+            Read::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn a_drive_on_the_list_is_ready_whatever_else_is_on_it() {
+        let entry = r"\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416}\:(C%3A)";
+        for clients in [
+            clients_with(&[entry]),
+            clients_with(&[OTHER_VOLUME, entry]),
+            clients_with(&[entry, OTHER_VOLUME]),
+            // In one string, however it is separated.
+            Read::Value((
+                REG_SZ,
+                wide_bytes(&format!("{OTHER_VOLUME};some text;{entry};")),
+            )),
+        ] {
+            assert_eq!(with_no_policy(&clients), Readiness::Ready);
+        }
+    }
+
+    #[test]
+    fn letter_case_doesnt_hide_a_drive() {
+        let upper = r"\\?\VOLUME{A016012E-9BC3-4D71-89F1-1765CFB1A416}\:(C%3A)";
+        assert_eq!(
+            with_no_policy(&clients_with(&[upper])),
+            Readiness::Ready,
+            "the list in upper case"
+        );
+        let entry = r"\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416}\:(C%3A)";
+        let volume = r"\\?\Volume{A016012E-9BC3-4D71-89F1-1765CFB1A416}\";
+        assert_eq!(
+            readiness(
+                &Read::Absent,
+                &Read::Absent,
+                &clients_with(&[entry]),
+                Some(volume)
+            ),
+            Readiness::Ready,
+            "the volume in upper case"
+        );
+    }
+
+    #[test]
+    fn a_list_without_the_drive_is_protection_off() {
+        for clients in [
+            clients_with(&[OTHER_VOLUME]),
+            // What's left when nothing is listed, and what some guides have people write there.
+            clients_with(&[]),
+            Read::Value((REG_MULTI_SZ, Vec::new())),
+            clients_with(&["1"]),
+            Read::Value((REG_SZ, wide_bytes(""))),
+        ] {
+            assert_eq!(with_no_policy(&clients), Readiness::ProtectionOff);
+        }
+    }
+
+    #[test]
+    fn a_nearly_matching_volume_is_another_volume() {
+        let nearly = r"\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a417}\:(C%3A)";
+        assert_eq!(
+            with_no_policy(&clients_with(&[nearly])),
+            Readiness::ProtectionOff
+        );
+    }
+
+    #[test]
+    fn with_no_readable_list_nobody_can_say() {
+        for clients in [
+            Read::Absent,
+            Read::Failed("Windows wouldn't read it".to_string()),
+            // A value of another type, and bytes that aren't wide text.
+            Read::Value((REG_DWORD, 1u32.to_le_bytes().to_vec())),
+            Read::Value((REG_BINARY, multi_string(&[VOLUME]))),
+            Read::Value((REG_MULTI_SZ, vec![0x41, 0, 0x42])),
+            Read::Value((REG_MULTI_SZ, vec![0x3D, 0xD8, 0, 0])),
+        ] {
+            assert_eq!(with_no_policy(&clients), Readiness::Unknown, "{clients:?}");
+        }
+    }
+
+    #[test]
+    fn with_no_volume_nobody_can_say() {
+        let listed = clients_with(&[VOLUME]);
+        for volume in [
+            None,
+            Some(""),
+            Some("C:\\"),
+            Some(r"\\?\Volume{not-a-guid}\"),
+            Some(r"\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416\"),
+        ] {
+            assert_eq!(
+                readiness(&Read::Absent, &Read::Absent, &listed, volume),
+                Readiness::Unknown,
+                "{volume:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_policy_that_is_set_blocks() {
+        let listed = clients_with(&[VOLUME]);
+        let set = Read::Value(1);
+        let off = Read::Value(0);
+        for (disable_sr, disable_config) in [
+            (&set, &Read::Absent),
+            (&Read::Absent, &set),
+            (&set, &set),
+            (&set, &off),
+            (&off, &Read::Value(2)),
+        ] {
+            assert_eq!(
+                readiness(disable_sr, disable_config, &listed, Some(VOLUME)),
+                Readiness::BlockedByPolicy
+            );
+        }
+        for (disable_sr, disable_config) in [
+            (&Read::Absent, &Read::Absent),
+            (&off, &Read::Absent),
+            (&Read::Absent, &off),
+            (&off, &off),
+        ] {
+            assert_eq!(
+                readiness(disable_sr, disable_config, &listed, Some(VOLUME)),
+                Readiness::Ready
+            );
+        }
+    }
+
+    #[test]
+    fn a_policy_that_cant_be_read_is_not_no_policy() {
+        let listed = clients_with(&[VOLUME]);
+        let failed = Read::Failed("Windows wouldn't read it".to_string());
+        assert_eq!(
+            readiness(&failed, &Read::Absent, &listed, Some(VOLUME)),
+            Readiness::Unknown
+        );
+        assert_eq!(
+            readiness(&Read::Value(0), &failed, &listed, Some(VOLUME)),
+            Readiness::Unknown
+        );
+        // Either one set is enough, whatever became of the other, and it doesn't need the list or the volume.
+        assert_eq!(
+            readiness(&failed, &Read::Value(1), &listed, Some(VOLUME)),
+            Readiness::BlockedByPolicy
+        );
+        assert_eq!(
+            readiness(&Read::Value(1), &failed, &Read::Absent, None),
+            Readiness::BlockedByPolicy
+        );
+    }
+
+    #[test]
+    fn a_volumes_guid_is_what_is_between_its_braces() {
+        assert_eq!(
+            volume_guid(VOLUME),
+            Some("a016012e-9bc3-4d71-89f1-1765cfb1a416")
+        );
+        for bad in [
+            "",
+            "C:\\",
+            r"\\?\Volume{}\",
+            r"\\?\Volume{a016012e}\",
+            r"\\?\Volume{a016012e-9bc3-4d71-89f1-1765cfb1a416",
+            r"\\?\Volume\a016012e-9bc3-4d71-89f1-1765cfb1a416\",
+        ] {
+            assert_eq!(volume_guid(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_windows_folders_drive_is_its_letter_and_a_backslash() {
+        for (folder, drive) in [
+            (r"C:\Windows", r"C:\"),
+            (r"D:\WINDOWS", r"D:\"),
+            (r"c:\windows", r"c:\"),
+            // Windows installed in the root, as Microsoft says it's then spelled.
+            ("C:", r"C:\"),
+            (r"C:\", r"C:\"),
+        ] {
+            assert_eq!(system_drive(folder).as_deref(), Some(drive), "{folder}");
+        }
+        for bad in [
+            "",
+            "C",
+            r"\\server\share",
+            r"\Windows",
+            r"1:\Windows",
+            "é:\\",
+        ] {
+            assert_eq!(system_drive(bad), None, "{bad}");
+        }
+    }
+
+    // Restore points.
+
+    #[test]
+    fn a_description_is_terminated_wide_text() {
+        let units = restore_description("Kestrel");
+        assert_eq!(&units[..8], &wide("Kestrel")[..]);
+        assert!(units[7..].iter().all(|&unit| unit == 0));
+    }
+
+    #[test]
+    fn kestrels_description_fits_whole() {
+        let text = crate::restore::DESCRIPTION;
+        let units = restore_description(text);
+        let end = units.iter().position(|&unit| unit == 0).unwrap();
+        assert_eq!(String::from_utf16(&units[..end]).unwrap(), text);
+    }
+
+    #[test]
+    fn a_description_too_long_is_cut_and_still_terminated() {
+        let units = restore_description(&"x".repeat(300));
+        assert_eq!(units.len(), 256);
+        assert!(units[..255].iter().all(|&unit| unit == u16::from(b'x')));
+        assert_eq!(units[255], 0);
+    }
+
+    #[test]
+    fn a_description_is_never_cut_through_a_character() {
+        // 254 units and a character of two: the second half wouldn't fit, and half of one isn't text.
+        let text = format!("{}😀", "x".repeat(254));
+        let units = restore_description(&text);
+        let end = units.iter().position(|&unit| unit == 0).unwrap();
+        assert_eq!(end, 254);
+        assert!(String::from_utf16(&units[..end]).is_ok());
+        // With room for it, it stays.
+        let text = format!("{}😀", "x".repeat(253));
+        let units = restore_description(&text);
+        assert_eq!(String::from_utf16(&units[..255]).unwrap(), text);
+    }
+
+    /// The instant a time of the journal's kind stands for, and that it is spelled in this PC's own time.
+    fn instant_of(said: &str) -> chrono::DateTime<chrono::Utc> {
+        let parsed = chrono::DateTime::parse_from_rfc3339(said)
+            .unwrap_or_else(|why| panic!("{said} isn't RFC 3339: {why}"));
+        let at = parsed.with_timezone(&chrono::Utc);
+        assert_eq!(said, at.with_timezone(&chrono::Local).to_rfc3339());
+        at
+    }
+
+    fn utc(hour: u32, minute: u32) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc
+            .with_ymd_and_hms(2026, 11, 2, hour, minute, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_wmi_time_in_utc_becomes_this_pcs_time() {
+        assert_eq!(
+            instant_of(&local_time("20261102090000.000000-000")),
+            utc(9, 0)
+        );
+        assert_eq!(
+            instant_of(&local_time("20261102090000.000000+000")),
+            utc(9, 0)
+        );
+    }
+
+    #[test]
+    fn a_wmi_times_offset_is_minutes_from_utc_and_it_counts() {
+        // Nine in the morning an hour east of UTC is eight in UTC, and five hours west of it is two in the afternoon.
+        assert_eq!(
+            instant_of(&local_time("20261102090000.000000+060")),
+            utc(8, 0)
+        );
+        assert_eq!(
+            instant_of(&local_time("20261102090000.000000-300")),
+            utc(14, 0)
+        );
+        assert_eq!(
+            instant_of(&local_time("20261102090000.000000+330")),
+            utc(3, 30)
+        );
+    }
+
+    #[test]
+    fn a_wmi_time_keeps_its_fraction_of_a_second() {
+        let said = local_time("20261102090000.250000-000");
+        let at = instant_of(&said);
+        assert_eq!(at.timestamp_subsec_micros(), 250_000);
+    }
+
+    #[test]
+    fn the_report_shows_a_wmi_times_first_sixteen_characters_as_this_pcs_time() {
+        let said = local_time("20261102090000.000000-000");
+        let wanted = utc(9, 0)
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%dT%H:%M")
+            .to_string();
+        assert_eq!(&said[..16], wanted);
+    }
+
+    #[test]
+    fn what_isnt_a_wmi_time_comes_back_as_it_is() {
+        for odd in [
+            "",
+            "not a time",
+            "20261102090000",
+            "20261102090000.000000",
+            // One character short and one too long.
+            "20261102090000.000000-00",
+            "20261102090000.000000-0000",
+            // Fields that can't be.
+            "20261302090000.000000-000",
+            "20260230090000.000000-000",
+            "20261102250000.000000-000",
+            "20261102096000.000000-000",
+            "20261102090060.000000-000",
+            // The wildcards the format allows, and things that only look like it.
+            "2026****090000.000000-000",
+            "20261102090000.******+***",
+            "+0261102090000.000000-000",
+            "20261102090000,000000-000",
+            "20261102090000.000000*000",
+            "20261102090000.000000-+00",
+            // The right length in bytes, with a character across where the fields are cut.
+            "202611020900é.000000-000",
+            "2026110209000é.000000-00",
+            "😀😀😀😀😀😀.",
+        ] {
+            assert_eq!(local_time(odd), odd);
+        }
+    }
+
+    #[test]
+    fn a_wmi_time_at_the_edge_of_the_calendar_doesnt_panic() {
+        // Whether these parse doesn't matter. There is no restore point from then, and no one may crash on seeing one.
+        for edge in [
+            "00000101000000.000000+999",
+            "00000101000000.000000-999",
+            "99991231235959.999999-999",
+            "99991231235959.999999+999",
+        ] {
+            assert!(!local_time(edge).is_empty(), "{edge}");
+        }
+    }
+
+    #[test]
+    fn a_wmi_methods_answer_of_zero_is_success() {
+        assert_eq!(method_answer("Enable", 0), Ok(()));
+    }
+
+    #[test]
+    fn any_other_answer_is_a_failure_with_its_number() {
+        assert_eq!(
+            method_answer("Enable", 0x8007_0422),
+            Err("Windows refused: SystemRestore.Enable answered 0x80070422.".to_string())
+        );
+        assert_eq!(
+            method_answer("Disable", 1717),
+            Err("Windows refused: SystemRestore.Disable answered 0x000006B5.".to_string())
         );
     }
 }

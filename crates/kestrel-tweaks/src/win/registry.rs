@@ -38,7 +38,8 @@ fn user_value(sid: &str, key: &str, name: &str) -> Read<RawValue> {
     raw_value(HKEY_USERS, &user_key_path(sid, key), key, name)
 }
 
-fn machine_value(key: &str, name: &str) -> Read<RawValue> {
+/// A value under `HKEY_LOCAL_MACHINE` as it is held, for the one that isn't a DWORD or a plain string.
+pub(super) fn machine_value(key: &str, name: &str) -> Read<RawValue> {
     raw_value(HKEY_LOCAL_MACHINE, key, key, name)
 }
 

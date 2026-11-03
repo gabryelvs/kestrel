@@ -1,5 +1,6 @@
 //! `System` on real Windows, and the journal's folder. Everything here is only type-checked on a Mac: the first thing
-//! to run it is the Windows job on GitHub (its tests, then the `kestrel-tweak-roundtrip` binary).
+//! to run it is the Windows job on GitHub (its tests, then the `kestrel-tweak-roundtrip` binary). Restore points and
+//! System Protection only get their reads run there, because GitHub's machine has no System Restore (see `restore`).
 use std::io;
 
 use kestrel_probe::account::{account, Account};
@@ -12,11 +13,12 @@ mod folder;
 mod mouse;
 mod power;
 mod registry;
+mod restore;
 
 pub(crate) use folder::program_data;
 pub use folder::AdminFolder;
-
-const NO_PROTECTION_YET: &str = "This version of Kestrel can't change System Protection yet.";
+pub use restore::helper_reads;
+pub(crate) use restore::make_point_here;
 
 /// This PC. Its reads change nothing, so the engine can call them at any moment.
 #[derive(Debug, Default)]
@@ -175,21 +177,17 @@ impl System for WinSystem {
     }
 
     fn protection(&self) -> Readiness {
-        Readiness::Unknown
+        restore::protection()
     }
 
+    /// Comes back once System Protection reads on. It's safe on any thread: the WMI call has a thread of its own.
     fn turn_protection_on(&self) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            NO_PROTECTION_YET,
-        ))
+        restore::turn_on()
     }
 
+    /// Comes back once System Protection reads off. It's safe on any thread: the WMI call has a thread of its own.
     fn turn_protection_off(&self) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            NO_PROTECTION_YET,
-        ))
+        restore::turn_off()
     }
 }
 
@@ -208,14 +206,5 @@ mod tests {
     #[test]
     fn with_no_stand_in_windows_says_who_is_signed_in() {
         assert_eq!(WinSystem::new().account(), account());
-    }
-
-    #[test]
-    fn system_protection_waits_for_its_own_task() {
-        let system = WinSystem::new();
-        assert_eq!(system.protection(), Readiness::Unknown);
-        for result in [system.turn_protection_on(), system.turn_protection_off()] {
-            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
-        }
     }
 }

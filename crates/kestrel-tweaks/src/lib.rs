@@ -1,6 +1,7 @@
 //! Kestrel tweaks: the Essential tier's catalog, its plan rules, the journal and the undo decisions. Everything that
-//! touches Windows goes through the `System` trait, so all of it is tested on any OS against `fake::FakeSystem`. The
-//! real Windows behind that trait is in `win`, whose pure half, `parse`, is tested on any OS too.
+//! touches Windows goes through the `System` trait, or for a restore point `restore::RestorePoints`, so all of it is
+//! tested on any OS against `fake::FakeSystem`. The real Windows behind those traits is in `win`, whose pure half,
+//! `parse`, is tested on any OS too.
 pub mod catalog;
 pub mod engine;
 pub mod fake;
@@ -10,6 +11,7 @@ pub mod parse;
 pub mod plan;
 pub mod power;
 pub mod report;
+pub mod restore;
 pub mod system;
 pub mod targets;
 pub mod tokens;
@@ -23,6 +25,7 @@ pub use engine::{Engine, Gate, ItemOutcome, PreviewView, TweaksView};
 pub use folder::journal_file;
 pub use journal::RestoreOutcome;
 pub use plan::{PlanInput, PreviewItem, Row, RowState, ValueChange};
+pub use restore::{helper_main, run_helper, RestoreChoice};
 pub use system::{Read, Readiness, System};
 
 /// This PC: the real Windows on Windows, and elsewhere a pretend PC on stock Balanced, so the app can be developed
