@@ -9,15 +9,12 @@ import type { Report } from './types';
 const sample = mock as unknown as Report;
 
 describe('the sample report', () => {
-  it('is schema 2 with all 31 checks, its later-stage fixes in the new stage order', () => {
+  it('is schema 2 with all 31 checks, its power plan fixed in the Tweaks tab and its adapter power in stage 6', () => {
     expect(sample.snapshot.schemaVersion).toBe(2);
     expect(sample.findings).toHaveLength(31);
-    const stage = (id: string) => {
-      const fix = sample.findings.find((f) => f.id === id)?.fix;
-      return fix?.kind === 'later-stage' ? fix.stage : null;
-    };
-    expect(stage('power-plan')).toBe(STAGE.tweaks);
-    expect(stage('adapter-power')).toBe(STAGE.competitive);
+    const fix = (id: string) => sample.findings.find((f) => f.id === id)?.fix;
+    expect(fix('power-plan')).toEqual({ kind: 'tweak', tweak: 'power-plan' });
+    expect(fix('adapter-power')).toEqual({ kind: 'later-stage', stage: STAGE.competitive });
   });
 
   it('fills the Hardware tab and Copy specs from what the probe prints', () => {

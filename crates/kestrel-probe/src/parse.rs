@@ -51,6 +51,26 @@ pub fn startup_entry_enabled(approved: Option<&[u8]>) -> bool {
         .is_none_or(|first| first % 2 == 0)
 }
 
+/// A key in one account's registry hive. `HKEY_USERS` holds a hive per signed-in account, named by its SID, with the
+/// keys `HKEY_CURRENT_USER` would show for that account; `path` is written as under `HKEY_CURRENT_USER`
+/// (`Software\Microsoft\GameBar`). This is the path to open under `HKEY_USERS`.
+pub fn user_key_path(sid: &str, path: &str) -> String {
+    format!("{sid}\\{path}")
+}
+
+/// A session's user in the form `LookupAccountNameW` takes: `DOMAIN\user`, or the bare user name when the session
+/// names no domain. None when no one is signed in to the session (its user name is empty).
+pub fn account_name(domain: &str, user: &str) -> Option<String> {
+    if user.is_empty() {
+        return None;
+    }
+    Some(if domain.is_empty() {
+        user.to_string()
+    } else {
+        format!("{domain}\\{user}")
+    })
+}
+
 /// MSFT_NetAdapter.NdisPhysicalMedium: 14 = 802.3 Ethernet, 9 = native 802.11 Wi-Fi.
 pub fn net_kind(ndis_physical_medium: u64) -> NetKind {
     match ndis_physical_medium {
@@ -1583,5 +1603,26 @@ mod tests {
             hardware::chipset(chipset_board_name(FormFactor::Laptop, board), None),
             None
         );
+    }
+
+    #[test]
+    fn user_key_path_joins_sid_and_key() {
+        assert_eq!(
+            user_key_path("S-1-5-21-1-1001", r"Software\Microsoft\GameBar"),
+            r"S-1-5-21-1-1001\Software\Microsoft\GameBar"
+        );
+    }
+
+    #[test]
+    fn a_session_user_is_named_by_domain_and_name() {
+        assert_eq!(
+            account_name("DESKTOP-4F7K2", "gabs").as_deref(),
+            Some(r"DESKTOP-4F7K2\gabs")
+        );
+        // With no domain given, Windows looks the bare name up on this PC and then in its domain.
+        assert_eq!(account_name("", "gabs").as_deref(), Some("gabs"));
+        // No user (the sign-in screen, or a session nobody is signed in to) is no account.
+        assert_eq!(account_name("DESKTOP-4F7K2", ""), None);
+        assert_eq!(account_name("", ""), None);
     }
 }

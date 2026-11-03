@@ -116,6 +116,11 @@ pub struct Context {
     pub windows_build: u32,
     pub display_hz: Option<u32>,
     pub game_settings: Option<ValorantSettings>,
+    /// The tweaks that were active when the benchmark ran, as ids (`TweakId::as_str`: "power-plan", "game-mode"). Plain
+    /// strings, not an enum, so a build that doesn't know an id still loads the file and keeps it. None means unknown,
+    /// as in a benchmark saved before stage 5 or one that couldn't read the tweaks' journal; that is not the same as
+    /// Some(empty), which means no tweaks.
+    pub applied_tweaks: Option<Vec<String>>,
 }
 
 /// One saved benchmark.
@@ -188,6 +193,14 @@ pub struct Comparison {
     pub metrics: Vec<MetricDelta>,
     /// VALORANT settings that differ between the two, counted as `settings::differences` counts them.
     pub settings_differ: Vec<String>,
-    /// Different game or route version: not compared, `metrics` is empty.
+    /// Tweak ids active in the current benchmark but not in the baseline, in the order the current list has them.
+    /// Empty when either side has no list (`Context::applied_tweaks` is None): an unknown list compares nothing.
+    pub tweaks_added: Vec<String>,
+    /// Tweak ids active in the baseline but not in the current benchmark, in the order the baseline lists them. Empty
+    /// when either side has no list.
+    pub tweaks_removed: Vec<String>,
+    /// The power plan's name on each side, [baseline, current], when both recorded one and the names differ.
+    pub power_plan_change: Option<[String; 2]>,
+    /// Different game or route version: not compared. `metrics` and every list above are empty.
     pub route_mismatch: bool,
 }

@@ -180,6 +180,17 @@ impl Controller {
         })
     }
 
+    /// Whether a session still holds the PC: armed and waiting, capturing, a flagged run waiting for the owner, or all
+    /// three runs in and the result not saved yet. A session that was cancelled or failed doesn't, and neither does
+    /// one whose result is saved, so Windows may be changed again (the tweaks check this before they change it).
+    pub fn session_active(&self) -> bool {
+        self.lock().as_ref().is_some_and(|live| {
+            let session = &live.session;
+            !session.is_over()
+                || (session.phase() == &Phase::Done && session.view().result_id.is_none())
+        })
+    }
+
     /// Arms a session for `profile_id`. `context` describes the PC (from the last scan).
     pub fn start(&self, profile_id: &str, context: Context) -> Result<BenchState, String> {
         if self.busy() {
@@ -1440,5 +1451,69 @@ mod tests {
             "and keeps its start key"
         );
         c.cancel(); // the new session is still armed: stop its game check
+    }
+
+    #[test]
+    fn a_session_is_active_until_its_result_is_ready() {
+        // Armed, capturing, cancelled.
+        let (c, _fake, _dir) = setup(Arc::new(Blocking::default()));
+        assert!(!c.session_active(), "no session");
+        c.start("valorant", Context::default()).unwrap();
+        assert!(
+            c.session_active(),
+            "armed: waiting for the game and the key"
+        );
+        c.start_pressed();
+        wait_for(&c, "the capture", |s| s.session.phase == Phase::Capturing);
+        assert!(c.session_active(), "capturing");
+        c.cancel();
+        wait_for(&c, "cancelled", |s| s.session.phase == Phase::Cancelled);
+        assert!(!c.session_active(), "a cancelled session holds nothing");
+        c.dismiss();
+        assert!(!c.session_active(), "and neither does a cleared one");
+
+        // A capture that fails ends the session too.
+        let (c, _fake, _dir) = setup(Arc::new(Failing));
+        c.start("valorant", Context::default()).unwrap();
+        c.start_pressed();
+        wait_for(&c, "the failure", |s| {
+            matches!(s.session.phase, Phase::Failed { .. })
+        });
+        assert!(!c.session_active(), "failed");
+
+        // Between runs, and while a flagged run waits for the owner.
+        let (c, fake, _dir) = setup(fast());
+        *fake.busy.lock().unwrap() = vec![("chrome.exe".into(), 30.0)];
+        c.start("valorant", Context::default()).unwrap();
+        c.start_pressed();
+        wait_for(&c, "run 1", waiting_at(1));
+        assert!(c.session_active(), "between runs");
+        c.start_pressed();
+        wait_for(&c, "review", |s| {
+            matches!(s.session.phase, Phase::Review { .. })
+        });
+        assert!(c.session_active(), "a flagged run waits for redo or keep");
+        c.cancel();
+
+        // All three runs are in: still active while the result saves, and not once it is saved.
+        let (c, fake, _dir) = setup(fast());
+        fake.hold_read.store(5, Ordering::SeqCst);
+        c.start("valorant", Context::default()).unwrap();
+        for pass in 0..4u8 {
+            wait_for(&c, "the next pass", waiting_at(pass));
+            c.start_pressed();
+        }
+        eventually("the save to start", || {
+            fake.read_held.load(Ordering::SeqCst)
+        });
+        let saving = c.state().unwrap();
+        assert_eq!(
+            (saving.session.phase, saving.session.result_id),
+            (Phase::Done, None)
+        );
+        assert!(c.session_active(), "done, and the result is still saving");
+        fake.release_read.store(true, Ordering::SeqCst);
+        wait_for(&c, "the saved result", |s| s.session.result_id.is_some());
+        assert!(!c.session_active(), "the result is ready");
     }
 }

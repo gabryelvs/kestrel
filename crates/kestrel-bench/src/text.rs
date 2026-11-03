@@ -2,6 +2,7 @@
 //! in English like the rest of the app.
 use crate::model::{Benchmark, Bottleneck, Comparison, Flag, GpuLink, MetricId, Verdict};
 use crate::profile::profile;
+use crate::result::varies_too_much;
 
 pub fn results_text(
     bench: &Benchmark,
@@ -50,6 +51,12 @@ pub fn results_text(
             ));
         }
     }
+    if varies_too_much(bench.result.spread.avg_fps) {
+        lines.push(format!(
+            "These runs vary by {:.1}%, so only big changes will count as real. Close background apps and run again.",
+            bench.result.spread.avg_fps * 100.0
+        ));
+    }
     if let Some(c) = comparison {
         let name = baseline_name.unwrap_or("the baseline");
         if c.route_mismatch {
@@ -76,6 +83,20 @@ pub fn results_text(
                 "VALORANT settings that differ from {name}: {}",
                 c.settings_differ.join(", ")
             ));
+        }
+        // Ids are printed as they were saved, so one this build doesn't know is still there.
+        let mut tweaks = Vec::new();
+        if !c.tweaks_added.is_empty() {
+            tweaks.push(format!("added {}", c.tweaks_added.join(", ")));
+        }
+        if !c.tweaks_removed.is_empty() {
+            tweaks.push(format!("removed {}", c.tweaks_removed.join(", ")));
+        }
+        if !tweaks.is_empty() {
+            lines.push(format!("Tweaks since {name}: {}", tweaks.join("; ")));
+        }
+        if let Some([was, now]) = &c.power_plan_change {
+            lines.push(format!("Power plan since {name}: {was} → {now}"));
         }
     }
     let ctx = &bench.context;
@@ -219,6 +240,7 @@ mod tests {
                 windows_build: 26200,
                 display_hz: Some(360),
                 game_settings: None,
+                applied_tweaks: None,
             },
         }
     }
@@ -277,6 +299,153 @@ mod tests {
         assert!(
             bare.ends_with("Run 2 kept despite: busy background app (chrome.exe)\nPCIe link under load: not reported"),
             "{bare}"
+        );
+    }
+
+    /// A result named "After tweaks" whose runs were `spread` apart (a fraction: 0.249 is 24.9%).
+    fn after_tweaks(spread: f64) -> Benchmark {
+        let mut later = starting_point();
+        later.name = "After tweaks".into();
+        later.result.spread.avg_fps = spread;
+        later
+    }
+
+    #[test]
+    fn copy_results_says_what_changed_and_warns_about_spread() {
+        let comparison = Comparison {
+            tweaks_added: vec!["power-plan".into()],
+            tweaks_removed: vec!["game-mode".into()],
+            power_plan_change: Some(["EXM Free Power Plan V8".into(), "Kestrel".into()]),
+            ..Default::default()
+        };
+        let text = results_text(
+            &after_tweaks(0.249),
+            Some(&comparison),
+            Some("Starting point"),
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        for line in [
+            "These runs vary by 24.9%, so only big changes will count as real. Close background apps and run again.",
+            "Tweaks since Starting point: added power-plan; removed game-mode",
+            "Power plan since Starting point: EXM Free Power Plan V8 → Kestrel",
+        ] {
+            assert!(lines.contains(&line), "no line {line:?} in:\n{text}");
+        }
+
+        // A spread of 5% has no warning line, and no tweak changes means no tweaks line.
+        let calm = results_text(
+            &after_tweaks(0.05),
+            Some(&Comparison::default()),
+            Some("Starting point"),
+        );
+        for absent in ["These runs vary", "Tweaks since", "Power plan since"] {
+            assert!(!calm.contains(absent), "{absent:?} in:\n{calm}");
+        }
+        // Exactly 10% is not over it.
+        let edge = results_text(&after_tweaks(0.10), None, None);
+        assert!(!edge.contains("These runs vary"), "{edge}");
+    }
+
+    #[test]
+    fn the_new_lines_come_after_the_runs_and_the_settings_and_before_the_pc() {
+        let mut later = after_tweaks(0.249);
+        later.runs[0].kept = true;
+        later.runs[0].flags = vec![Flag::TooShort];
+        let comparison = Comparison {
+            metrics: vec![MetricDelta {
+                metric: MetricId::AvgFps,
+                baseline: 410.0,
+                current: 430.24,
+                delta_pct: Some(4.94),
+                verdict: Verdict::Noise,
+            }],
+            settings_differ: vec!["Resolution".into()],
+            tweaks_added: vec!["power-plan".into(), "game-mode".into()],
+            tweaks_removed: vec!["gpu-preference".into()],
+            power_plan_change: Some(["EXM Free Power Plan V8".into(), "Kestrel".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            results_text(&later, Some(&comparison), Some("Starting point")),
+            "Kestrel benchmark: After tweaks (2026-10-12T21:30:05Z)\n\
+             VALORANT, route v1, 3 runs, Kestrel 0.2.0, PresentMon 2.6.0\n\
+             Average FPS 410 (spread 24.9%) | 1% low 288 | 0.1% low 201\n\
+             Stutters 0.4/min | PC latency 9.8 ms | GPU-bound\n\
+             Runs: 410 / 405 / 418 FPS\n\
+             Run 1 kept despite: too short\n\
+             Run 2 kept despite: busy background app (chrome.exe)\n\
+             These runs vary by 24.9%, so only big changes will count as real. Close background apps and run again.\n\
+             Versus Starting point: average FPS +4.9% (within noise)\n\
+             VALORANT settings that differ from Starting point: Resolution\n\
+             Tweaks since Starting point: added power-plan, game-mode; removed gpu-preference\n\
+             Power plan since Starting point: EXM Free Power Plan V8 → Kestrel\n\
+             PC: power plan EXM Free Power Plan V8, RAM 3600 MT/s, NVIDIA GeForce RTX 3060 Ti (driver 610.74), Windows build 26200, 360 Hz\n\
+             PCIe link under load: 4.0 x16"
+        );
+    }
+
+    #[test]
+    fn the_tweaks_line_names_only_what_changed_and_prints_any_id_as_written() {
+        let line = |added: &[&str], removed: &[&str]| {
+            let comparison = Comparison {
+                tweaks_added: added.iter().map(|id| id.to_string()).collect(),
+                tweaks_removed: removed.iter().map(|id| id.to_string()).collect(),
+                ..Default::default()
+            };
+            results_text(
+                &after_tweaks(0.03),
+                Some(&comparison),
+                Some("Starting point"),
+            )
+            .lines()
+            .find(|l| l.starts_with("Tweaks since"))
+            .map(str::to_string)
+        };
+        assert_eq!(
+            line(&["power-plan"], &[]).as_deref(),
+            Some("Tweaks since Starting point: added power-plan")
+        );
+        assert_eq!(
+            line(&[], &["game-mode"]).as_deref(),
+            Some("Tweaks since Starting point: removed game-mode")
+        );
+        assert_eq!(line(&[], &[]), None);
+        // An id from an older or a newer Kestrel is shown as it was saved, never dropped.
+        assert_eq!(
+            line(&["from-the-future", "system-protection"], &["Old Id"]).as_deref(),
+            Some("Tweaks since Starting point: added from-the-future, system-protection; removed Old Id")
+        );
+    }
+
+    #[test]
+    fn the_warning_is_about_this_result_and_the_comparison_lines_need_a_comparison() {
+        // No baseline to compare with: the warning stays, the lines about changes can't be there.
+        let alone = results_text(&after_tweaks(0.249), None, None);
+        assert!(
+            alone.contains("\nThese runs vary by 24.9%, so only big changes will count as real."),
+            "{alone}"
+        );
+        assert!(
+            !alone.contains("Tweaks since") && !alone.contains("Power plan since"),
+            "{alone}"
+        );
+        // A baseline with no name is still "the baseline".
+        let comparison = Comparison {
+            tweaks_added: vec!["power-plan".into()],
+            power_plan_change: Some(["Balanced".into(), "Kestrel".into()]),
+            ..Default::default()
+        };
+        let unnamed = results_text(&after_tweaks(0.03), Some(&comparison), None);
+        assert!(
+            unnamed.contains("\nTweaks since the baseline: added power-plan\nPower plan since the baseline: Balanced → Kestrel\n"),
+            "{unnamed}"
+        );
+        // The warning's number is the one in the line above it, rounded the same way.
+        let rounded = results_text(&after_tweaks(0.12349), None, None);
+        assert!(rounded.contains("(spread 12.3%)"), "{rounded}");
+        assert!(
+            rounded.contains("These runs vary by 12.3%, so"),
+            "{rounded}"
         );
     }
 

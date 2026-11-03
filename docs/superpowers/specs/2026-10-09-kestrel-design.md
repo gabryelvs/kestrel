@@ -83,6 +83,19 @@ Games, Ubisoft or Activision.
 | 77 | Copy specs | A Copy specs button on the Hardware tab copies a short plain-text summary of the PC |
 | 78 | Hardware screen design | The owner designs the Hardware screen in Claude Design from Kestrel's brief (`docs/superpowers/notes/2026-10-13-hardware-tab-brief.md`); stage 3 builds the tab in the current look and stage 9 builds the owner's design |
 
+### Decisions of 2026-11-02
+
+| # | Topic | Decision |
+| --- | --- | --- |
+| 79 | Owner's games | VALORANT only: no FiveM, Rainbow Six Siege or Warzone on the owner's PC |
+| 80–84 | Game-profile questions | Parked unanswered with stage 4 (`docs/superpowers/notes/2026-11-02-game-profiles-parked.md`) |
+| 85 | Stage 4 | Postponed until someone can test the game profiles. Stage 5 is next. FiveM detection and rule 61 arrive before stage 6, the first stage that touches services. NVIDIA profiles for other games and FiveM/GTA V settings wait with the profiles |
+| 86 | Testers | No friend can test the other games for now |
+| 87 | Another tool's power plan | Kestrel's plan is offered unticked, the preview shows what would change, and Kestrel suggests measuring before and after. Undo returns to the old plan |
+| 88 | Uninstall | The uninstaller asks whether to undo Kestrel's changes before removing it; built in stage 5 |
+| 89 | System Protection off | Ask at that moment: turn it on and create the restore point (recorded and undoable), or go on with Kestrel's undo only |
+| 90 | NVIDIA profile | Moves to stage 6, and the 10 GB shader cache is dropped (the current driver's default is 16 GB). Kestrel's call, approved with the stage-5 spec |
+
 ## Stages
 
 | Stage | Contents |
@@ -90,9 +103,9 @@ Games, Ubisoft or Activision.
 | 1 | App shell, hardware detection, Health Check, BIOS guide, Copy diagnostics. Read-only. (v0.1.0, done) |
 | 2 | Benchmark, built on game profiles, VALORANT first |
 | 3 | Hardware & BIOS: Hardware tab and BIOS checks (51–53) |
-| 4 | Game profiles: FiveM, Rainbow Six Siege, Warzone (detection, checks, benchmarks); telagem safety (61) |
+| 4 | Game profiles: FiveM, Rainbow Six Siege, Warzone (detection, checks, benchmarks), with their NVIDIA profiles and FiveM/GTA V settings. Postponed (85) |
 | 5 | Tweak engine, undo journal, restore points, Essential tier, Smart Plan, Kestrel report |
-| 6 | Competitive + Extreme tiers, NVIDIA profiles per game, network, debloat, FiveM/GTA V settings (58) |
+| 6 | Competitive + Extreme tiers, NVIDIA profile for VALORANT, network, debloat, FiveM detection and telagem safety (61) |
 | 7 | Lock In |
 | 8 | Fixes, troubleshooters per game, auto-update, installer polish |
 | 9 | Visual redesign from the owner's Claude Design work (63–65) → v1.0 |
@@ -110,13 +123,14 @@ Games, Ubisoft or Activision.
 
 ## Tweak list (stages 5–6)
 
-Essential: Kestrel power plan (High performance base, no core parking, USB/PCIe power saving off;
-laptops only on charger); VALORANT on "High performance" GPU; Game Mode on; Game DVR background
-recording off (Game Bar stays); Win11 "Optimizations for windowed games" on; NVIDIA VALORANT profile
-(max-performance power, high-performance texture filtering, 10 GB shader cache, V-Sync off);
-"Enhance pointer precision" off.
+Essential (details and research-based corrections in `2026-11-02-kestrel-stage-5-tweaks-design.md`): Kestrel power
+plan (High performance base, no core parking, USB/PCIe power saving off; lighter on laptops and hybrid CPUs, not offered
+on dual-CCD X3D); VALORANT on "High performance" GPU where there are two GPUs; Game Mode on; Game DVR background
+recording off (Game Bar stays); Win11 "Optimizations for windowed games" on; "Enhance pointer precision" off (offered
+unticked).
 
-Competitive: VALORANT High CPU priority via IFEO PerfOptions (skipped under 6 cores); adapter power
+Competitive: NVIDIA VALORANT profile (max-performance power, high-performance texture filtering, V-Sync off; decision
+90); VALORANT High CPU priority via IFEO PerfOptions (skipped under 6 cores); adapter power
 saving / EEE / interrupt moderation off; Delivery Optimization internet uploads off; QoS DSCP 46 for
 VALORANT; trim unused services (Fax, Remote Registry, Print Spooler without printer…; opt-in, never on
 a PC with FiveM — decision 61); HAGS and fullscreen-optimizations toggles decided by the benchmark.

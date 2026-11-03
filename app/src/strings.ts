@@ -1,11 +1,13 @@
-/** The stage each later feature arrives in (decision 66). kestrel-core's health.rs keeps TWEAKS_STAGE and COMPETITIVE_STAGE. */
-export const STAGE = { tweaks: 5, competitive: 6, lockIn: 7, fixes: 8 } as const;
+import type { Gate, Impact, RowState, Timing, TweakId } from './api/types';
+
+/** The stage each later feature arrives in (decision 66). kestrel-core's health.rs keeps COMPETITIVE_STAGE. */
+export const STAGE = { competitive: 6, lockIn: 7, fixes: 8 } as const;
 
 /** Every user-facing string lives here (spec decision 17). Sentence case, no exclamation marks. */
 export const strings = {
   app: { name: 'Kestrel' },
   tabs: { home: 'Home', health: 'Health', hardware: 'Hardware', tweaks: 'Tweaks', lockIn: 'Lock In', benchmark: 'Benchmark', toolbox: 'Toolbox' },
-  titleBar: { sections: 'Sections', admin: 'admin', notAdmin: 'not admin', minimize: 'Minimise', maximize: 'Maximise', close: 'Close' },
+  titleBar: { sections: 'Sections', admin: 'admin', notAdmin: 'not admin', minimize: 'Minimise', maximize: 'Maximise', close: 'Close', busy: 'Tabs return when this is done.' },
   banners: {
     sample: 'Sample data: Kestrel isn’t running on Windows, so this is the test PC from the fixture.',
     windows10: 'You’re on Windows 10. Kestrel runs here, but it’s only tested on Windows 11.',
@@ -123,6 +125,7 @@ export const strings = {
     status: { pass: 'OK', problem: 'Fix', info: 'Info', unknown: 'Unknown' },
     severity: { high: 'High', medium: 'Med', low: 'Low', info: 'Info' },
     biosGuide: 'Open BIOS guide',
+    fix: 'Fix',
     laterStage: (n: number) => `Kestrel fixes this in stage ${n}`,
     howToFix: 'How to fix',
     probeErrors: (n: number) => `${n} probe${n === 1 ? '' : 's'} couldn’t read everything. Use Copy diagnostics on Home to share the details.`,
@@ -137,10 +140,118 @@ export const strings = {
   },
   comingSoon: {
     arrives: (n: number) => `Arrives in stage ${n}`,
-    tweaks: { stage: STAGE.tweaks, title: 'Tweaks', body: 'Reversible tweaks picked for your hardware, with Preview and one-click undo.' },
-    lockIn: { stage: STAGE.lockIn, title: 'Lock In', body: 'A tiny helper that boosts your PC while VALORANT runs and undoes everything when you quit.' },
+    lockIn: { stage: STAGE.lockIn, title: 'Lock In', body: 'A tiny helper that applies its changes only while VALORANT runs, and undoes them when you quit.' },
   },
   diagnostics: { copy: 'Copy diagnostics', copied: 'Copied. Paste it in chat.', failed: 'Couldn’t copy. Try again.' },
+  tweaks: {
+    /** The tweaks' titles. kestrel-tweaks' catalog.rs gives the same ones to the report, so a change there is a change here. */
+    names: {
+      'power-plan': 'Kestrel power plan',
+      'game-mode': 'Game Mode',
+      'background-recording': 'Background recording off',
+      'windowed-optimizations': 'Optimizations for windowed games',
+      'gpu-preference': 'GPU preference',
+      'pointer-precision': 'Enhance pointer precision off',
+      'system-protection': 'System Protection',
+    } satisfies Record<TweakId, string>,
+    // The page. Per-tweak text (each row's reason, the Preview's values, the report) comes from Rust; these are the page's own words.
+    title: 'Tweaks',
+    intro: 'Kestrel picked these for your PC. Nothing changes until you press Apply.',
+    /** Shown once, above everything else, to a person whose first run ended here. It promises nothing. */
+    firstRunNote: 'Here’s the plan Kestrel picked for your PC. Nothing changes until you press Apply.',
+    notNow: 'Not now',
+    loading: 'Reading your PC’s settings…',
+    loadFailed: 'Kestrel couldn’t read the tweaks.',
+    /** The rows were read before, and reading them again failed: they are kept, and may be out of date. The reason follows. */
+    rereadFailed: 'Kestrel couldn’t read the tweaks again, so these rows may be out of date.',
+    tryAgain: 'Try again',
+    essential: 'Essential',
+    /** The tiers that come later. The page puts `comingSoon.arrives(STAGE.competitive)` beside each name. */
+    laterTiers: ['Competitive', 'Extreme'],
+    measureNone: 'Run a benchmark first, so you can compare afterwards.',
+    measureSpread: (pct: string) => `Your starting point’s runs vary by ${pct}, so small changes won’t show. Run a clean one before applying.`,
+    openBenchmark: 'Open Benchmark',
+    otherAccount: 'Kestrel is running as another account. Changes go to the account signed in now.',
+    otherPending: (n: number) =>
+      n === 1 ? 'Another account has 1 change from Kestrel. It waits until that account is signed in.' : `Another account has ${n} changes from Kestrel. Those wait until that account is signed in.`,
+    states: {
+      available: 'Available',
+      'already-set': 'Already set',
+      'not-needed': 'Not needed',
+      'blocked-by-policy': 'Blocked by policy',
+      applied: 'Applied',
+      'changed-elsewhere': 'Changed by something else',
+      'plan-inactive': 'Kestrel’s plan isn’t active',
+      'couldnt-read': 'Couldn’t read',
+    } satisfies Record<RowState, string>,
+    impact: { high: 'High', medium: 'Medium', low: 'Low', situational: 'Situational', 'none-in-game': 'None in game' } satisfies Record<Impact, string>,
+    impactTag: (label: string) => `Impact: ${label}`,
+    timing: { now: 'Now', 'next-launch': 'Next time VALORANT opens', 'next-sign-in': 'Next sign-in' } satisfies Record<Timing, string>,
+    takesEffect: 'Takes effect',
+    /** Why Apply and Undo are off. Every gate but `open` is closed, and these are also what a command refuses with. */
+    gate: {
+      'game-running': 'Close VALORANT first.',
+      'benchmark-active': 'Finish the benchmark first.',
+      'cant-tell': 'Kestrel couldn’t check whether VALORANT is open. Try again.',
+    } satisfies Record<Exclude<Gate, 'open'>, string>,
+    // A row's buttons.
+    undo: 'Undo',
+    applyAgain: 'Apply again',
+    restoreAnyway: 'Restore anyway',
+    restoreAnywayAsk: 'Write the old value back over what’s there now?',
+    yesRestore: 'Yes, restore',
+    useAgain: 'Use it again',
+    removePlan: 'Remove it',
+    protectionWarning: 'Turning System Protection off deletes this drive’s restore points.',
+    yesTurnOff: 'Yes, turn it off',
+    working: 'Working…',
+    // Under the rows.
+    preview: (n: number) => `Preview ${n} change${n === 1 ? '' : 's'}`,
+    revertEverything: 'Revert everything',
+    revertConfirm: 'Undo every change on this list?',
+    yesRevert: 'Yes, undo them',
+    // The Preview.
+    previewLabel: 'Preview',
+    previewIntro: 'Nothing has changed yet. This is what Apply will change.',
+    previewEmpty: 'There is nothing to apply right now.',
+    previewing: 'Reading what would change…',
+    columns: { setting: 'Setting', now: 'Now', after: 'After' },
+    apply: 'Apply',
+    cancel: 'Cancel',
+    // The restore point.
+    restoring: 'Creating a restore point… this can take a minute.',
+    protectionOff: 'System Protection is off on your Windows drive. Turn it on and create a restore point? Windows will use some disk space for restore points.',
+    restoreBlocked: 'An organisation policy turns System Protection off, so Kestrel can’t create a restore point. Continue with Kestrel’s undo only?',
+    /** A reason may end in a full stop ("System Protection is off.") or not ("… (os error 5)"); the sentence adds its own, once. */
+    restoreFailed: (reason: string) => {
+      const why = reason.trim().replace(/\.$/, '');
+      return why === '' ? 'Couldn’t create a restore point. Continue with Kestrel’s undo only?' : `Couldn’t create a restore point: ${why}. Continue with Kestrel’s undo only?`;
+    },
+    turnOnAndCreate: 'Turn on and create',
+    continueWithout: 'Continue without',
+    continue: 'Continue',
+    // After a button.
+    applying: 'Applying…',
+    undoing: 'Undoing…',
+    rescanning: 'Checking your PC again…',
+    result: 'Result',
+    /** Said when a command was refused before it changed a setting. A restore point may have been made, so it says less than "nothing". */
+    noSettingsChanged: 'No settings were changed.',
+    /** Said when a turn-on was asked for and what came after was refused: System Protection's row, if there is one, is in the list above. */
+    protectionMayHaveChanged: 'System Protection may have been turned on: check its row above.',
+    takeEffectNextLaunch: 'These take effect the next time VALORANT opens.',
+    done: 'Measure it on your PC: run a benchmark and compare it with your starting point.',
+    runBenchmark: 'Run a benchmark',
+    close: 'Close',
+    // The report.
+    report: 'Kestrel report',
+    copyReport: 'Copy report',
+    copied: 'Copied. Paste it in chat.',
+    copyFailed: 'Couldn’t copy. Try again.',
+    reportLoading: 'Reading the report…',
+    reportFailed: 'Kestrel couldn’t read the report.',
+    unreadable: 'Part of Kestrel’s history couldn’t be read, so the report may be missing changes.',
+  },
   bench: {
     title: 'Benchmark',
     intro: 'Measures how smoothly VALORANT runs on a fixed route in the Range. Kestrel only listens to the frames Windows shows; it never touches the game.',
@@ -177,6 +288,8 @@ export const strings = {
     keep: 'Keep anyway',
     cancel: 'Cancel',
     seeResult: 'See the result',
+    /** On a new person's first saved result: the way on to the Tweaks tab. */
+    seeYourPlan: 'See your plan',
     close: 'Close',
     runOk: 'OK',
     runKept: 'Kept',
@@ -194,6 +307,13 @@ export const strings = {
     versus: (name: string) => `Compared with ${name}`,
     verdict: { 'real-gain': 'Real gain', 'real-loss': 'Real loss', noise: 'Within noise' },
     settingsDiffer: (list: string) => `VALORANT settings changed since then: ${list}. Part of the difference may come from them.`,
+    // kestrel-bench's text.rs puts the same facts in Copy results, with the ids as written.
+    tweaksChanged: (changes: string) => `Tweaks since then: ${changes}.`,
+    tweaksAdded: (list: string) => `added ${list}`,
+    tweaksRemoved: (list: string) => `removed ${list}`,
+    planChanged: (from: string, to: string) => `Power plan since then: ${from} → ${to}.`,
+    // The same sentence as in Copy results (kestrel-bench's text.rs), with the spread as the tile shows it.
+    spreadWarning: (text: string) => `These runs vary by ${text}, so only big changes will count as real. Close background apps and run again.`,
     routeMismatch: 'Different route version, so these results aren’t compared.',
     graph: 'Frame times of the middle run',
     graphAxis: 'ms per frame, lower is smoother',

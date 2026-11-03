@@ -1,16 +1,20 @@
-//! Kestrel's Tauri shell: the scan, live load and clocks, and the benchmark with the PCIe link it measures. It writes
-//! only inside its own folder.
+//! Kestrel's Tauri shell: the scan, live load and clocks, the benchmark with the PCIe link it measures, and the Tweaks
+//! tab's commands. It writes to Windows only through `kestrel-tweaks`, and only when the person presses Apply or one
+//! of the undo buttons; anything else it writes stays inside its own folders.
 use chrono::NaiveDate;
 use kestrel_core::topology::CoreClock;
-use kestrel_core::Report;
+use kestrel_core::{Report, SystemSnapshot};
 use kestrel_probe::clocks::ClockSampler;
 use kestrel_probe::load::{LoadSample, LoadSampler};
-use std::sync::Mutex;
+use kestrel_tweaks::Engine;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::ShortcutState;
 
 pub mod bench;
+pub mod cli;
 pub mod hardware;
+pub mod tweaks;
 
 use bench::commands;
 use bench::controller::Controller;
@@ -25,6 +29,23 @@ struct AppState {
     load: Mutex<LoadSampler>,
     /// One sampler for the whole run, created in `setup`: it collects once then, so the first poll has a baseline.
     clocks: Mutex<ClockSampler>,
+}
+
+impl AppState {
+    /// The last scan's snapshot, or None before there has been one.
+    fn cached_snapshot(&self) -> Result<Option<SystemSnapshot>, String> {
+        let report = self.report.lock().map_err(|e| e.to_string())?;
+        Ok(report.as_ref().map(|r| r.snapshot.clone()))
+    }
+
+    /// The Windows build the last scan saw, or 0 before there has been one: the Kestrel report names it.
+    fn build(&self) -> u32 {
+        self.report
+            .lock()
+            .ok()
+            .and_then(|report| report.as_ref().map(|r| r.snapshot.os.build))
+            .unwrap_or(0)
+    }
 }
 
 /// The day the findings are judged on (BIOS and driver age).
@@ -63,6 +84,17 @@ pub(crate) async fn latest_report(app: &AppHandle) -> Result<Report, String> {
     get_report(app.state::<AppState>(), app.state::<Controller>()).await
 }
 
+/// The last scan's snapshot, scanning first if there hasn't been one. For what only needs the PC as it was seen:
+/// `latest_report` also reads every saved benchmark again and rebuilds the findings and the score, which the tweaks
+/// have no use for.
+pub(crate) async fn latest_snapshot(app: &AppHandle) -> Result<SystemSnapshot, String> {
+    let cached = app.state::<AppState>().cached_snapshot()?;
+    match cached {
+        Some(snapshot) => Ok(snapshot),
+        None => Ok(latest_report(app).await?.snapshot),
+    }
+}
+
 /// One live-load reading; the UI polls this about once a second.
 // Keep `async`: the PDH and NVML reads must stay off the UI thread.
 #[tauri::command(async)]
@@ -80,12 +112,14 @@ fn get_cpu_clocks(state: State<'_, AppState>) -> Result<Vec<CoreClock>, String> 
 }
 
 /// Pretty JSON for the "Copy diagnostics" button: the last scan (with the newest link under load, as the app shows it),
-/// the saved benchmarks, VALORANT's settings, and the benchmark session as it is now (a failed one carries
-/// PresentMon's error), or null when there is none.
+/// the saved benchmarks, VALORANT's settings, the benchmark session as it is now (a failed one carries PresentMon's
+/// error), or null when there is none, and the Kestrel report with what the tweaks see of the accounts and System
+/// Protection, and each row of the tab with why it is as it is.
 #[tauri::command(async)]
 fn get_diagnostics(
     state: State<'_, AppState>,
     bench: State<'_, Controller>,
+    engine: State<'_, Arc<Engine>>,
 ) -> Result<String, String> {
     let report = state
         .report
@@ -93,12 +127,16 @@ fn get_diagnostics(
         .map_err(|e| e.to_string())?
         .clone()
         .ok_or("Run a scan first.")?;
+    let build = report.snapshot.os.build;
+    let settings = bench.game_settings();
+    let input = tweaks::commands::input_for(&report.snapshot, settings.clone());
     let diagnostics = serde_json::json!({
         "report": hardware::with_links(report, bench.store(), today()),
         "benchmarks": bench.store().list(),
-        "valorantSettings": bench.game_settings(),
+        "valorantSettings": settings,
         // An owned snapshot: no platform call, and the controller's lock is released before this is serialised.
         "benchSession": bench.state(),
+        "tweaks": tweaks::diagnostics(&engine, &input, build),
     });
     serde_json::to_string_pretty(&diagnostics).map_err(|e| e.to_string())
 }
@@ -144,6 +182,13 @@ pub fn run() {
                 clocks: Mutex::new(ClockSampler::new()),
             });
             app.manage(commands::controller(app.handle())?);
+            // Building the engine touches nothing, on the PC or in the journal's folder: the first command that needs
+            // them is the one that finds a missing or refused folder. It is also the only way the app reaches the PC's
+            // settings, so nothing changes them past the journal and the gate.
+            app.manage(tweaks::engine(
+                kestrel_tweaks::this_pc(),
+                kestrel_tweaks::journal_file(),
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -167,8 +212,47 @@ pub fn run() {
             commands::bench_delete,
             commands::bench_set_baseline,
             commands::bench_compare,
-            commands::bench_copy_results
+            commands::bench_copy_results,
+            tweaks::commands::tweaks_view,
+            tweaks::commands::tweaks_preview,
+            tweaks::commands::tweaks_restore_point,
+            tweaks::commands::tweaks_apply,
+            tweaks::commands::tweaks_undo,
+            tweaks::commands::tweaks_apply_again,
+            tweaks::commands::tweaks_restore_anyway,
+            tweaks::commands::tweaks_revert_all,
+            tweaks::commands::tweaks_use_plan_again,
+            tweaks::commands::tweaks_remove_plan,
+            tweaks::commands::tweaks_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kestrel");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(report: Option<Report>) -> AppState {
+        AppState {
+            report: Mutex::new(report),
+            load: Mutex::new(LoadSampler::new()),
+            clocks: Mutex::new(ClockSampler::new()),
+        }
+    }
+
+    #[test]
+    fn the_cached_snapshot_is_the_last_scans_and_there_is_none_before_one() {
+        assert_eq!(state(None).cached_snapshot(), Ok(None));
+        let report = kestrel_core::build_report(kestrel_core::owner_pc_fixture(), today(), VERSION);
+        let snapshot = report.snapshot.clone();
+        assert_eq!(state(Some(report)).cached_snapshot(), Ok(Some(snapshot)));
+    }
+
+    #[test]
+    fn the_build_comes_from_the_last_scan_and_is_zero_before_one() {
+        assert_eq!(state(None).build(), 0);
+        let report = kestrel_core::build_report(kestrel_core::owner_pc_fixture(), today(), VERSION);
+        assert_eq!(state(Some(report)).build(), 26200);
+    }
 }

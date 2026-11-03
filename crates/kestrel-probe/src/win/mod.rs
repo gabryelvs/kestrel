@@ -1,4 +1,5 @@
 //! Real probes for Windows. Each one is independent: a failure becomes `None` plus a ProbeError.
+pub(crate) mod account;
 pub(crate) mod cfgmgr;
 pub(crate) mod cpu;
 mod display;

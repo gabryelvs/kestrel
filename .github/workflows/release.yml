@@ -24,6 +24,10 @@ jobs:
         working-directory: app
       - run: npm run fetch:presentmon
         working-directory: app
+      # Before the build, so a failure here stops the release.
+      - name: Apply, check and undo every tweak on this machine
+        timeout-minutes: 15
+        run: cargo run --locked -q -p kestrel-tweaks --bin kestrel-tweak-roundtrip -- --yes-change-this-machine
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -32,7 +36,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Kestrel ${{ github.ref_name }} (test build)
           releaseBody: |
-            Test build. It changes nothing on your PC; it only saves benchmark results in its own folder.
+            Test build. It changes your PC only when you press Apply, and every change can be undone. Before applying, run a benchmark so you can compare afterwards.
 
             Install: download `Kestrel_*_x64-setup.exe` below and run it. Test builds aren't signed yet, so Windows may show "Windows protected your PC". Click More info → Run anyway.
 

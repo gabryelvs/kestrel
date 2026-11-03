@@ -1,12 +1,53 @@
 import { useEffect, useRef, useState } from 'react';
 import { benchCopyResults, benchDelete, benchGet, benchRename, benchSetBaseline } from '../../api/client';
-import { contextRows, dateText, flagText, METRIC_ORDER, metricText, metricValue, pct, spreadText, verdictText, verdictTone } from '../../api/bench';
-import type { BenchDetail } from '../../api/types';
+import { contextRows, dateText, flagText, METRIC_ORDER, metricText, metricValue, pct, spreadText, tweakList, variesTooMuch, verdictText, verdictTone } from '../../api/bench';
+import type { BenchDetail, Comparison } from '../../api/types';
 import { strings } from '../../strings';
 import { FrameGraph } from './FrameGraph';
 
+/** The caution under the tiles when the runs were too far apart for a small change to count as real. Copy results says the same. */
+export function SpreadWarning({ spread }: { spread: number }) {
+  return variesTooMuch(spread) ? <p className="caution">{strings.bench.spreadWarning(spreadText(spread))}</p> : null;
+}
+
+/**
+ * What changed since the baseline besides the numbers: the tweaks added or removed, then the power plan. Cautions like the
+ * VALORANT settings one beside them. A result with no tweak list (saved before tweaks existed) has nothing to compare, so
+ * the page says nothing about tweaks then.
+ */
+export function TweakChanges({ comparison }: { comparison: Comparison }) {
+  const b = strings.bench;
+  const changes = [
+    comparison.tweaksAdded.length > 0 ? b.tweaksAdded(tweakList(comparison.tweaksAdded)) : null,
+    comparison.tweaksRemoved.length > 0 ? b.tweaksRemoved(tweakList(comparison.tweaksRemoved)) : null,
+  ].filter((change): change is string => change !== null);
+  return (
+    <>
+      {changes.length > 0 && <p className="caution">{b.tweaksChanged(changes.join('; '))}</p>}
+      {comparison.powerPlanChange && <p className="caution">{b.planChanged(...comparison.powerPlanChange)}</p>}
+    </>
+  );
+}
+
+/** The way on from a new person's first result to the plan on the Tweaks tab: one button. */
+export function SeeYourPlan({ onClick }: { onClick: () => void }) {
+  return (
+    <div>
+      <button className="btn btn-primary cut-s" onClick={onClick}>{strings.bench.seeYourPlan}</button>
+    </div>
+  );
+}
+
 /** One saved benchmark: its numbers, the comparison with the baseline, the graph, the context and the actions. */
-export function ResultDetail({ id, onChanged, revealWhenLoaded = false }: { id: string; onChanged: () => void; revealWhenLoaded?: boolean }) {
+export function ResultDetail({
+  id, onChanged, revealWhenLoaded = false, onSeePlan,
+}: {
+  id: string;
+  onChanged: () => void;
+  revealWhenLoaded?: boolean;
+  /** Given only for a new person's first saved result (`showsSeeYourPlan`): it offers See your plan, which goes to the Tweaks tab. */
+  onSeePlan?: () => void;
+}) {
   const b = strings.bench;
   const [detail, setDetail] = useState<BenchDetail | null>(null);
   // A failed first load replaces the panel; a failed action only adds a notice, so the result stays on screen.
@@ -83,6 +124,8 @@ export function ResultDetail({ id, onChanged, revealWhenLoaded = false }: { id: 
           <div className="tile-value tile-word">{b.bottleneck[m.bottleneck]}</div>
         </div>
       </div>
+      <SpreadWarning spread={bench.result.spread.avgFps} />
+      {onSeePlan && <SeeYourPlan onClick={onSeePlan} />}
 
       {comparison && detail.baselineName && (
         <div className="comparison">
@@ -101,6 +144,7 @@ export function ResultDetail({ id, onChanged, revealWhenLoaded = false }: { id: 
             </ul>
           )}
           {comparison.settingsDiffer.length > 0 && <p className="caution">{b.settingsDiffer(comparison.settingsDiffer.join(', '))}</p>}
+          <TweakChanges comparison={comparison} />
         </div>
       )}
 

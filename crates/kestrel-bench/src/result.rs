@@ -1,8 +1,8 @@
 //! A benchmark's result from its runs (decision 38), comparisons with another benchmark (decision 41), and the
 //! frame-time graph's points.
 use crate::model::{
-    BenchResult, Benchmark, Bottleneck, Comparison, MetricDelta, MetricId, RunMetrics, RunRecord,
-    Spread, Verdict,
+    BenchResult, Benchmark, Bottleneck, Comparison, Context, MetricDelta, MetricId, RunMetrics,
+    RunRecord, Spread, Verdict,
 };
 use crate::settings::differences;
 
@@ -106,7 +106,47 @@ pub fn compare(baseline: &Benchmark, current: &Benchmark) -> Comparison {
     ) {
         comparison.settings_differ = differences(a, b);
     }
+    // A side with no list (a benchmark from before stage 5) is unknown, not empty, so it compares nothing.
+    if let (Some(before), Some(now)) = (
+        &baseline.context.applied_tweaks,
+        &current.context.applied_tweaks,
+    ) {
+        comparison.tweaks_added = only_in(now, before);
+        comparison.tweaks_removed = only_in(before, now);
+    }
+    comparison.power_plan_change = plan_change(&baseline.context, &current.context);
     comparison
+}
+
+/// The ids in `list` that `other` lacks, in `list`'s own order and each once: a hand-edited file may repeat an id.
+fn only_in(list: &[String], other: &[String]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for id in list {
+        if !other.contains(id) && !found.contains(id) {
+            found.push(id.clone());
+        }
+    }
+    found
+}
+
+/// The power plan's name on each side, [baseline, current], when both recorded one and the names differ. A blank name
+/// is no name, so a side that has none has nothing to compare.
+fn plan_change(baseline: &Context, current: &Context) -> Option<[String; 2]> {
+    let name = |context: &Context| -> Option<String> {
+        let name = context.power_plan.as_deref()?.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    };
+    let (before, now) = (name(baseline)?, name(current)?);
+    (before != now).then_some([before, now])
+}
+
+/// The widest spread (see `Spread`) that still counts as runs close together: 10%.
+const MAX_SPREAD: f64 = 0.10;
+
+/// Whether a result's runs are too far apart for a small change to count as real: a spread strictly above 10%. The
+/// page's `variesTooMuch` uses the same line.
+pub fn varies_too_much(spread: f64) -> bool {
+    spread > MAX_SPREAD
 }
 
 /// The run with the middle average FPS.
@@ -369,6 +409,255 @@ mod tests {
             compare(&base, &current).settings_differ,
             vec!["Resolution".to_string()]
         );
+    }
+
+    /// A benchmark with the same runs as any other, whose context names the active tweaks (None: no list).
+    fn with_tweaks(id: &str, tweaks: Option<&[&str]>) -> Benchmark {
+        let mut b = bench(id, vec![run(400.0, 280.0, 2.0, None, Bottleneck::Gpu); 3]);
+        b.context.applied_tweaks =
+            tweaks.map(|list| list.iter().map(|id| id.to_string()).collect());
+        b
+    }
+
+    /// A benchmark whose context names the power plan (None: the scan didn't read one).
+    fn on_plan(id: &str, plan: Option<&str>) -> Benchmark {
+        let mut b = bench(id, vec![run(400.0, 280.0, 2.0, None, Bottleneck::Gpu); 3]);
+        b.context.power_plan = plan.map(str::to_string);
+        b
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn the_comparison_lists_tweak_changes() {
+        let base = with_tweaks("a", Some(&["game-mode"]));
+        let now = with_tweaks("b", Some(&["game-mode", "power-plan"]));
+        let c = compare(&base, &now);
+        assert_eq!(c.tweaks_added, ids(&["power-plan"]));
+        assert!(c.tweaks_removed.is_empty());
+        // Read the other way round, the same tweak was taken off.
+        let back = compare(&now, &base);
+        assert!(back.tweaks_added.is_empty());
+        assert_eq!(back.tweaks_removed, ids(&["power-plan"]));
+        // Both at once.
+        let swapped = compare(
+            &with_tweaks("a", Some(&["game-mode"])),
+            &with_tweaks("b", Some(&["power-plan"])),
+        );
+        assert_eq!(swapped.tweaks_added, ids(&["power-plan"]));
+        assert_eq!(swapped.tweaks_removed, ids(&["game-mode"]));
+        // A list with nothing in it is a list: no tweaks then, so everything now is new.
+        let from_none = compare(
+            &with_tweaks("a", Some(&[])),
+            &with_tweaks("b", Some(&["game-mode"])),
+        );
+        assert_eq!(from_none.tweaks_added, ids(&["game-mode"]));
+        assert!(from_none.tweaks_removed.is_empty());
+        // The same tweaks, in any order, are no change.
+        let same = compare(
+            &with_tweaks("a", Some(&["game-mode", "power-plan"])),
+            &with_tweaks("b", Some(&["power-plan", "game-mode"])),
+        );
+        assert!(same.tweaks_added.is_empty() && same.tweaks_removed.is_empty());
+    }
+
+    #[test]
+    fn tweak_changes_keep_each_lists_own_order_and_name_an_id_once() {
+        // Not sorted: added follows the current list's order, removed follows the baseline's.
+        let c = compare(
+            &with_tweaks("a", Some(&["power-plan", "game-mode", "gpu-preference"])),
+            &with_tweaks(
+                "b",
+                Some(&[
+                    "gpu-preference",
+                    "windowed-optimizations",
+                    "background-recording",
+                ]),
+            ),
+        );
+        assert_eq!(
+            c.tweaks_added,
+            ids(&["windowed-optimizations", "background-recording"])
+        );
+        assert_eq!(c.tweaks_removed, ids(&["power-plan", "game-mode"]));
+        // A hand-edited file may name an id twice; it is still one change.
+        let doubled = compare(
+            &with_tweaks("a", Some(&["game-mode", "game-mode"])),
+            &with_tweaks("b", Some(&["power-plan", "power-plan", "power-plan"])),
+        );
+        assert_eq!(doubled.tweaks_added, ids(&["power-plan"]));
+        assert_eq!(doubled.tweaks_removed, ids(&["game-mode"]));
+        // An id this build doesn't know (an old or a future file) is listed as written, System Protection like any other.
+        let unknown = compare(
+            &with_tweaks("a", Some(&["from-the-future"])),
+            &with_tweaks("b", Some(&["system-protection", "Game-Mode"])),
+        );
+        assert_eq!(
+            unknown.tweaks_added,
+            ids(&["system-protection", "Game-Mode"])
+        );
+        assert_eq!(unknown.tweaks_removed, ids(&["from-the-future"]));
+    }
+
+    #[test]
+    fn a_side_with_no_list_compares_nothing() {
+        let list = with_tweaks("b", Some(&["game-mode", "power-plan"]));
+        let empty = with_tweaks("c", Some(&[]));
+        for (base, now) in [
+            (with_tweaks("a", None), list.clone()),
+            (list.clone(), with_tweaks("a", None)),
+            (with_tweaks("a", None), with_tweaks("d", None)),
+            (with_tweaks("a", None), empty.clone()),
+            (empty.clone(), with_tweaks("a", None)),
+        ] {
+            let c = compare(&base, &now);
+            assert!(
+                c.tweaks_added.is_empty() && c.tweaks_removed.is_empty(),
+                "{:?} against {:?}: {c:?}",
+                base.context.applied_tweaks,
+                now.context.applied_tweaks
+            );
+        }
+    }
+
+    #[test]
+    fn a_changed_plan_is_named() {
+        let c = compare(
+            &on_plan("a", Some("EXM Free Power Plan V8")),
+            &on_plan("b", Some("Kestrel")),
+        );
+        assert_eq!(
+            c.power_plan_change,
+            Some(["EXM Free Power Plan V8".to_string(), "Kestrel".to_string()])
+        );
+        // The same name is no change, and a side with no name has nothing to compare.
+        for (base, now) in [
+            (Some("Kestrel"), Some("Kestrel")),
+            (None, Some("Kestrel")),
+            (Some("Kestrel"), None),
+            (None, None),
+        ] {
+            assert_eq!(
+                compare(&on_plan("a", base), &on_plan("b", now)).power_plan_change,
+                None,
+                "{base:?} then {now:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_plan_name_is_a_missing_side() {
+        for blank in ["", " ", "\t \n"] {
+            for (base, now) in [(blank, "Kestrel"), ("Kestrel", blank), (blank, blank)] {
+                assert_eq!(
+                    compare(&on_plan("a", Some(base)), &on_plan("b", Some(now))).power_plan_change,
+                    None,
+                    "{base:?} then {now:?}"
+                );
+            }
+        }
+        // Spaces around a name are not part of it: the same plan is no change, and a change is shown without them.
+        let padded = compare(
+            &on_plan("a", Some(" Kestrel ")),
+            &on_plan("b", Some("Kestrel")),
+        );
+        assert_eq!(padded.power_plan_change, None);
+        let renamed = compare(
+            &on_plan("a", Some(" Balanced")),
+            &on_plan("b", Some("Kestrel ")),
+        );
+        assert_eq!(
+            renamed.power_plan_change,
+            Some(["Balanced".to_string(), "Kestrel".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_plan_and_the_tweaks_change_independently() {
+        let mut base = with_tweaks("a", Some(&["game-mode"]));
+        base.context.power_plan = Some("Balanced".into());
+        let mut now = with_tweaks("b", Some(&["game-mode"]));
+        now.context.power_plan = Some("High performance".into());
+        let c = compare(&base, &now);
+        assert!(c.tweaks_added.is_empty() && c.tweaks_removed.is_empty());
+        assert_eq!(
+            c.power_plan_change,
+            Some(["Balanced".to_string(), "High performance".to_string()])
+        );
+        // And the other way: a tweak list with no plan names on either side.
+        let c = compare(
+            &with_tweaks("a", Some(&[])),
+            &with_tweaks("b", Some(&["power-plan"])),
+        );
+        assert_eq!(c.tweaks_added, ids(&["power-plan"]));
+        assert_eq!(c.power_plan_change, None);
+    }
+
+    #[test]
+    fn another_route_compares_no_tweaks_or_plan_either() {
+        let mut base = with_tweaks("a", Some(&[]));
+        base.context.power_plan = Some("Balanced".into());
+        let mut now = with_tweaks("b", Some(&["power-plan"]));
+        now.context.power_plan = Some("Kestrel".into());
+        now.route_version = 2;
+        let c = compare(&base, &now);
+        assert!(c.route_mismatch);
+        assert!(c.tweaks_added.is_empty() && c.tweaks_removed.is_empty());
+        assert_eq!(c.power_plan_change, None);
+    }
+
+    #[test]
+    fn the_page_reads_the_tweak_fields_by_their_camel_case_names() {
+        let mut base = with_tweaks("a", Some(&["game-mode"]));
+        base.context.power_plan = Some("EXM Free Power Plan V8".into());
+        let mut now = with_tweaks("b", Some(&["power-plan"]));
+        now.context.power_plan = Some("Kestrel".into());
+        let json = serde_json::to_value(compare(&base, &now)).unwrap();
+        assert_eq!(json["tweaksAdded"], serde_json::json!(["power-plan"]));
+        assert_eq!(json["tweaksRemoved"], serde_json::json!(["game-mode"]));
+        assert_eq!(
+            json["powerPlanChange"],
+            serde_json::json!(["EXM Free Power Plan V8", "Kestrel"])
+        );
+        // With nothing to say they are still there, as empty lists and null, so the page never has to check.
+        let quiet =
+            serde_json::to_value(compare(&on_plan("a", None), &on_plan("b", None))).unwrap();
+        assert_eq!(quiet["tweaksAdded"], serde_json::json!([]));
+        assert_eq!(quiet["tweaksRemoved"], serde_json::json!([]));
+        assert_eq!(quiet["powerPlanChange"], serde_json::Value::Null);
+        // The benchmark's own list is `appliedTweaks`, as the store test pins.
+        let ctx = serde_json::to_value(&now.context).unwrap();
+        assert_eq!(ctx["appliedTweaks"], serde_json::json!(["power-plan"]));
+    }
+
+    #[test]
+    fn runs_varying_over_ten_percent_are_flagged() {
+        assert!(varies_too_much(0.249));
+        assert!(!varies_too_much(0.10));
+        // Strictly above 10%: the line itself is fine, anything over it is not.
+        assert!(varies_too_much(0.1001));
+        assert!(!varies_too_much(0.0999));
+        assert!(!varies_too_much(0.05));
+        assert!(!varies_too_much(0.0), "runs that agree exactly");
+        assert!(
+            !varies_too_much(f64::NAN),
+            "no reading is not a wide spread"
+        );
+        // The spread a result carries is the one `combine` computes: 305 to 410 around a middle of 407 is about 26%.
+        let wide = combine(&[
+            run(305.0, 1.0, 0.0, None, Bottleneck::Gpu),
+            run(410.0, 1.0, 0.0, None, Bottleneck::Gpu),
+            run(407.0, 1.0, 0.0, None, Bottleneck::Gpu),
+        ]);
+        assert!(varies_too_much(wide.spread.avg_fps), "{:?}", wide.spread);
+        let steady = combine(&[
+            run(400.0, 1.0, 0.0, None, Bottleneck::Gpu),
+            run(410.0, 1.0, 0.0, None, Bottleneck::Gpu),
+            run(405.0, 1.0, 0.0, None, Bottleneck::Gpu),
+        ]);
+        assert!(!varies_too_much(steady.spread.avg_fps));
     }
 
     #[test]

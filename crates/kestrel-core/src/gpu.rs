@@ -87,6 +87,13 @@ pub fn is_hybrid(gpus: &[GpuInfo]) -> bool {
     real(gpus).any(|g| g.is_integrated) && real(gpus).any(|g| !g.is_integrated)
 }
 
+/// How many graphics chips are real hardware: integrated and discrete ones count, the software adapters (Parsec, remote
+/// desktop, the Microsoft Basic Display Adapter) don't. Windows has a graphics chip to choose between when this is two or
+/// more.
+pub fn hardware_gpu_count(gpus: &[GpuInfo]) -> usize {
+    real(gpus).count()
+}
+
 /// Windows driver version "32.0.16.1074" → NVIDIA's "610.74".
 pub fn nvidia_version(windows_version: &str) -> Option<String> {
     let parts: Vec<&str> = windows_version.trim().split('.').collect();
@@ -305,6 +312,43 @@ mod tests {
             None,
         )];
         assert!(main_gpu(&only_virtual).is_none());
+    }
+
+    #[test]
+    fn hardware_gpus_are_counted_without_the_virtual_ones() {
+        let nvidia = gpu(
+            "NVIDIA GeForce RTX 3060 Ti",
+            GpuVendor::Nvidia,
+            false,
+            Some(8192),
+        );
+        let intel = gpu(
+            "Intel(R) UHD Graphics 750",
+            GpuVendor::Intel,
+            true,
+            Some(128),
+        );
+        let parsec = gpu(
+            "Parsec Virtual Display Adapter",
+            GpuVendor::Virtual,
+            false,
+            None,
+        );
+        let basic = gpu(
+            "Microsoft Basic Display Adapter",
+            GpuVendor::Virtual,
+            false,
+            None,
+        );
+
+        assert_eq!(hardware_gpu_count(&[]), 0);
+        assert_eq!(hardware_gpu_count(&[parsec.clone(), basic.clone()]), 0);
+        // The owner's PC: one card and a Parsec adapter that only exists in software.
+        assert_eq!(hardware_gpu_count(&[parsec.clone(), nvidia.clone()]), 1);
+        assert_eq!(hardware_gpu_count(&[basic, intel.clone()]), 1);
+        // Integrated graphics are hardware: a laptop with both has a choice to make.
+        assert_eq!(hardware_gpu_count(&[intel.clone(), nvidia.clone()]), 2);
+        assert_eq!(hardware_gpu_count(&[nvidia.clone(), parsec, nvidia]), 2);
     }
 
     #[test]

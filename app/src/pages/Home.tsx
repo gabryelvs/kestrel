@@ -1,6 +1,6 @@
 import { IconRefresh } from '@tabler/icons-react';
 import { openLink } from '../api/client';
-import type { BiosTopic, Report } from '../api/types';
+import type { BiosTopic, Report, TweakId } from '../api/types';
 import { CopyDiagnostics } from '../components/CopyDiagnostics';
 import { HardwarePanel } from '../components/HardwarePanel';
 import { LastBenchmark } from '../components/LastBenchmark';
@@ -10,12 +10,18 @@ import { ScoreCard } from '../components/ScoreCard';
 import type { Tab } from '../components/TitleBar';
 import { strings } from '../strings';
 
-type Props = { report: Report; onTab: (tab: Tab) => void; onGuide: (topic: BiosTopic) => void; onRescan: () => void };
+type Props = {
+  report: Report;
+  onTab: (tab: Tab) => void;
+  onGuide: (topic: BiosTopic) => void;
+  onTweak: (tweak: TweakId) => void;
+  onRescan: () => void;
+};
 
-export function Home({ report, onTab, onGuide, onRescan }: Props) {
+export function Home({ report, onTab, onGuide, onTweak, onRescan }: Props) {
   return (
     <div className="home">
-      <ScoreCard report={report} onTab={onTab} onGuide={onGuide} />
+      <ScoreCard report={report} onTab={onTab} onGuide={onGuide} onTweak={onTweak} />
       <div className="home-side">
         <HardwarePanel snapshot={report.snapshot} onTab={onTab} />
         <LockInCard />

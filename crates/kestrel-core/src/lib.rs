@@ -11,6 +11,7 @@ pub mod report;
 pub mod score;
 pub mod snapshot;
 pub mod topology;
+pub mod tweak_id;
 pub mod valorant;
 
 pub use report::{build_report, Report};
